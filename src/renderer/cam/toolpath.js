@@ -30,8 +30,9 @@ function generateContour(op, entities) {
   const moves = [], warnings = [];
   const p = op.params;
   const toolR = (p.toolDiameter || 6.35) / 2;
+  const flip = p.flipSide ? -1 : 1;
   const offset = p.compensation === 'center' ? 0
-    : (toolR + (p.stockToLeave || 0)) * (p.compensation === 'right' ? 1 : -1);
+    : (toolR + (p.stockToLeave || 0)) * (p.compensation === 'right' ? 1 : -1) * flip;
 
   const selected = getSelectedEntities(entities, op.selectedIds);
   if (!selected.length) return { moves: [], warnings: ['No entities selected'] };
