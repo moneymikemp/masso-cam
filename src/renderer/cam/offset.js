@@ -147,8 +147,8 @@ export function generatePocketOffsets(outerPoints, toolRadius, stepover) {
   const MAX_PASSES = 200;
 
   for (let i = 0; i < MAX_PASSES; i++) {
-    // Shrink by one step (negative distance = inward for CCW polygon)
-    const shrunk = simpleClosedOffset(current, -step);
+    // Shrink by one step (positive distance = inward for CCW polygon)
+    const shrunk = simpleClosedOffset(current, +step);
     
     if (!shrunk || shrunk.length < 4) break;
     

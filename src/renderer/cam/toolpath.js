@@ -31,7 +31,7 @@ function generateContour(op, entities) {
   const p = op.params;
   const toolR = (p.toolDiameter || 6.35) / 2;
   const offset = p.compensation === 'center' ? 0
-    : (toolR + (p.stockToLeave || 0)) * (p.compensation === 'right' ? -1 : 1);
+    : (toolR + (p.stockToLeave || 0)) * (p.compensation === 'right' ? 1 : -1);
 
   const selected = getSelectedEntities(entities, op.selectedIds);
   if (!selected.length) return { moves: [], warnings: ['No entities selected'] };
@@ -104,7 +104,7 @@ function generatePocket(op, entities) {
 
     for (const z of passes) {
       // First pass: boundary offset (tool radius inward + finish allowance)
-      const boundaryOffset = -(toolR + (p.finishPass ? (p.finishAllowance || 0.2) : 0));
+      const boundaryOffset = +(toolR + (p.finishPass ? (p.finishAllowance || 0.2) : 0));
       const boundaryOffsets = offsetPolyline(profile, boundaryOffset, true);
       const boundary = boundaryOffsets[0];
 
@@ -141,7 +141,7 @@ function generatePocket(op, entities) {
 
       // Finish pass along boundary
       if (p.finishPass) {
-        const finOffset = -toolR;
+        const finOffset = +toolR;
         const finBoundary = offsetPolyline(profile, finOffset, true)[0];
         if (finBoundary && finBoundary.length >= 3) {
           moves.push({ type: 'rapid', x: finBoundary[0].x, y: finBoundary[0].y, z: safeZ });
