@@ -2,6 +2,7 @@
   "name": "masso-cam",
   "version": "1.0.0",
   "description": "2.5D CAM software for Masso G3 CNC router",
+  "author": "MassoCAM",
   "main": "src/main/main.js",
   "scripts": {
     "start": "concurrently \"npm run dev:renderer\" \"wait-on http://localhost:3000 && npm run dev:electron\"",
@@ -15,7 +16,6 @@
     "better-sqlite3": "^9.4.3",
     "dxf-parser": "^1.1.2",
     "electron-store": "^8.1.0",
-    "martinez-polygon-clipping": "^0.7.3",
     "react": "^18.2.0",
     "react-dom": "^18.2.0",
     "react-scripts": "5.0.1",
@@ -38,16 +38,19 @@
     "files": [
       "build/**/*",
       "src/main/**/*",
-      "node_modules/**/*"
+      "node_modules/**/*",
+      "package.json"
     ],
+    "extraMetadata": {
+      "main": "src/main/main.js"
+    },
     "win": {
       "target": [
         {
           "target": "nsis",
           "arch": ["x64"]
         }
-      ],
-      "icon": "assets/icon.ico"
+      ]
     },
     "nsis": {
       "oneClick": false,
@@ -55,13 +58,7 @@
       "createDesktopShortcut": true,
       "createStartMenuShortcut": true,
       "shortcutName": "MassoCAM"
-    },
-    "extraResources": [
-      {
-        "from": "tools/",
-        "to": "tools/"
-      }
-    ]
+    }
   },
   "homepage": "./"
 }
