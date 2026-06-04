@@ -1,0 +1,67 @@
+{
+  "name": "masso-cam",
+  "version": "1.0.0",
+  "description": "2.5D CAM software for Masso G3 CNC router",
+  "main": "src/main/main.js",
+  "scripts": {
+    "start": "concurrently \"npm run dev:renderer\" \"wait-on http://localhost:3000 && npm run dev:electron\"",
+    "dev:renderer": "cross-env BROWSER=none react-scripts start",
+    "dev:electron": "cross-env NODE_ENV=development electron .",
+    "build:renderer": "react-scripts build",
+    "build:electron": "electron-builder --win --x64",
+    "build": "npm run build:renderer && npm run build:electron"
+  },
+  "dependencies": {
+    "better-sqlite3": "^9.4.3",
+    "dxf-parser": "^1.1.2",
+    "electron-store": "^8.1.0",
+    "martinez-polygon-clipping": "^0.7.3",
+    "react": "^18.2.0",
+    "react-dom": "^18.2.0",
+    "react-scripts": "5.0.1",
+    "clipper-lib": "^6.4.2",
+    "uuid": "^9.0.0"
+  },
+  "devDependencies": {
+    "concurrently": "^8.2.2",
+    "cross-env": "^7.0.3",
+    "electron": "^29.0.0",
+    "electron-builder": "^24.9.1",
+    "wait-on": "^7.2.0"
+  },
+  "build": {
+    "appId": "com.massocam.app",
+    "productName": "MassoCAM",
+    "directories": {
+      "output": "dist"
+    },
+    "files": [
+      "build/**/*",
+      "src/main/**/*",
+      "node_modules/**/*"
+    ],
+    "win": {
+      "target": [
+        {
+          "target": "nsis",
+          "arch": ["x64"]
+        }
+      ],
+      "icon": "assets/icon.ico"
+    },
+    "nsis": {
+      "oneClick": false,
+      "allowToChangeInstallationDirectory": true,
+      "createDesktopShortcut": true,
+      "createStartMenuShortcut": true,
+      "shortcutName": "MassoCAM"
+    },
+    "extraResources": [
+      {
+        "from": "tools/",
+        "to": "tools/"
+      }
+    ]
+  },
+  "homepage": "./"
+}

@@ -1,0 +1,41 @@
+const { contextBridge, ipcRenderer } = require('electron');
+
+contextBridge.exposeInMainWorld('electron', {
+  // File dialogs
+  openDxf: () => ipcRenderer.invoke('dialog-open-dxf'),
+  saveGcode: (name) => ipcRenderer.invoke('dialog-save-gcode', name),
+  writeFile: (path, content) => ipcRenderer.invoke('write-file', path, content),
+  openProject: () => ipcRenderer.invoke('dialog-open-project'),
+  saveProject: (path) => ipcRenderer.invoke('dialog-save-project', path),
+
+  // Tool library
+  getTools: () => ipcRenderer.invoke('db-get-tools'),
+  saveTool: (tool) => ipcRenderer.invoke('db-save-tool', tool),
+  deleteTool: (id) => ipcRenderer.invoke('db-delete-tool', id),
+
+  // Settings store
+  storeGet: (key) => ipcRenderer.invoke('store-get', key),
+  storeSet: (key, val) => ipcRenderer.invoke('store-set', key, val),
+
+  // Menu events
+  onMenu: (callback) => {
+    const events = [
+      'menu-new-project', 'menu-open-project', 'menu-save-project', 'menu-save-project-as',
+      'menu-import-dxf', 'menu-export-gcode', 'menu-undo', 'menu-redo',
+      'menu-select-all', 'menu-delete-selected', 'menu-zoom-fit', 'menu-zoom-in',
+      'menu-zoom-out', 'menu-toggle-toolpaths', 'menu-toggle-rapids',
+      'menu-machine-setup', 'menu-post-settings', 'menu-tool-library', 'menu-about'
+    ];
+    const handlers = {};
+    for (const event of events) {
+      const handler = (_, ...args) => callback(event, ...args);
+      ipcRenderer.on(event, handler);
+      handlers[event] = handler;
+    }
+    return () => {
+      for (const [event, handler] of Object.entries(handlers)) {
+        ipcRenderer.removeListener(event, handler);
+      }
+    };
+  }
+});
