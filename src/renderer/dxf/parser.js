@@ -122,15 +122,23 @@ function extractGeometry(dxf) {
       console.log('  full entity dump:', JSON.stringify(entity, null, 2));
     }
 
-    if (entity.type === 'ARC' && !loggedArc) {
+    if (entity.type === 'LINE' && !loggedArc) {
+      // Borrow the loggedArc flag as "loggedLine" — we only need one LINE sample
       loggedArc = true;
+      console.log('[DXF DEBUG] First LINE raw entity:');
+      console.log('  start:', JSON.stringify(entity.start), ' end:', JSON.stringify(entity.end));
+      console.log('  vertices:', JSON.stringify(entity.vertices));
+      console.log('  full entity dump:', JSON.stringify(entity, null, 2));
+    }
+
+    if (entity.type === 'ARC' && !loggedLwpolyline) {
+      // Borrow the loggedLwpolyline flag as "loggedArc"
+      loggedLwpolyline = true;
       console.log('[DXF DEBUG] First ARC raw entity:');
-      console.log('  type:',       entity.type);
       console.log('  center:',     JSON.stringify(entity.center));
       console.log('  radius:',     entity.radius);
-      console.log('  startAngle:', entity.startAngle, '(expect degrees ~0-360)');
-      console.log('  endAngle:',   entity.endAngle,   '(expect degrees ~0-360)');
-      console.log('  center.x:',   entity.center?.x, ' center.y:', entity.center?.y);
+      console.log('  startAngle:', entity.startAngle, '← confirmed RADIANS from dxf-parser');
+      console.log('  endAngle:',   entity.endAngle,   '← confirmed RADIANS from dxf-parser');
       console.log('  full entity dump:', JSON.stringify(entity, null, 2));
     }
     // ── END DEBUG ──────────────────────────────────────────────────────────
@@ -167,9 +175,9 @@ function convertEntity(entity) {
         type: 'arc',
         center: { x: entity.center?.x ?? 0, y: entity.center?.y ?? 0 },
         radius: entity.radius ?? 0,
-        // dxf-parser gives angles in degrees; convert to radians here
-        startAngle: (entity.startAngle ?? 0) * Math.PI / 180,
-        endAngle:   (entity.endAngle   ?? 0) * Math.PI / 180,
+        // dxf-parser already returns angles in radians — use them directly.
+        startAngle: entity.startAngle ?? 0,
+        endAngle:   entity.endAngle   ?? 0,
       };
 
     case 'LWPOLYLINE':
