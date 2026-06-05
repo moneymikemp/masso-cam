@@ -124,11 +124,13 @@ export function polygonArea(points) {
   return Math.abs(area / 2);
 }
 
-// Generate concentric pocket passes by repeatedly shrinking the polygon
-export function generatePocketOffsets(outerPoints, toolRadius, stepover) {
+// Generate concentric pocket passes by repeatedly shrinking the polygon.
+// islands: array of pre-expanded exclusion polygons (tool-radius-offset island boundaries).
+// Any pass with a point inside an island exclusion zone is discarded.
+export function generatePocketOffsets(outerPoints, toolRadius, stepover, islands = []) {
   const passes = [];
   const step = toolRadius * 2 * stepover;
-  
+
   // Remove closing point if present
   let current = [...outerPoints];
   if (current.length > 1) {
@@ -149,20 +151,27 @@ export function generatePocketOffsets(outerPoints, toolRadius, stepover) {
   for (let i = 0; i < MAX_PASSES; i++) {
     // Shrink by one step (positive distance = inward for CCW polygon)
     const shrunk = simpleClosedOffset(current, +step);
-    
+
     if (!shrunk || shrunk.length < 4) break;
-    
+
     const area = polygonArea(shrunk);
-    
+
     // Stop if area is too small or has collapsed
     if (area < step * step * 0.5) break;
     if (area > initialArea * 1.1) break; // Sanity check - area should shrink
-    
+
     // Check for self-intersection collapse by verifying area decreased
     if (i > 0 && area >= polygonArea(current) * 0.98) break;
 
+    // Advance current before the island check so the loop always makes progress
+    current = shrunk.slice(0, -1);
+
+    // Discard this pass if any of its points fall inside an island exclusion zone
+    if (islands.length > 0 && shrunk.some(pt => islands.some(isl => pointInPolygon(pt, isl)))) {
+      continue;
+    }
+
     passes.push([...shrunk]);
-    current = shrunk.slice(0, -1); // Remove closing point for next iteration
   }
 
   return passes;

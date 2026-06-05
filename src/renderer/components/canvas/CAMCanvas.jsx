@@ -14,6 +14,8 @@ const COLORS = {
   toolpathRapid: '#ff4444',
   toolpathPlunge: '#ff8800',
   origin: '#ff4444',
+  stockFill: 'rgba(180, 140, 60, 0.06)',
+  stockBorder: 'rgba(200, 160, 80, 0.45)',
 };
 
 export default function CAMCanvas() {
@@ -23,7 +25,7 @@ export default function CAMCanvas() {
   const [panStart, setPanStart] = useState({ x: 0, y: 0 });
   const [mousePos, setMousePos] = useState({ x: 0, y: 0 });
 
-  const { viewport, entities, layers, operations, selectedEntityIds, hoveredEntityId, showToolpaths, showRapids, bounds } = state;
+  const { viewport, entities, layers, operations, selectedEntityIds, hoveredEntityId, showToolpaths, showRapids, bounds, stockConfig } = state;
 
   // World to canvas
   const w2c = useCallback((x, y) => {
@@ -88,6 +90,7 @@ export default function CAMCanvas() {
 
     drawGrid(ctx);
     drawOrigin(ctx);
+    drawStock(ctx);
     drawEntities(ctx);
     if (showToolpaths) drawToolpaths(ctx);
     drawMouseCoords(ctx);
@@ -134,6 +137,24 @@ export default function CAMCanvas() {
     ctx.beginPath(); ctx.moveTo(o.x, o.y - size); ctx.lineTo(o.x, o.y + size); ctx.stroke();
     ctx.strokeStyle = '#44ff44';
     ctx.beginPath(); ctx.moveTo(o.x - size, o.y); ctx.lineTo(o.x + size, o.y); ctx.stroke();
+  }
+
+  function drawStock(ctx) {
+    if (!stockConfig || stockConfig.width <= 0 || stockConfig.length <= 0) return;
+    const xOff = (stockConfig.datum[1] === 'l' ? 0 : stockConfig.datum[1] === 'c' ? 0.5 : 1) * stockConfig.width;
+    const yOff = (stockConfig.datum[0] === 'b' ? 0 : stockConfig.datum[0] === 'm' ? 0.5 : 1) * stockConfig.length;
+    const minX = -xOff, maxX = stockConfig.width - xOff;
+    const minY = -yOff, maxY = stockConfig.length - yOff;
+    const tl = w2c(minX, maxY);
+    const br = w2c(maxX, minY);
+    const w = br.x - tl.x, h = br.y - tl.y;
+    ctx.fillStyle = COLORS.stockFill;
+    ctx.fillRect(tl.x, tl.y, w, h);
+    ctx.strokeStyle = COLORS.stockBorder;
+    ctx.lineWidth = 1;
+    ctx.setLineDash([6, 4]);
+    ctx.strokeRect(tl.x, tl.y, w, h);
+    ctx.setLineDash([]);
   }
 
   function drawEntities(ctx) {
@@ -244,7 +265,7 @@ export default function CAMCanvas() {
     ctx.fillText(`X: ${world.x.toFixed(3)}  Y: ${world.y.toFixed(3)}`, 14, ctx.canvas.height - 14);
   }
 
-  useEffect(() => { draw(); }, [entities, layers, operations, viewport, selectedEntityIds, hoveredEntityId, showToolpaths, showRapids, mousePos]);
+  useEffect(() => { draw(); }, [entities, layers, operations, viewport, selectedEntityIds, hoveredEntityId, showToolpaths, showRapids, mousePos, stockConfig]);
 
   // Mouse events
   const onMouseDown = useCallback((e) => {

@@ -5,6 +5,7 @@ import OperationsPanel from './components/panels/OperationsPanel';
 import ToolLibraryPanel from './components/panels/ToolLibraryPanel';
 import LayersPanel from './components/panels/LayersPanel';
 import GcodePanel from './components/panels/GcodePanel';
+import StockPanel from './components/panels/StockPanel';
 import { parseDxf, getBounds } from './dxf/parser';
 import { generateGcode } from './gcode/postprocessor';
 
@@ -159,7 +160,9 @@ function AboutModal({ onClose }) {
           DXF Import: R12 — 2024
         </div>
         <div style={{ fontSize:10, color:'#444466', marginBottom:16 }}>
-          Built with Electron + React
+          Built with Electron + React<br/>
+          Developed by Mike Parnell<br/>
+          A DMD Product
         </div>
         <button style={{ ...MS.btn, ...MS.btnPrimary, width:'100%' }} onClick={onClose}>Close</button>
       </div>
@@ -331,7 +334,7 @@ export default function App() {
         <div style={S.canvas}><CAMCanvas /></div>
         <div style={S.rightPanel}>
           <div style={S.tabBar}>
-            {[['operations','Ops'],['tools','Tools'],['gcode','G-code']].map(([tab, label]) => (
+            {[['operations','Ops'],['tools','Tools'],['stock','Stock'],['gcode','G-code']].map(([tab, label]) => (
               <div key={tab} style={S.tab(activePanelTab === tab)} onClick={() => dispatch({ type: 'SET_PANEL_TAB', payload: tab })}>{label}</div>
             ))}
           </div>
@@ -341,6 +344,7 @@ export default function App() {
           <div style={{ flex:1, overflow:'hidden', display:'flex', flexDirection:'column' }}>
             {activePanelTab === 'operations' && <OperationsPanel />}
             {activePanelTab === 'tools'      && <ToolLibraryPanel />}
+            {activePanelTab === 'stock'      && <StockPanel />}
             {activePanelTab === 'gcode'      && <GcodePanel />}
           </div>
         </div>

@@ -26,6 +26,15 @@ const initialState = {
   tools: [],
   selectedToolId: null,
 
+  // Stock
+  stockConfig: {
+    width: 200,
+    length: 200,
+    thickness: 19,
+    datum: 'bl',
+    topZ: 0,
+  },
+
   // Machine / post config
   machineConfig: {
     name: 'My Masso G3',
@@ -172,6 +181,7 @@ function reducer(state, action) {
     // Machine
     case 'SET_MACHINE_CONFIG': return { ...state, machineConfig: { ...state.machineConfig, ...action.payload }, dirty: true };
     case 'SET_POST_CONFIG':    return { ...state, postConfig: { ...state.postConfig, ...action.payload }, dirty: true };
+    case 'SET_STOCK_CONFIG':   return { ...state, stockConfig: { ...state.stockConfig, ...action.payload }, dirty: true };
 
     // Viewport
     case 'SET_VIEWPORT': return { ...state, viewport: { ...state.viewport, ...action.payload } };
@@ -197,6 +207,7 @@ function reducer(state, action) {
         operations:    p.operations || [],
         postConfig:    p.postConfig || state.postConfig,
         machineConfig: p.machineConfig || state.machineConfig,
+        stockConfig:   p.stockConfig || state.stockConfig,
         gcodeOutput:   '',
         selectedEntityIds: [],
         selectedOperationId: null,
@@ -219,6 +230,7 @@ export function AppProvider({ children }) {
     operations: state.operations,
     postConfig: state.postConfig,
     machineConfig: state.machineConfig,
+    stockConfig: state.stockConfig,
   }), [state]);
 
   return (

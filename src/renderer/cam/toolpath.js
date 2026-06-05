@@ -88,76 +88,87 @@ function generatePocket(op, entities) {
   const selected = getSelectedEntities(entities, op.selectedIds);
   if (!selected.length) return { moves: [], warnings: ['No entities selected'] };
 
-  for (const entity of selected) {
-    const profile = entityToProfile(entity);
-    if (!profile || profile.length < 3) {
-      warnings.push('Entity needs at least 3 points for pocket');
-      continue;
-    }
+  // Build a profile for every selected entity; keep those with ≥ 3 points
+  const profiles = selected
+    .map(e => entityToProfile(e))
+    .filter(prof => prof && prof.length >= 3);
 
-    const area = polygonArea(profile);
-    if (area < toolR * toolR * Math.PI) {
-      warnings.push(`Pocket too small for tool diameter ${toolDia}mm`);
-      continue;
-    }
+  if (!profiles.length) return { moves: [], warnings: ['No valid closed entities selected'] };
 
-    const passes = buildZPasses(topZ, p.totalDepth || 10, p.depthPerPass || 3);
+  // Largest polygon = outer boundary; anything smaller inside it = island
+  profiles.sort((a, b) => polygonArea(b) - polygonArea(a));
+  const outerProfile = profiles[0];
+  const islandProfiles = profiles.slice(1);
 
-    for (const z of passes) {
-      // First pass: boundary offset (tool radius inward + finish allowance)
-      const boundaryOffset = +(toolR + (p.finishPass ? (p.finishAllowance || 0.2) : 0));
-      const boundaryOffsets = offsetPolyline(profile, boundaryOffset, true);
-      const boundary = boundaryOffsets[0];
-
-      if (!boundary || boundary.length < 4 || polygonArea(boundary) < toolR * toolR) {
-        warnings.push('Shape too small for pocket after tool offset');
-        continue;
-      }
-
-      // Generate concentric clearing passes
-      const clearPasses = generatePocketOffsets(boundary, toolR, stepover);
-
-      if (clearPasses.length === 0) {
-        warnings.push('No clearing passes generated - pocket may be too small');
-      }
-
-      // Sort: outside-in (default) or inside-out
-      const sortedPasses = p.startFromCenter ? [...clearPasses].reverse() : clearPasses;
-
-      if (sortedPasses.length > 0) {
-        const startPt = sortedPasses[0][0];
-        moves.push({ type: 'rapid', x: startPt.x, y: startPt.y, z: safeZ });
-        moves.push({ type: 'feed', x: startPt.x, y: startPt.y, z, f: plungeRate });
-
-        for (const pass of sortedPasses) {
-          if (!pass || pass.length < 2) continue;
-          // Rapid to start of this pass at cutting height (small lift)
-          moves.push({ type: 'rapid', x: pass[0].x, y: pass[0].y, z: z + 0.5 });
-          moves.push({ type: 'feed', x: pass[0].x, y: pass[0].y, z, f: plungeRate });
-          for (let i = 1; i < pass.length; i++) {
-            moves.push({ type: 'feed', x: pass[i].x, y: pass[i].y, z, f: feedRate });
-          }
-        }
-      }
-
-      // Finish pass along boundary
-      if (p.finishPass) {
-        const finOffset = +toolR;
-        const finBoundary = offsetPolyline(profile, finOffset, true)[0];
-        if (finBoundary && finBoundary.length >= 3) {
-          moves.push({ type: 'rapid', x: finBoundary[0].x, y: finBoundary[0].y, z: safeZ });
-          moves.push({ type: 'feed', x: finBoundary[0].x, y: finBoundary[0].y, z, f: plungeRate });
-          for (let i = 1; i < finBoundary.length; i++) {
-            moves.push({ type: 'feed', x: finBoundary[i].x, y: finBoundary[i].y, z, f: feedRate * 0.7 });
-          }
-          moves.push({ type: 'feed', x: finBoundary[0].x, y: finBoundary[0].y, z, f: feedRate * 0.7 });
-        }
-      }
-    }
-
-    moves.push({ type: 'rapid', x: profile[0].x, y: profile[0].y, z: safeZ });
+  if (islandProfiles.length > 0) {
+    warnings.push(`${islandProfiles.length} island(s) detected`);
   }
 
+  if (polygonArea(outerProfile) < toolR * toolR * Math.PI) {
+    warnings.push(`Pocket too small for tool diameter ${toolDia}mm`);
+    return { moves, warnings };
+  }
+
+  // Expand each island outward by toolR to get the exclusion zone the tool
+  // centre must stay outside of.  For a CCW polygon positive offset = inward,
+  // so expand outward with -toolR (after normalising to CCW).
+  const islandExclusions = islandProfiles.map(island => {
+    const ccw = isClockwise(island) ? [...island].reverse() : island;
+    const expanded = offsetPolyline(ccw, -toolR, true)[0];
+    return expanded && expanded.length >= 3 ? expanded : ccw;
+  });
+
+  const zPasses = buildZPasses(topZ, p.totalDepth || 10, p.depthPerPass || 3);
+
+  for (const z of zPasses) {
+    // Inset outer boundary by toolR (+ finish allowance when finishing)
+    const boundaryOffset = +(toolR + (p.finishPass ? (p.finishAllowance || 0.2) : 0));
+    const boundary = offsetPolyline(outerProfile, boundaryOffset, true)[0];
+
+    if (!boundary || boundary.length < 4 || polygonArea(boundary) < toolR * toolR) {
+      warnings.push('Shape too small for pocket after tool offset');
+      continue;
+    }
+
+    // Generate concentric clearing passes, skipping any that enter an island
+    const clearPasses = generatePocketOffsets(boundary, toolR, stepover, islandExclusions);
+
+    if (clearPasses.length === 0 && islandExclusions.length === 0) {
+      warnings.push('No clearing passes generated - pocket may be too small');
+    }
+
+    const sortedPasses = p.startFromCenter ? [...clearPasses].reverse() : clearPasses;
+
+    if (sortedPasses.length > 0) {
+      const startPt = sortedPasses[0][0];
+      moves.push({ type: 'rapid', x: startPt.x, y: startPt.y, z: safeZ });
+      moves.push({ type: 'feed', x: startPt.x, y: startPt.y, z, f: plungeRate });
+
+      for (const pass of sortedPasses) {
+        if (!pass || pass.length < 2) continue;
+        moves.push({ type: 'rapid', x: pass[0].x, y: pass[0].y, z: z + 0.5 });
+        moves.push({ type: 'feed', x: pass[0].x, y: pass[0].y, z, f: plungeRate });
+        for (let i = 1; i < pass.length; i++) {
+          moves.push({ type: 'feed', x: pass[i].x, y: pass[i].y, z, f: feedRate });
+        }
+      }
+    }
+
+    // Finish pass along the outer boundary wall
+    if (p.finishPass) {
+      const finBoundary = offsetPolyline(outerProfile, +toolR, true)[0];
+      if (finBoundary && finBoundary.length >= 3) {
+        moves.push({ type: 'rapid', x: finBoundary[0].x, y: finBoundary[0].y, z: safeZ });
+        moves.push({ type: 'feed', x: finBoundary[0].x, y: finBoundary[0].y, z, f: plungeRate });
+        for (let i = 1; i < finBoundary.length; i++) {
+          moves.push({ type: 'feed', x: finBoundary[i].x, y: finBoundary[i].y, z, f: feedRate * 0.7 });
+        }
+        moves.push({ type: 'feed', x: finBoundary[0].x, y: finBoundary[0].y, z, f: feedRate * 0.7 });
+      }
+    }
+  }
+
+  moves.push({ type: 'rapid', x: outerProfile[0].x, y: outerProfile[0].y, z: safeZ });
   return { moves, warnings };
 }
 
