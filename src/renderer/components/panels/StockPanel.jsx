@@ -162,7 +162,7 @@ export default function StockPanel() {
   // Compute stock bounds in world space for the info display
   const xOff = getXOffset(stockConfig.datum) * stockConfig.width;
   const yOff = getYOffset(stockConfig.datum) * stockConfig.length;
-  const bounds = {
+  const stockBounds = {
     minX: -xOff,
     maxX: stockConfig.width - xOff,
     minY: -yOff,
@@ -243,8 +243,8 @@ export default function StockPanel() {
         </div>
 
         <div style={S.infoBox}>
-          <div>X: <span style={S.infoVal}>{fmt(bounds.minX)}</span> → <span style={S.infoVal}>{fmt(bounds.maxX)}</span> {distUnit}</div>
-          <div>Y: <span style={S.infoVal}>{fmt(bounds.minY)}</span> → <span style={S.infoVal}>{fmt(bounds.maxY)}</span> {distUnit}</div>
+          <div>X: <span style={S.infoVal}>{fmt(stockBounds.minX)}</span> → <span style={S.infoVal}>{fmt(stockBounds.maxX)}</span> {distUnit}</div>
+          <div>Y: <span style={S.infoVal}>{fmt(stockBounds.minY)}</span> → <span style={S.infoVal}>{fmt(stockBounds.maxY)}</span> {distUnit}</div>
           <div>Z: <span style={S.infoVal}>{fmt(stockConfig.topZ - stockConfig.thickness)}</span> → <span style={S.infoVal}>{fmt(stockConfig.topZ)}</span> {distUnit}</div>
         </div>
 
