@@ -507,8 +507,10 @@ function generateTaperedInlay(op, entities) {
   const topZ     = p.topZ ?? 0;
   const depth    = Math.abs(p.pocketDepth || 5);
   const safeZ    = p.safeZ ?? 10;
-  // Guard against zero taper (would cause division by zero for plugOffset)
-  const taperRad = Math.max(1, p.taperAngle || 10) * Math.PI / 180;
+  // p.taperAngle is the full included angle shown in the UI (e.g. 10°).
+  // All geometry calculations need the half-angle (axis → cutting edge).
+  // Guard at 0.5° half-angle to prevent tan() blowing up for near-zero tapers.
+  const taperRad = Math.max(0.5, (p.taperAngle || 10) / 2) * Math.PI / 180;
   // Raising the plug's Z reference by this amount makes the plug fractionally
   // smaller — it engages the angled pocket walls at a slightly higher position,
   // leaving a fitTolerance gap all around the perimeter.
@@ -569,47 +571,74 @@ function buildTaperTrace(entities, topZ, depth, safeZ, feedRate, plungeRate) {
   return moves;
 }
 
-// Clear the interior with an endmill.
-// The boundary is inset by (endmillRadius + wallStockToLeave) so the endmill
-// never contacts the angled taper walls.
-// wallStockToLeave = depth × tan(taperAngle) + safetyMargin
+// Clear the material between the outer taper wall and any island taper walls.
+//
+// Wall-stock formula (taperRad is the half-angle):
+//   wallLeave = depth × tan(halfAngle) + safetyMargin
+//
+// The outer boundary is inset by (endmillR + wallLeave) so the endmill centre
+// stays clear of the angled pocket wall.  Each island is outset by the same
+// amount to create an exclusion zone — passes that enter any exclusion zone are
+// discarded by generatePocketOffsets, preventing the endmill from cutting into
+// island taper walls.
+//
+// When multiple entities are selected the largest polygon is the outer boundary
+// and all smaller polygons inside it are treated as islands (mirrors generatePocket).
 function buildInlayCleanup(entities, topZ, depth, safeZ, p, taperRad, warnings) {
-  const moves = [];
+  const moves      = [];
   const endmillR   = (p.endmillDiameter || 3.175) / 2;
-  const wallStock  = depth * Math.tan(taperRad) + (p.safetyMargin || 0.254);
-  const inset      = endmillR + wallStock;
-  const depthPerPass = p.endmillDiameter || 3.175;  // one cutter diameter per pass
-  const zPasses    = buildZPasses(topZ, depth, depthPerPass);
+  const wallLeave  = depth * Math.tan(taperRad) + (p.safetyMargin || 0.254);
+  const inset      = endmillR + wallLeave;
+  const zPasses    = buildZPasses(topZ, depth, p.endmillDiameter || 3.175);
 
-  for (const entity of entities) {
-    const profile = entityToProfile(entity);
-    if (!profile || profile.length < 3) continue;
+  // Build profiles and sort by area: largest = outer boundary, rest = islands
+  const profiles = entities
+    .map(e => entityToProfile(e))
+    .filter(prof => prof && prof.length >= 3);
 
-    const boundary = offsetPolyline(profile, inset, true)[0];
-    if (!boundary || boundary.length < 4 || polygonArea(boundary) < endmillR * endmillR * Math.PI * 0.25) {
-      warnings.push(`Cleanup: contour too small for ⌀${(p.endmillDiameter||3.175).toFixed(2)}mm endmill + wall clearance`);
-      continue;
+  if (!profiles.length) return moves;
+
+  profiles.sort((a, b) => polygonArea(b) - polygonArea(a));
+  const outerProfile   = profiles[0];
+  const islandProfiles = profiles.slice(1);
+
+  // Inset outer boundary — endmill centre must stay ≥ inset from the taper wall
+  const boundary = offsetPolyline(outerProfile, inset, true)[0];
+  if (!boundary || boundary.length < 4 || polygonArea(boundary) < endmillR * endmillR * Math.PI * 0.25) {
+    warnings.push(`Cleanup: outer contour too small for ⌀${(p.endmillDiameter || 3.175).toFixed(2)}mm endmill + wall clearance`);
+    return moves;
+  }
+
+  // Outset each island by inset to create an exclusion zone the endmill must avoid
+  const islandExclusions = islandProfiles.map(island => {
+    const ccw      = isClockwise(island) ? [...island].reverse() : island;
+    const expanded = offsetPolyline(ccw, -inset, true)[0];
+    return (expanded && expanded.length >= 3) ? expanded : ccw;
+  });
+
+  const clearPasses = generatePocketOffsets(boundary, endmillR, 0.45, islandExclusions);
+  if (!clearPasses.length) {
+    if (islandExclusions.length === 0) {
+      warnings.push('Cleanup: no clearing passes — contour may be too small after wall clearance');
     }
+    return moves;
+  }
 
-    const clearPasses = generatePocketOffsets(boundary, endmillR, 0.45);
-    if (!clearPasses.length) continue;
+  const startPt = clearPasses[0][0];
+  moves.push({ type: 'rapid', x: startPt.x, y: startPt.y, z: safeZ });
+  moves.push({ type: 'feed',  x: startPt.x, y: startPt.y, z: zPasses[0], f: p.endmillPlungeRate || 500 });
 
-    const startPt = clearPasses[0][0];
-    moves.push({ type: 'rapid', x: startPt.x, y: startPt.y, z: safeZ });
-    moves.push({ type: 'feed',  x: startPt.x, y: startPt.y, z: zPasses[0], f: p.endmillPlungeRate || 500 });
-
-    for (const z of zPasses) {
-      for (const pass of clearPasses) {
-        if (!pass || pass.length < 2) continue;
-        moves.push({ type: 'rapid', x: pass[0].x, y: pass[0].y, z: z + 0.5 });
-        moves.push({ type: 'feed',  x: pass[0].x, y: pass[0].y, z, f: p.endmillPlungeRate || 500 });
-        for (let i = 1; i < pass.length; i++) {
-          moves.push({ type: 'feed', x: pass[i].x, y: pass[i].y, z, f: p.endmillFeedRate || 1500 });
-        }
+  for (const z of zPasses) {
+    for (const pass of clearPasses) {
+      if (!pass || pass.length < 2) continue;
+      moves.push({ type: 'rapid', x: pass[0].x, y: pass[0].y, z: z + 0.5 });
+      moves.push({ type: 'feed',  x: pass[0].x, y: pass[0].y, z, f: p.endmillPlungeRate || 500 });
+      for (let i = 1; i < pass.length; i++) {
+        moves.push({ type: 'feed', x: pass[i].x, y: pass[i].y, z, f: p.endmillFeedRate || 1500 });
       }
     }
-    moves.push({ type: 'rapid', x: profile[0].x, y: profile[0].y, z: safeZ });
   }
+  moves.push({ type: 'rapid', x: outerProfile[0].x, y: outerProfile[0].y, z: safeZ });
   return moves;
 }
 
