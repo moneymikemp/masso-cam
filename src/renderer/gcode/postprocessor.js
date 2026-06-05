@@ -67,6 +67,7 @@ export function generateGcode(operations, postConfig = {}) {
   emit('');
   emit(`${n()}${cfg.units === 'mm' ? 'G21' : 'G20'}`);
   emit(`${n()}G90 G17 G94`);
+  if (cfg.wcs) emit(`${n()}${cfg.wcs} (Work offset)`);
   // NOTE: No G43/G49/G40 - Masso G3 handles tool offsets internally
 
   if (cfg.programHeader) {

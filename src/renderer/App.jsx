@@ -253,7 +253,7 @@ export default function App() {
       dispatch({ type: 'SET_PANEL_TAB', payload: 'gcode' });
       return;
     }
-    const gcode = generateGcode(enabled, state.postConfig);
+    const gcode = generateGcode(enabled, { ...state.postConfig, wcs: state.stockConfig.wcs });
     dispatch({ type: 'SET_GCODE', payload: gcode });
     dispatch({ type: 'SET_PANEL_TAB', payload: 'gcode' });
     if (window.electron) {

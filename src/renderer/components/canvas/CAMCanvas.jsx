@@ -89,8 +89,8 @@ export default function CAMCanvas() {
     ctx.fillRect(0, 0, canvas.width, canvas.height);
 
     drawGrid(ctx);
-    drawOrigin(ctx);
     drawStock(ctx);
+    drawOrigin(ctx);
     drawEntities(ctx);
     if (showToolpaths) drawToolpaths(ctx);
     drawMouseCoords(ctx);

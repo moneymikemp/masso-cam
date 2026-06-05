@@ -166,6 +166,26 @@ export default function StockPanel() {
           <div>Z: <span style={S.infoVal}>{fmt(stockConfig.topZ - stockConfig.thickness)}</span> → <span style={S.infoVal}>{fmt(stockConfig.topZ)}</span> {distUnit}</div>
         </div>
 
+        <div style={S.section}>WCS / Work Offset</div>
+        <div style={S.row}>
+          <span style={S.label}>Work Offset</span>
+          <select
+            style={{ ...S.input, padding: '2px 4px' }}
+            value={stockConfig.wcs}
+            onChange={e => set('wcs', e.target.value)}
+          >
+            {['G54','G55','G56','G57','G58','G59'].map(g => (
+              <option key={g} value={g}>{g}</option>
+            ))}
+          </select>
+        </div>
+        <div style={{ ...S.infoBox, marginTop: 4 }}>
+          On your Masso, touch off the {DATUM_LABELS[stockConfig.datum].toLowerCase()} of the
+          stock and zero X, Y, and Z in <strong style={{ color: '#8888aa' }}>{stockConfig.wcs}</strong>.
+          The post-processor will output <strong style={{ color: '#8888aa' }}>{stockConfig.wcs}</strong> at
+          the start of the program to activate that offset.
+        </div>
+
       </div>
     </div>
   );

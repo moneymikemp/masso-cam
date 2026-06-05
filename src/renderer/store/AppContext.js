@@ -33,6 +33,7 @@ const initialState = {
     thickness: 19,
     datum: 'bl',
     topZ: 0,
+    wcs: 'G54',
   },
 
   // Machine / post config

@@ -23,7 +23,7 @@ const S = {
 
 export default function GcodePanel() {
   const { state, dispatch } = useApp();
-  const { operations, postConfig, gcodeOutput } = state;
+  const { operations, postConfig, stockConfig, gcodeOutput } = state;
   const [showPost, setShowPost] = useState(false);
 
   function generate() {
@@ -32,7 +32,7 @@ export default function GcodePanel() {
       dispatch({ type: 'SET_STATUS', payload: 'No calculated operations to export' });
       return;
     }
-    const gcode = generateGcode(enabled, postConfig);
+    const gcode = generateGcode(enabled, { ...postConfig, wcs: stockConfig.wcs });
     dispatch({ type: 'SET_GCODE', payload: gcode });
   }
 
