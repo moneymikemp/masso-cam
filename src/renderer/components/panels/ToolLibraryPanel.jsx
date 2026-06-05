@@ -114,7 +114,7 @@ export default function ToolLibraryPanel() {
           <div key={t.id} style={S.row(t.id === selected)} onClick={() => selectTool(t)}>
             <span style={{ fontSize: 12 }}>{typeIcon[t.type] || '⚙'}</span>
             <span style={S.name}>{t.name}</span>
-            <span style={S.dia}>⌀{t.diameter}mm</span>
+            <span style={S.dia}>{t.type === 'tapered' ? `⌀${t.tipDiameter ?? 0}mm tip ${t.taperAngle ?? 0}°` : `⌀${t.diameter}mm`}</span>
             {t.id === selected && (
               <button style={{ ...S.iconBtn, color: '#884444' }} onClick={(e) => deleteTool(t.id, e)}>✕</button>
             )}
@@ -134,6 +134,10 @@ export default function ToolLibraryPanel() {
             </select>
           </div>
           <div style={S.row2}><span style={S.label}>Diameter (mm)</span><input style={S.input} type="number" step="0.01" min="0.1" value={editTool.diameter} onChange={e => setField('diameter', parseFloat(e.target.value) || 0)} /></div>
+          {editTool.type === 'tapered' && <>
+            <div style={S.row2}><span style={S.label}>Tip Dia (mm)</span><input style={S.input} type="number" step="0.01" min="0" value={editTool.tipDiameter ?? 0.5} onChange={e => setField('tipDiameter', parseFloat(e.target.value) || 0)} /></div>
+            <div style={S.row2}><span style={S.label}>Taper Angle (°)</span><input style={S.input} type="number" step="0.5" min="1" max="60" value={editTool.taperAngle ?? 10} onChange={e => setField('taperAngle', parseFloat(e.target.value) || 10)} /></div>
+          </>}
           <div style={S.row2}><span style={S.label}>Flutes</span><input style={S.input} type="number" step="1" min="1" max="8" value={editTool.flutes} onChange={e => setField('flutes', parseInt(e.target.value) || 2)} /></div>
           <div style={S.row2}><span style={S.label}>Material</span><input style={S.input} value={editTool.material} onChange={e => setField('material', e.target.value)} /></div>
           <div style={S.row2}><span style={S.label}>Notes</span><input style={S.input} value={editTool.notes} onChange={e => setField('notes', e.target.value)} /></div>

@@ -14,8 +14,9 @@ const OP_TYPES = [
   { type: 'engrave',  label: 'Engrave',              icon: '✒', desc: 'Follow curves at depth' },
   { type: 'trace',    label: 'Trace',                icon: '〜', desc: 'Trace open curves' },
   { type: 'slot',     label: 'Slot',                 icon: '▭', desc: 'Slot with ramp entry' },
-  { type: 'chamfer',  label: '2D Chamfer',           icon: '◤', desc: 'Chamfer mill along contour' },
-  { type: 'thread',   label: 'Thread',               icon: '⌀', desc: 'Thread milling (helical)' },
+  { type: 'chamfer',      label: '2D Chamfer',    icon: '◤', desc: 'Chamfer mill along contour' },
+  { type: 'thread',       label: 'Thread',        icon: '⌀', desc: 'Thread milling (helical)' },
+  { type: 'taperedinlay', label: 'Tapered Inlay', icon: '◇', desc: '4-pass V-bit inlay — pocket + plug' },
 ];
 
 const S = {

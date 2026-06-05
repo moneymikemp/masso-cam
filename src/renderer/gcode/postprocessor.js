@@ -111,65 +111,90 @@ export function generateGcode(operations, postConfig = {}) {
     if (cfg.coolant === 'flood') emit(`${n()}M8`);
     else if (cfg.coolant === 'mist') emit(`${n()}M7`);
 
-    // Moves
-    modalG = null;
-    currentFeed = 0;
-
-    for (const move of toolpath.moves) {
-      switch (move.type) {
-
-        case 'rapid': {
-          const parts = ['G0'];
-          if (move.x !== undefined) parts.push(`X${fmt(move.x)}`);
-          if (move.y !== undefined) parts.push(`Y${fmt(move.y)}`);
-          if (move.z !== undefined) parts.push(`Z${fmt(move.z)}`);
-          emit(`${n()}${parts.join(' ')}`);
-          modalG = 'G0';
-          break;
-        }
-
-        case 'feed': {
-          const parts = [];
-          if (modalG !== 'G1') { parts.push('G1'); modalG = 'G1'; }
-          if (move.x !== undefined) parts.push(`X${fmt(move.x)}`);
-          if (move.y !== undefined) parts.push(`Y${fmt(move.y)}`);
-          if (move.z !== undefined) parts.push(`Z${fmt(move.z)}`);
-          if (move.f !== undefined && move.f !== currentFeed) {
-            parts.push(`F${fmtF(move.f)}`);
-            currentFeed = move.f;
+    // ── Move emission helper (shared by regular ops and sub-toolpaths) ──────────
+    function emitMoves(moves) {
+      modalG = null;
+      currentFeed = 0;
+      for (const move of moves) {
+        switch (move.type) {
+          case 'rapid': {
+            const parts = ['G0'];
+            if (move.x !== undefined) parts.push(`X${fmt(move.x)}`);
+            if (move.y !== undefined) parts.push(`Y${fmt(move.y)}`);
+            if (move.z !== undefined) parts.push(`Z${fmt(move.z)}`);
+            emit(`${n()}${parts.join(' ')}`);
+            modalG = 'G0';
+            break;
           }
-          if (parts.length > 0) emit(`${n()}${parts.join(' ')}`);
-          break;
+          case 'feed': {
+            const parts = [];
+            if (modalG !== 'G1') { parts.push('G1'); modalG = 'G1'; }
+            if (move.x !== undefined) parts.push(`X${fmt(move.x)}`);
+            if (move.y !== undefined) parts.push(`Y${fmt(move.y)}`);
+            if (move.z !== undefined) parts.push(`Z${fmt(move.z)}`);
+            if (move.f !== undefined && move.f !== currentFeed) {
+              parts.push(`F${fmtF(move.f)}`);
+              currentFeed = move.f;
+            }
+            if (parts.length > 0) emit(`${n()}${parts.join(' ')}`);
+            break;
+          }
+          case 'arc_cw': {
+            const parts = ['G2'];
+            if (move.x !== undefined) parts.push(`X${fmt(move.x)}`);
+            if (move.y !== undefined) parts.push(`Y${fmt(move.y)}`);
+            if (move.z !== undefined) parts.push(`Z${fmt(move.z)}`);
+            if (move.i !== undefined) parts.push(`I${fmt(move.i)}`);
+            if (move.j !== undefined) parts.push(`J${fmt(move.j)}`);
+            if (move.f !== undefined) parts.push(`F${fmtF(move.f)}`);
+            emit(`${n()}${parts.join(' ')}`);
+            modalG = 'G2'; break;
+          }
+          case 'arc_ccw': {
+            const parts = ['G3'];
+            if (move.x !== undefined) parts.push(`X${fmt(move.x)}`);
+            if (move.y !== undefined) parts.push(`Y${fmt(move.y)}`);
+            if (move.z !== undefined) parts.push(`Z${fmt(move.z)}`);
+            if (move.i !== undefined) parts.push(`I${fmt(move.i)}`);
+            if (move.j !== undefined) parts.push(`J${fmt(move.j)}`);
+            if (move.f !== undefined) parts.push(`F${fmtF(move.f)}`);
+            emit(`${n()}${parts.join(' ')}`);
+            modalG = 'G3'; break;
+          }
+          case 'dwell':
+            emit(`${n()}G4 P${move.p}`);
+            break;
         }
-
-        case 'arc_cw': {
-          const parts = ['G2'];
-          if (move.x !== undefined) parts.push(`X${fmt(move.x)}`);
-          if (move.y !== undefined) parts.push(`Y${fmt(move.y)}`);
-          if (move.z !== undefined) parts.push(`Z${fmt(move.z)}`);
-          if (move.i !== undefined) parts.push(`I${fmt(move.i)}`);
-          if (move.j !== undefined) parts.push(`J${fmt(move.j)}`);
-          if (move.f !== undefined) parts.push(`F${fmtF(move.f)}`);
-          emit(`${n()}${parts.join(' ')}`);
-          modalG = 'G2'; break;
-        }
-
-        case 'arc_ccw': {
-          const parts = ['G3'];
-          if (move.x !== undefined) parts.push(`X${fmt(move.x)}`);
-          if (move.y !== undefined) parts.push(`Y${fmt(move.y)}`);
-          if (move.z !== undefined) parts.push(`Z${fmt(move.z)}`);
-          if (move.i !== undefined) parts.push(`I${fmt(move.i)}`);
-          if (move.j !== undefined) parts.push(`J${fmt(move.j)}`);
-          if (move.f !== undefined) parts.push(`F${fmtF(move.f)}`);
-          emit(`${n()}${parts.join(' ')}`);
-          modalG = 'G3'; break;
-        }
-
-        case 'dwell':
-          emit(`${n()}G4 P${move.p}`);
-          break;
       }
+    }
+
+    if (toolpath.subToolpaths?.length > 0) {
+      // ── Tapered inlay: emit each pass with a manual tool-change stop ──────
+      let activeHint = null;
+      for (const sub of toolpath.subToolpaths) {
+        if (!sub.moves?.length) continue;
+        emit('');
+        emit(`(Pass: ${sub.name})`);
+        if (sub.toolHint !== activeHint) {
+          const toolDesc = sub.toolHint === 'taper'
+            ? `Taper bit — tip ⌀${params?.tipDiameter || 0.5}mm  ${params?.taperAngle || 10}° half-angle`
+            : `Endmill ⌀${params?.endmillDiameter || 3.175}mm`;
+          const subRpm = sub.toolHint === 'taper'
+            ? (params?.taperSpindleRpm || 24000)
+            : (params?.endmillSpindleRpm || 18000);
+          emit(`${n()}G0 Z${fmt(cfg.safeZ)}`);
+          emit(`${n()}M5`);
+          emit(`${n()}M0 (Install: ${toolDesc})`);
+          emit(`${n()}S${subRpm} M3`);
+          if (cfg.spindleDelay > 0) emit(`${n()}G4 P${cfg.spindleDelay * 1000}`);
+          activeHint = sub.toolHint;
+        }
+        if (cfg.coolant === 'flood') emit(`${n()}M8`);
+        else if (cfg.coolant === 'mist') emit(`${n()}M7`);
+        emitMoves(sub.moves);
+      }
+    } else {
+      emitMoves(toolpath.moves);
     }
   }
 

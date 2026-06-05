@@ -18,9 +18,10 @@ export function generateToolpath(operation, entities) {
     case 'engrave':   return generateEngrave(operation, entities);
     case 'trace':     return generateEngrave(operation, entities);
     case 'slot':      return generateSlot(operation, entities);
-    case 'chamfer':   return generateChamfer(operation, entities);
-    case 'thread':    return generateThread(operation, entities);
-    default:          return { moves: [], warnings: ['Unknown operation: ' + type] };
+    case 'chamfer':      return generateChamfer(operation, entities);
+    case 'thread':       return generateThread(operation, entities);
+    case 'taperedinlay': return generateTaperedInlay(operation, entities);
+    default:             return { moves: [], warnings: ['Unknown operation: ' + type] };
   }
 }
 
@@ -493,6 +494,123 @@ function generateThread(op, entities) {
     moves.push({ type: 'rapid', x: center.x, y: center.y, z: p.safeZ || 25 });
   }
   return { moves, warnings: [] };
+}
+
+// ── Tapered Inlay ─────────────────────────────────────────────────────────────
+
+function generateTaperedInlay(op, entities) {
+  const p = op.params;
+  const warnings = [];
+  const selected = getSelectedEntities(entities, op.selectedIds);
+  if (!selected.length) return { moves: [], subToolpaths: [], warnings: ['No entities selected'] };
+
+  const topZ     = p.topZ ?? 0;
+  const depth    = Math.abs(p.pocketDepth || 5);
+  const safeZ    = p.safeZ ?? 10;
+  // Guard against zero taper (would cause division by zero for plugOffset)
+  const taperRad = Math.max(1, p.taperAngle || 10) * Math.PI / 180;
+  // Raising the plug's Z reference by this amount makes the plug fractionally
+  // smaller — it engages the angled pocket walls at a slightly higher position,
+  // leaving a fitTolerance gap all around the perimeter.
+  const plugTopZ = topZ + (p.fitTolerance || 0.127) / Math.tan(taperRad);
+
+  const subToolpaths = [];
+
+  if (p.doPocketTaper !== false) {
+    subToolpaths.push({
+      name: 'Pocket Taper', color: '#ff8844', toolHint: 'taper',
+      moves: buildTaperTrace(selected, topZ, depth, safeZ, p.taperFeedRate || 1000, p.taperPlungeRate || 300),
+    });
+  }
+  if (p.doPocketCleanup !== false) {
+    subToolpaths.push({
+      name: 'Pocket Cleanup', color: '#44ff88', toolHint: 'endmill',
+      moves: buildInlayCleanup(selected, topZ, depth, safeZ, p, taperRad, warnings),
+    });
+  }
+  if (p.doPlugTaper !== false) {
+    subToolpaths.push({
+      name: 'Plug Taper', color: '#ff44bb', toolHint: 'taper',
+      moves: buildTaperTrace(selected, plugTopZ, depth, safeZ, p.taperFeedRate || 1000, p.taperPlungeRate || 300),
+    });
+  }
+  if (p.doPlugCleanup !== false) {
+    subToolpaths.push({
+      name: 'Plug Cleanup', color: '#4499ff', toolHint: 'endmill',
+      moves: buildInlayCleanup(selected, plugTopZ, depth, safeZ, p, taperRad, warnings),
+    });
+  }
+
+  // Flatten all sub-moves into toolpath.moves so the rest of the pipeline
+  // (cycle-time, canvas) can treat this like any other operation.
+  const moves = subToolpaths.flatMap(st => st.moves);
+  return { moves, subToolpaths, warnings };
+}
+
+// Trace selected contours with the taper bit at full depth.
+// The V-bit axis follows the contour line directly — the taper geometry
+// automatically creates the angled pocket/plug walls.
+function buildTaperTrace(entities, topZ, depth, safeZ, feedRate, plungeRate) {
+  const moves = [];
+  const z = topZ - depth;
+  for (const entity of entities) {
+    const profile = entityToProfile(entity);
+    if (!profile || profile.length < 2) continue;
+    moves.push({ type: 'rapid', x: profile[0].x, y: profile[0].y, z: safeZ });
+    moves.push({ type: 'feed',  x: profile[0].x, y: profile[0].y, z, f: plungeRate });
+    for (let i = 1; i < profile.length; i++) {
+      moves.push({ type: 'feed', x: profile[i].x, y: profile[i].y, z, f: feedRate });
+    }
+    if (isEntityClosed(entity)) {
+      moves.push({ type: 'feed', x: profile[0].x, y: profile[0].y, z, f: feedRate });
+    }
+    moves.push({ type: 'rapid', x: profile[0].x, y: profile[0].y, z: safeZ });
+  }
+  return moves;
+}
+
+// Clear the interior with an endmill.
+// The boundary is inset by (endmillRadius + wallStockToLeave) so the endmill
+// never contacts the angled taper walls.
+// wallStockToLeave = depth × tan(taperAngle) + safetyMargin
+function buildInlayCleanup(entities, topZ, depth, safeZ, p, taperRad, warnings) {
+  const moves = [];
+  const endmillR   = (p.endmillDiameter || 3.175) / 2;
+  const wallStock  = depth * Math.tan(taperRad) + (p.safetyMargin || 0.254);
+  const inset      = endmillR + wallStock;
+  const depthPerPass = p.endmillDiameter || 3.175;  // one cutter diameter per pass
+  const zPasses    = buildZPasses(topZ, depth, depthPerPass);
+
+  for (const entity of entities) {
+    const profile = entityToProfile(entity);
+    if (!profile || profile.length < 3) continue;
+
+    const boundary = offsetPolyline(profile, inset, true)[0];
+    if (!boundary || boundary.length < 4 || polygonArea(boundary) < endmillR * endmillR * Math.PI * 0.25) {
+      warnings.push(`Cleanup: contour too small for ⌀${(p.endmillDiameter||3.175).toFixed(2)}mm endmill + wall clearance`);
+      continue;
+    }
+
+    const clearPasses = generatePocketOffsets(boundary, endmillR, 0.45);
+    if (!clearPasses.length) continue;
+
+    const startPt = clearPasses[0][0];
+    moves.push({ type: 'rapid', x: startPt.x, y: startPt.y, z: safeZ });
+    moves.push({ type: 'feed',  x: startPt.x, y: startPt.y, z: zPasses[0], f: p.endmillPlungeRate || 500 });
+
+    for (const z of zPasses) {
+      for (const pass of clearPasses) {
+        if (!pass || pass.length < 2) continue;
+        moves.push({ type: 'rapid', x: pass[0].x, y: pass[0].y, z: z + 0.5 });
+        moves.push({ type: 'feed',  x: pass[0].x, y: pass[0].y, z, f: p.endmillPlungeRate || 500 });
+        for (let i = 1; i < pass.length; i++) {
+          moves.push({ type: 'feed', x: pass[i].x, y: pass[i].y, z, f: p.endmillFeedRate || 1500 });
+        }
+      }
+    }
+    moves.push({ type: 'rapid', x: profile[0].x, y: profile[0].y, z: safeZ });
+  }
+  return moves;
 }
 
 // ── Helpers ───────────────────────────────────────────────────────────────────

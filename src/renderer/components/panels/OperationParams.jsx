@@ -286,6 +286,37 @@ export default function OperationParams({ op, tools, onChange }) {
         <Field label="Feed Rate" unit={feedUnit}><NumInput value={toDisp(p.feedRate ?? 400)} onChange={v => set('feedRate', toMM(v))} step={fStep} /></Field>
         <Field label="Safe Z" unit={distUnit}><NumInput value={toDisp(p.safeZ ?? 25)} onChange={v => set('safeZ', toMM(v))} step={isInch ? 0.05 : 1} /></Field>
       </>}
+
+      {/* ── Tapered Inlay ── */}
+      {op.type === 'taperedinlay' && <>
+        <div style={S.section}>Taper Bit</div>
+        <Field label="Tip Diameter" unit={distUnit}><NumInput value={toDisp(p.tipDiameter ?? 0.5)} onChange={v => set('tipDiameter', toMM(v))} min={0} step={isInch ? 0.001 : 0.01} /></Field>
+        <Field label="Taper Angle" unit="°"><NumInput value={p.taperAngle ?? 10} onChange={v => set('taperAngle', v)} min={1} max={60} step={0.5} /></Field>
+        <Field label="Spindle RPM" unit="rpm"><NumInput value={p.taperSpindleRpm || 24000} onChange={v => set('taperSpindleRpm', v)} step={100} /></Field>
+        <Field label="Feed Rate" unit={feedUnit}><NumInput value={toDisp(p.taperFeedRate ?? 1000)} onChange={v => set('taperFeedRate', toMM(v))} step={isInch ? 1 : 50} /></Field>
+        <Field label="Plunge Rate" unit={feedUnit}><NumInput value={toDisp(p.taperPlungeRate ?? 300)} onChange={v => set('taperPlungeRate', toMM(v))} step={fStep} /></Field>
+
+        <div style={S.section}>Cleanup Endmill</div>
+        <Field label="Diameter" unit={distUnit}><NumInput value={toDisp(p.endmillDiameter ?? 3.175)} onChange={v => set('endmillDiameter', toMM(v))} min={isInch ? 0.01 : 0.25} step={isInch ? 0.001 : 0.01} /></Field>
+        <Field label="Spindle RPM" unit="rpm"><NumInput value={p.endmillSpindleRpm || 18000} onChange={v => set('endmillSpindleRpm', v)} step={100} /></Field>
+        <Field label="Feed Rate" unit={feedUnit}><NumInput value={toDisp(p.endmillFeedRate ?? 1500)} onChange={v => set('endmillFeedRate', toMM(v))} step={isInch ? 2 : 50} /></Field>
+        <Field label="Plunge Rate" unit={feedUnit}><NumInput value={toDisp(p.endmillPlungeRate ?? 500)} onChange={v => set('endmillPlungeRate', toMM(v))} step={fStep} /></Field>
+
+        <div style={S.section}>Depth</div>
+        <Field label="Pocket Depth" unit={distUnit}><NumInput value={toDisp(p.pocketDepth ?? 5)} onChange={v => set('pocketDepth', toMM(v))} min={isInch ? 0.01 : 0.25} step={dStep} /></Field>
+        <Field label="Top of Stock" unit={distUnit}><NumInput value={toDisp(p.topZ ?? 0)} onChange={v => set('topZ', toMM(v))} step={isInch ? 0.02 : 0.5} /></Field>
+        <Field label="Safe Z" unit={distUnit}><NumInput value={toDisp(p.safeZ ?? 10)} onChange={v => set('safeZ', toMM(v))} step={isInch ? 0.05 : 1} /></Field>
+
+        <div style={S.section}>Fit</div>
+        <Field label="Fit Tolerance" unit={distUnit}><NumInput value={toDisp(p.fitTolerance ?? 0.127)} onChange={v => set('fitTolerance', toMM(v))} min={0} step={isInch ? 0.0005 : 0.01} /></Field>
+        <Field label="Wall Safety" unit={distUnit}><NumInput value={toDisp(p.safetyMargin ?? 0.254)} onChange={v => set('safetyMargin', toMM(v))} min={0} step={isInch ? 0.001 : 0.02} /></Field>
+
+        <div style={S.section}>Passes to Generate</div>
+        <CheckField label="Pocket Taper"   value={p.doPocketTaper   !== false} onChange={v => set('doPocketTaper',   v)} />
+        <CheckField label="Pocket Cleanup" value={p.doPocketCleanup !== false} onChange={v => set('doPocketCleanup', v)} />
+        <CheckField label="Plug Taper"     value={p.doPlugTaper     !== false} onChange={v => set('doPlugTaper',     v)} />
+        <CheckField label="Plug Cleanup"   value={p.doPlugCleanup   !== false} onChange={v => set('doPlugCleanup',   v)} />
+      </>}
     </div>
   );
 }

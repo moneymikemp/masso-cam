@@ -215,43 +215,48 @@ export default function CAMCanvas() {
     ctx.stroke();
   }
 
+  function drawMoveList(ctx, moves, cutColor) {
+    let prevX = 0, prevY = 0;
+    for (const move of moves) {
+      const x = move.x ?? prevX;
+      const y = move.y ?? prevY;
+      if (move.type === 'rapid') {
+        if (showRapids) {
+          ctx.strokeStyle = COLORS.toolpathRapid;
+          ctx.lineWidth = 0.7;
+          ctx.setLineDash([4, 4]);
+          ctx.beginPath();
+          const s = w2c(prevX, prevY), e = w2c(x, y);
+          ctx.moveTo(s.x, s.y); ctx.lineTo(e.x, e.y);
+          ctx.stroke();
+          ctx.setLineDash([]);
+        }
+      } else if (move.type === 'feed') {
+        const isPlunge = (x === prevX && y === prevY);
+        ctx.strokeStyle = isPlunge ? COLORS.toolpathPlunge : cutColor;
+        ctx.lineWidth = 1;
+        ctx.setLineDash([]);
+        ctx.beginPath();
+        const s = w2c(prevX, prevY), e = w2c(x, y);
+        ctx.moveTo(s.x, s.y); ctx.lineTo(e.x, e.y);
+        ctx.stroke();
+      }
+      if (move.x !== undefined) prevX = move.x;
+      if (move.y !== undefined) prevY = move.y;
+    }
+  }
+
   function drawToolpaths(ctx) {
     for (const op of operations) {
       if (!op.enabled || !op.toolpath?.moves) continue;
-
-      let prevX = 0, prevY = 0;
-      let cutColor = op.type === 'drill' ? COLORS.toolpathPlunge : COLORS.toolpathCut;
-
-      for (const move of op.toolpath.moves) {
-        const x = move.x ?? prevX;
-        const y = move.y ?? prevY;
-
-        if (move.type === 'rapid') {
-          if (showRapids) {
-            ctx.strokeStyle = COLORS.toolpathRapid;
-            ctx.lineWidth = 0.7;
-            ctx.setLineDash([4, 4]);
-            ctx.beginPath();
-            const s = w2c(prevX, prevY);
-            const e = w2c(x, y);
-            ctx.moveTo(s.x, s.y); ctx.lineTo(e.x, e.y);
-            ctx.stroke();
-            ctx.setLineDash([]);
-          }
-        } else if (move.type === 'feed') {
-          const isPlunge = (x === prevX && y === prevY);
-          ctx.strokeStyle = isPlunge ? COLORS.toolpathPlunge : cutColor;
-          ctx.lineWidth = 1;
-          ctx.setLineDash([]);
-          ctx.beginPath();
-          const s = w2c(prevX, prevY);
-          const e = w2c(x, y);
-          ctx.moveTo(s.x, s.y); ctx.lineTo(e.x, e.y);
-          ctx.stroke();
+      if (op.toolpath.subToolpaths?.length > 0) {
+        // Draw each sub-toolpath in its own colour (tapered inlay etc.)
+        for (const sub of op.toolpath.subToolpaths) {
+          drawMoveList(ctx, sub.moves, sub.color || COLORS.toolpathCut);
         }
-
-        if (move.x !== undefined) prevX = move.x;
-        if (move.y !== undefined) prevY = move.y;
+      } else {
+        const cutColor = op.type === 'drill' ? COLORS.toolpathPlunge : COLORS.toolpathCut;
+        drawMoveList(ctx, op.toolpath.moves, cutColor);
       }
     }
   }

@@ -260,7 +260,18 @@ export function getDefaultParams(type) {
     case 'trace':    return { safeZ: 25, topZ: 0, feedRate: 800, plungeRate: 300, depth: 0.5 };
     case 'slot':     return { ...base, toolDiameter: 6.35, rampEntry: true, rampAngle: 3 };
     case 'chamfer':  return { toolDiameter: 6.35, chamferAngle: 45, chamferWidth: 1.0, topZ: 0, safeZ: 25, feedRate: 800, plungeRate: 300, spindleRpm: 18000, stockToLeave: 0 };
-    case 'thread':   return { safeZ: 25, topZ: 0, feedRate: 400, plungeRate: 200, totalDepth: 15, toolDiameter: 6.35, pitch: 1.25, internal: true, direction: 'right', spindleRpm: 1000 };
+    case 'thread':        return { safeZ: 25, topZ: 0, feedRate: 400, plungeRate: 200, totalDepth: 15, toolDiameter: 6.35, pitch: 1.25, internal: true, direction: 'right', spindleRpm: 1000 };
+    case 'taperedinlay':  return {
+      topZ: 0, safeZ: 10,
+      tipDiameter: 0.5, taperAngle: 10,
+      taperFeedRate: 1000, taperPlungeRate: 300, taperSpindleRpm: 24000,
+      endmillDiameter: 3.175,
+      endmillFeedRate: 1500, endmillPlungeRate: 500, endmillSpindleRpm: 18000,
+      pocketDepth: 5,
+      fitTolerance: 0.127,   // 0.005"
+      safetyMargin: 0.254,   // 0.010"
+      doPocketTaper: true, doPocketCleanup: true, doPlugTaper: true, doPlugCleanup: true,
+    };
     default:         return base;
   }
 }
