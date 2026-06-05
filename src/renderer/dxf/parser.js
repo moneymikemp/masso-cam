@@ -113,17 +113,19 @@ function extractGeometry(dxf) {
       if (entity.type === 'LWPOLYLINE') {
         console.log('[DXF DEBUG] First LWPOLYLINE:');
         console.log('  closed:', entity.closed, ' shape:', entity.shape, ' flags:', entity.flags);
-        if (Array.isArray(entity.vertices) && entity.vertices.length > 0) {
-          const v0 = entity.vertices[0];
-          console.log('  vertex count:', entity.vertices.length);
-          console.log('  vertices[0] typeof:', typeof v0, Array.isArray(v0) ? '(array)' : '');
+        const vv = entity.vertices;
+        if (Array.isArray(vv) && vv.length > 0) {
+          console.log('  vertex count:', vv.length);
+          const v0 = vv[0];
+          console.log('  vertices[0] typeof:', typeof v0, Array.isArray(v0) ? '(ARRAY)' : '(object)');
           console.log('  vertices[0] keys:', v0 != null ? Object.keys(v0) : 'null');
-          console.log('  vertices[0].x:', v0?.x, ' .y:', v0?.y,
+          console.log('  vertices[0].x:', v0?.x, ' .y:', v0?.y, ' .bulge:', v0?.bulge,
                       '  v0[0]:', v0?.[0], ' v0[1]:', v0?.[1]);
-          console.log('  vertices[0] full:', JSON.stringify(v0));
-          console.log('  vertices[1] full:', JSON.stringify(entity.vertices[1]));
+          // Log all vertices so we can see exact coords and bulge values
+          console.log('  ALL VERTICES:');
+          vv.forEach((v, i) => console.log(`    [${i}]`, JSON.stringify(v)));
         } else {
-          console.log('  vertices:', JSON.stringify(entity.vertices));
+          console.log('  vertices:', JSON.stringify(vv));
         }
       }
 
@@ -456,11 +458,21 @@ export function arcToPoints(center, radius, startAngle, endAngle, count = 32) {
 }
 
 export function polylineToPoints(vertices, closed) {
+  // ── DIAGNOSTIC: set true to render all segments as straight lines ──────────
+  // This lets us confirm that vertex x/y positions are correct independently
+  // of the bulge arc conversion.  Set back to false once verified.
+  const SKIP_BULGE = true;
+  // ───────────────────────────────────────────────────────────────────────────
+
   const pts = [];
   for (let i = 0; i < vertices.length; i++) {
     const v = vertices[i];
     pts.push({ x: v.x, y: v.y });
-    if (v.bulge && v.bulge !== 0 && i < vertices.length - 1) {
+
+    // Include the last vertex's bulge when the polyline is closed — it creates
+    // the arc that connects the last vertex back to vertex[0].
+    const hasNext = i < vertices.length - 1 || closed;
+    if (!SKIP_BULGE && v.bulge && v.bulge !== 0 && hasNext) {
       const next = vertices[(i + 1) % vertices.length];
       const bulgePts = bulgeToPts(v, next, v.bulge);
       pts.push(...bulgePts.slice(1, -1));
@@ -471,22 +483,32 @@ export function polylineToPoints(vertices, closed) {
 }
 
 function bulgeToPts(p1, p2, bulge) {
+  // DXF bulge = tan(θ/4) where θ is the included arc angle.
+  // Positive bulge → CCW arc from p1 to p2.
+  // Negative bulge → CW arc from p1 to p2.
   const angle = 4 * Math.atan(Math.abs(bulge));
-  const dist = Math.hypot(p2.x - p1.x, p2.y - p1.y);
-  const r = dist / (2 * Math.sin(angle / 2));
-  const midX = (p1.x + p2.x) / 2;
-  const midY = (p1.y + p2.y) / 2;
-  const dx = p2.x - p1.x;
-  const dy = p2.y - p1.y;
-  const perpX = -dy / dist;
-  const perpY =  dx / dist;
-  const d = Math.sqrt(Math.max(0, r * r - (dist / 2) * (dist / 2)));
+  const dist  = Math.hypot(p2.x - p1.x, p2.y - p1.y);
+  const r     = dist / (2 * Math.sin(angle / 2));
+  const midX  = (p1.x + p2.x) / 2;
+  const midY  = (p1.y + p2.y) / 2;
+  const dx = p2.x - p1.x, dy = p2.y - p1.y;
+  // Left-perpendicular of the chord direction (points to the CCW side)
+  const perpX = -dy / dist, perpY = dx / dist;
+  const d    = Math.sqrt(Math.max(0, r * r - (dist / 2) * (dist / 2)));
+  // Positive bulge: center is on the LEFT of the chord (CCW arc sweeps toward it)
+  // Negative bulge: center is on the RIGHT of the chord (CW arc sweeps away from it)
   const sign = bulge > 0 ? 1 : -1;
-  const cx = midX + sign * d * perpX;
-  const cy = midY + sign * d * perpY;
+  const cx   = midX + sign * d * perpX;
+  const cy   = midY + sign * d * perpY;
   const startAngle = Math.atan2(p1.y - cy, p1.x - cx);
   const endAngle   = Math.atan2(p2.y - cy, p2.x - cx);
-  return arcToPoints({ x: cx, y: cy }, r, startAngle, endAngle, Math.max(4, Math.ceil(angle * 8)));
+  const segs = Math.max(4, Math.ceil(angle * 8));
+  // arcToPoints always sweeps CCW (from start toward end, adding 2π if end < start).
+  // For a CW arc (negative bulge) we swap the angles so the same CCW sweep traces
+  // the equivalent clockwise path from p1 to p2.
+  return bulge > 0
+    ? arcToPoints({ x: cx, y: cy }, r, startAngle, endAngle, segs)
+    : arcToPoints({ x: cx, y: cy }, r, endAngle,   startAngle, segs);
 }
 
 function sampleEllipse(entity, count) {
