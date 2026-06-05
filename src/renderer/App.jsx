@@ -237,10 +237,21 @@ export default function App() {
         });
       }
       dispatch({ type: 'SET_STATUS', payload: 'Parsing DXF...' });
-      const { entities, layers } = parseDxf(content);
+      const { entities, layers, dxfUnits } = parseDxf(content);
       const bounds = getBounds(entities);
       dispatch({ type: 'SET_DXF', payload: { entities, layers, bounds } });
-      dispatch({ type: 'SET_STATUS', payload: `Loaded ${entities.length} entities from ${Object.keys(layers).length} layers` });
+
+      const appUnits = state.postConfig?.units ?? 'mm';
+      let statusMsg;
+      if (dxfUnits !== 'unitless' && dxfUnits !== appUnits) {
+        const dxfLabel = dxfUnits === 'inch' ? 'inches' : 'mm';
+        const appLabel = appUnits === 'inch' ? 'inches' : 'mm';
+        statusMsg = `DXF imported as ${dxfLabel} — your current unit setting is ${appLabel}, coordinates have been converted`;
+      } else {
+        const unitNote = dxfUnits === 'unitless' ? 'unitless' : dxfUnits === 'inch' ? 'inches' : 'mm';
+        statusMsg = `Loaded ${entities.length} entities from ${Object.keys(layers).length} layers (DXF: ${unitNote})`;
+      }
+      dispatch({ type: 'SET_STATUS', payload: statusMsg });
     } catch (err) {
       dispatch({ type: 'SET_STATUS', payload: 'DXF import failed: ' + err.message });
     }

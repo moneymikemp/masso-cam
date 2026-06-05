@@ -1,5 +1,6 @@
 import React from 'react';
 import { useApp } from '../../store/AppContext';
+import { getBounds } from '../../dxf/parser';
 
 const MM_PER_INCH = 25.4;
 
@@ -27,6 +28,11 @@ const S = {
   }),
   infoBox: { background: '#0d0d20', border: '1px solid #1a1a38', borderRadius: 3, padding: '6px 8px', marginTop: 8, fontSize: 10, color: '#555577', lineHeight: 1.7 },
   infoVal: { color: '#8888aa' },
+  actionBtn: (enabled) => ({
+    flex: 1, background: enabled ? '#1a1a3a' : '#111120', border: `1px solid ${enabled ? '#2a2a60' : '#1a1a38'}`,
+    color: enabled ? '#8888cc' : '#333355', borderRadius: 3, padding: '5px 0',
+    cursor: enabled ? 'pointer' : 'default', fontSize: 10, textAlign: 'center',
+  }),
 };
 
 // datum[0] = Y axis: 'b'=front/min-Y  'm'=center  't'=back/max-Y
@@ -52,6 +58,23 @@ function getXOffset(datum) {
 }
 function getYOffset(datum) {
   return datum[0] === 'b' ? 0 : datum[0] === 'm' ? 0.5 : 1;
+}
+
+function applyShift(entities, dx, dy) {
+  return entities.map(e => {
+    switch (e.type) {
+      case 'line':
+        return { ...e, start: { x: e.start.x + dx, y: e.start.y + dy }, end: { x: e.end.x + dx, y: e.end.y + dy } };
+      case 'circle':
+        return { ...e, center: { x: e.center.x + dx, y: e.center.y + dy } };
+      case 'arc':
+        return { ...e, center: { x: e.center.x + dx, y: e.center.y + dy } };
+      case 'polyline':
+        return { ...e, vertices: e.vertices.map(v => ({ ...v, x: v.x + dx, y: v.y + dy })) };
+      default:
+        return e;
+    }
+  });
 }
 
 function NumInput({ value, onChange, min, step = 0.1 }) {
@@ -84,10 +107,51 @@ function NumInput({ value, onChange, min, step = 0.1 }) {
 
 export default function StockPanel() {
   const { state, dispatch } = useApp();
-  const { stockConfig } = state;
+  const { stockConfig, entities, bounds, layers } = state;
   const isInch = state.postConfig?.units === 'inch';
+  const hasGeometry = entities.length > 0 && bounds != null;
 
   const set = (key, val) => dispatch({ type: 'SET_STOCK_CONFIG', payload: { [key]: val } });
+
+  function datumXFrac(d) { return d[1] === 'l' ? 0 : d[1] === 'c' ? 0.5 : 1; }
+  function datumYFrac(d) { return d[0] === 'b' ? 0 : d[0] === 'm' ? 0.5 : 1; }
+
+  function fitStockToPart() {
+    if (!hasGeometry) return;
+    const { minX: gMinX, minY: gMinY, maxX: gMaxX, maxY: gMaxY } = bounds;
+    const gW = gMaxX - gMinX, gH = gMaxY - gMinY;
+    if (gW < 1e-6 || gH < 1e-6) return;
+
+    const newW = gW * 1.1, newL = gH * 1.1;
+    const mX = gW * 0.05, mY = gH * 0.05;  // 5% each side → 10% total margin
+
+    // Shift geometry so the datum-positioned stock surrounds it with equal margins
+    const shiftX = -datumXFrac(stockConfig.datum) * newW + mX - gMinX;
+    const shiftY = -datumYFrac(stockConfig.datum) * newL + mY - gMinY;
+
+    const shifted = applyShift(entities, shiftX, shiftY);
+    dispatch({ type: 'SET_DXF', payload: { entities: shifted, layers, bounds: getBounds(shifted) } });
+    dispatch({ type: 'SET_STOCK_CONFIG', payload: { width: newW, length: newL } });
+  }
+
+  function moveToOrigin() {
+    if (!hasGeometry) return;
+    const { minX: gMinX, minY: gMinY, maxX: gMaxX, maxY: gMaxY } = bounds;
+    const gCX = (gMinX + gMaxX) / 2, gCY = (gMinY + gMaxY) / 2;
+
+    // Shift so the datum-appropriate reference point lands exactly at (0, 0)
+    const refX = stockConfig.datum[1] === 'l' ? gMinX : stockConfig.datum[1] === 'c' ? gCX : gMaxX;
+    const refY = stockConfig.datum[0] === 'b' ? gMinY : stockConfig.datum[0] === 'm' ? gCY : gMaxY;
+
+    const shifted = applyShift(entities, -refX, -refY);
+    const newBounds = getBounds(shifted);
+    dispatch({ type: 'SET_DXF', payload: { entities: shifted, layers, bounds: newBounds } });
+
+    // Size stock to cover shifted geometry with 10 % overhang beyond the datum side
+    const nW = newBounds.maxX - newBounds.minX;
+    const nH = newBounds.maxY - newBounds.minY;
+    dispatch({ type: 'SET_STOCK_CONFIG', payload: { width: nW * 1.1, length: nH * 1.1 } });
+  }
 
   function toDisp(v) { return isInch ? +(v / MM_PER_INCH).toFixed(4) : v; }
   function toMM(v)   { return isInch ? v * MM_PER_INCH : v; }
@@ -113,6 +177,24 @@ export default function StockPanel() {
         <span style={S.headerTitle}>Stock</span>
       </div>
       <div style={S.body}>
+
+        <div style={S.section}>Setup</div>
+        <div style={{ display: 'flex', gap: 4, marginBottom: 6 }}>
+          <button
+            style={S.actionBtn(hasGeometry)}
+            onClick={fitStockToPart}
+            title="Size stock to geometry bounds + 10% margin and centre geometry within stock"
+          >
+            Fit Stock to Part
+          </button>
+          <button
+            style={S.actionBtn(hasGeometry)}
+            onClick={moveToOrigin}
+            title={`Shift geometry so the ${DATUM_LABELS[stockConfig.datum].toLowerCase()} lands at X0 Y0`}
+          >
+            Move to Origin
+          </button>
+        </div>
 
         <div style={S.section}>Dimensions</div>
         <div style={S.row}>

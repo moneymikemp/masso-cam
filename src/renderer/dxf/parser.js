@@ -3,15 +3,64 @@
 
 export function parseDxf(content) {
   try {
-    // Use dxf-parser library (loaded via CDN fallback or npm)
     const DxfParser = window.DxfParser || require('dxf-parser');
     const parser = new DxfParser();
     const dxf = parser.parseSync(content);
-    return extractGeometry(dxf);
+    const insUnits = dxf.header?.$INSUNITS ?? readInsUnitsFromText(content);
+    const dxfUnits = insUnitsToLabel(insUnits);
+    const result = extractGeometry(dxf);
+    if (insUnits === 1) result.entities = scaleEntities(result.entities, 25.4);
+    return { ...result, dxfUnits };
   } catch (err) {
     // Fallback: manual ASCII DXF parser for simple files
-    return parseSimpleDxf(content);
+    const insUnits = readInsUnitsFromText(content);
+    const dxfUnits = insUnitsToLabel(insUnits);
+    const result = parseSimpleDxf(content);
+    if (insUnits === 1) result.entities = scaleEntities(result.entities, 25.4);
+    return { ...result, dxfUnits };
   }
+}
+
+function insUnitsToLabel(insUnits) {
+  if (insUnits === 1) return 'inch';
+  if (insUnits === 4) return 'mm';
+  return 'unitless';
+}
+
+// Scan raw DXF text for the $INSUNITS header variable (group code 70)
+function readInsUnitsFromText(content) {
+  const match = content.match(/^\s*\$INSUNITS\s*$[\r\n]+\s*70\s*[\r\n]+\s*(\d+)/m);
+  return match ? parseInt(match[1], 10) : 0;
+}
+
+// Apply a uniform scale factor to all coordinate values in converted entities.
+// Angles (arc start/end) and bulge values are dimensionless and must not be scaled.
+function scaleEntities(entities, factor) {
+  return entities.map(e => {
+    switch (e.type) {
+      case 'line':
+        return { ...e,
+          start: { x: e.start.x * factor, y: e.start.y * factor },
+          end:   { x: e.end.x   * factor, y: e.end.y   * factor },
+        };
+      case 'circle':
+        return { ...e,
+          center: { x: e.center.x * factor, y: e.center.y * factor },
+          radius: e.radius * factor,
+        };
+      case 'arc':
+        return { ...e,
+          center: { x: e.center.x * factor, y: e.center.y * factor },
+          radius: e.radius * factor,
+        };
+      case 'polyline':
+        return { ...e,
+          vertices: e.vertices.map(v => ({ ...v, x: v.x * factor, y: v.y * factor })),
+        };
+      default:
+        return e;
+    }
+  });
 }
 
 function extractGeometry(dxf) {
