@@ -85,11 +85,15 @@ function extractGeometry(dxf) {
 
   if (!dxf || !dxf.entities) return { layers: {}, entities: [] };
 
-  // Debug flags — log the raw object the first time each problem type is seen
-  let loggedLwpolyline = false;
-  let loggedArc        = false;
+  // Separate first-seen flag per type — previous code shared flags across types
+  // which silently suppressed LWPOLYLINE logging whenever ARC appeared first.
+  const loggedFirst  = {};   // type → true once first-dump has been emitted
+  const rawCounts    = {};   // type → count of raw entities from dxf-parser
+  const droppedByType = {};  // type → count dropped by convertEntity
 
   for (const entity of dxf.entities) {
+    rawCounts[entity.type] = (rawCounts[entity.type] || 0) + 1;
+
     const layer = entity.layer || '0';
     if (!layers[layer]) {
       layers[layer] = {
@@ -102,66 +106,70 @@ function extractGeometry(dxf) {
     }
     layers[layer].entityCount++;
 
-    // ── RAW ENTITY DEBUG ───────────────────────────────────────────────────
-    if (entity.type === 'LWPOLYLINE' && !loggedLwpolyline) {
-      loggedLwpolyline = true;
-      console.log('[DXF DEBUG] First LWPOLYLINE raw entity:');
-      console.log('  type:',     entity.type);
-      console.log('  closed:',   entity.closed);
-      console.log('  shape:',    entity.shape);
-      console.log('  flags:',    entity.flags);
-      console.log('  vertices (raw):', JSON.stringify(entity.vertices));
-      if (Array.isArray(entity.vertices) && entity.vertices.length > 0) {
-        const v0 = entity.vertices[0];
-        console.log('  vertices[0] keys:', Object.keys(v0));
-        console.log('  vertices[0] values:', JSON.stringify(v0));
-        // Probe every likely coordinate property
-        console.log('  vertices[0].x:', v0.x, ' .y:', v0.y,
-          ' [0]:', v0[0], ' [1]:', v0[1]);
+    // ── FIRST-OCCURRENCE DEEP DUMP for the three problem types ────────────
+    if (!loggedFirst[entity.type] && (entity.type === 'LWPOLYLINE' || entity.type === 'LINE' || entity.type === 'ARC')) {
+      loggedFirst[entity.type] = true;
+
+      if (entity.type === 'LWPOLYLINE') {
+        console.log('[DXF DEBUG] First LWPOLYLINE:');
+        console.log('  closed:', entity.closed, ' shape:', entity.shape, ' flags:', entity.flags);
+        if (Array.isArray(entity.vertices) && entity.vertices.length > 0) {
+          const v0 = entity.vertices[0];
+          console.log('  vertex count:', entity.vertices.length);
+          console.log('  vertices[0] typeof:', typeof v0, Array.isArray(v0) ? '(array)' : '');
+          console.log('  vertices[0] keys:', v0 != null ? Object.keys(v0) : 'null');
+          console.log('  vertices[0].x:', v0?.x, ' .y:', v0?.y,
+                      '  v0[0]:', v0?.[0], ' v0[1]:', v0?.[1]);
+          console.log('  vertices[0] full:', JSON.stringify(v0));
+          console.log('  vertices[1] full:', JSON.stringify(entity.vertices[1]));
+        } else {
+          console.log('  vertices:', JSON.stringify(entity.vertices));
+        }
       }
-      console.log('  full entity dump:', JSON.stringify(entity, null, 2));
-    }
 
-    if (entity.type === 'LINE' && !loggedArc) {
-      // Borrow the loggedArc flag as "loggedLine" — we only need one LINE sample
-      loggedArc = true;
-      console.log('[DXF DEBUG] First LINE raw entity:');
-      console.log('  start:', JSON.stringify(entity.start), ' end:', JSON.stringify(entity.end));
-      console.log('  vertices:', JSON.stringify(entity.vertices));
-      console.log('  full entity dump:', JSON.stringify(entity, null, 2));
-    }
+      if (entity.type === 'LINE') {
+        console.log('[DXF DEBUG] First LINE:');
+        console.log('  start:', JSON.stringify(entity.start), ' end:', JSON.stringify(entity.end));
+        console.log('  vertices:', JSON.stringify(entity.vertices));
+      }
 
-    if (entity.type === 'ARC' && !loggedLwpolyline) {
-      // Borrow the loggedLwpolyline flag as "loggedArc"
-      loggedLwpolyline = true;
-      console.log('[DXF DEBUG] First ARC raw entity:');
-      console.log('  center:',     JSON.stringify(entity.center));
-      console.log('  radius:',     entity.radius);
-      console.log('  startAngle:', entity.startAngle, '← confirmed RADIANS from dxf-parser');
-      console.log('  endAngle:',   entity.endAngle,   '← confirmed RADIANS from dxf-parser');
-      console.log('  full entity dump:', JSON.stringify(entity, null, 2));
+      if (entity.type === 'ARC') {
+        console.log('[DXF DEBUG] First ARC:');
+        console.log('  center:', JSON.stringify(entity.center));
+        console.log('  radius:', entity.radius);
+        console.log('  startAngle:', entity.startAngle, ' endAngle:', entity.endAngle, '(radians)');
+      }
     }
-    // ── END DEBUG ──────────────────────────────────────────────────────────
+    // ── END FIRST-OCCURRENCE DEBUG ─────────────────────────────────────────
 
     const geo = convertEntity(entity);
     if (geo) {
       entities.push({ ...geo, layer, id: `${entity.type}_${entities.length}` });
     } else {
-      console.log('[DXF] convertEntity: skipped entity type', entity.type);
+      droppedByType[entity.type] = (droppedByType[entity.type] || 0) + 1;
     }
   }
+
+  // Summary — shows exactly what dxf-parser gave us vs. what we kept
+  console.log('[DXF] Raw entity counts:',     JSON.stringify(rawCounts));
+  console.log('[DXF] Dropped entity counts:', JSON.stringify(droppedByType));
+  console.log('[DXF] Extracted total:', entities.length,
+    '| types:', [...new Set(entities.map(e => e.type))].join(', '));
 
   return { layers, entities };
 }
 
 function convertEntity(entity) {
   switch (entity.type) {
-    case 'LINE':
-      return {
-        type: 'line',
-        start: { x: entity.start?.x ?? 0, y: entity.start?.y ?? 0 },
-        end:   { x: entity.end?.x   ?? 0, y: entity.end?.y   ?? 0 },
-      };
+    case 'LINE': {
+      // dxf-parser stores LINE as {start:{x,y,z}, end:{x,y,z}}.
+      // Older/alternate builds may put coordinates in entity.vertices[0/1] instead.
+      const sx = entity.start?.x ?? entity.vertices?.[0]?.x ?? entity.vertices?.[0]?.[0] ?? 0;
+      const sy = entity.start?.y ?? entity.vertices?.[0]?.y ?? entity.vertices?.[0]?.[1] ?? 0;
+      const ex = entity.end?.x   ?? entity.vertices?.[1]?.x ?? entity.vertices?.[1]?.[0] ?? 0;
+      const ey = entity.end?.y   ?? entity.vertices?.[1]?.y ?? entity.vertices?.[1]?.[1] ?? 0;
+      return { type: 'line', start: { x: sx, y: sy }, end: { x: ex, y: ey } };
+    }
 
     case 'CIRCLE':
       return {
@@ -182,16 +190,19 @@ function convertEntity(entity) {
 
     case 'LWPOLYLINE':
     case 'POLYLINE': {
-      // dxf-parser v1.x stores LWPOLYLINE vertices as [{x,y,bulge?}]
-      // Some versions also set entity.shape (not entity.closed) for the closed flag.
       const rawVerts = entity.vertices;
-      const verts = Array.isArray(rawVerts)
-        ? rawVerts.map(v => ({ x: v.x ?? 0, y: v.y ?? 0, bulge: v.bulge ?? 0 }))
-        : [];
+      if (!Array.isArray(rawVerts) || rawVerts.length < 2) return null;
 
-      if (verts.length < 2) return null;
+      const verts = rawVerts.map(v => {
+        if (v == null) return { x: 0, y: 0, bulge: 0 };
+        // Format A — standard dxf-parser: {x, y, bulge?}
+        if (v.x !== undefined) return { x: +v.x, y: +(v.y ?? 0), bulge: +(v.bulge ?? 0) };
+        // Format B — array-like vertex [x, y, bulge?] (some alternate builds)
+        if (v[0] !== undefined) return { x: +v[0], y: +(v[1] ?? 0), bulge: +(v[2] ?? 0) };
+        return { x: 0, y: 0, bulge: 0 };
+      });
 
-      // Closed flag lives in different fields across dxf-parser versions
+      // Closed flag can live in .closed, .shape, or bit-0 of .flags depending on version
       const closed = !!(
         entity.closed ||
         entity.shape  ||
