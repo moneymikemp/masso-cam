@@ -461,7 +461,7 @@ export function polylineToPoints(vertices, closed) {
   // ── DIAGNOSTIC: set true to render all segments as straight lines ──────────
   // This lets us confirm that vertex x/y positions are correct independently
   // of the bulge arc conversion.  Set back to false once verified.
-  const SKIP_BULGE = true;
+  const SKIP_BULGE = false;
   // ───────────────────────────────────────────────────────────────────────────
 
   const pts = [];
