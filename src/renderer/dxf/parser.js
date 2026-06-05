@@ -85,6 +85,10 @@ function extractGeometry(dxf) {
 
   if (!dxf || !dxf.entities) return { layers: {}, entities: [] };
 
+  // Debug flags — log the raw object the first time each problem type is seen
+  let loggedLwpolyline = false;
+  let loggedArc        = false;
+
   for (const entity of dxf.entities) {
     const layer = entity.layer || '0';
     if (!layers[layer]) {
@@ -97,6 +101,39 @@ function extractGeometry(dxf) {
       };
     }
     layers[layer].entityCount++;
+
+    // ── RAW ENTITY DEBUG ───────────────────────────────────────────────────
+    if (entity.type === 'LWPOLYLINE' && !loggedLwpolyline) {
+      loggedLwpolyline = true;
+      console.log('[DXF DEBUG] First LWPOLYLINE raw entity:');
+      console.log('  type:',     entity.type);
+      console.log('  closed:',   entity.closed);
+      console.log('  shape:',    entity.shape);
+      console.log('  flags:',    entity.flags);
+      console.log('  vertices (raw):', JSON.stringify(entity.vertices));
+      if (Array.isArray(entity.vertices) && entity.vertices.length > 0) {
+        const v0 = entity.vertices[0];
+        console.log('  vertices[0] keys:', Object.keys(v0));
+        console.log('  vertices[0] values:', JSON.stringify(v0));
+        // Probe every likely coordinate property
+        console.log('  vertices[0].x:', v0.x, ' .y:', v0.y,
+          ' [0]:', v0[0], ' [1]:', v0[1]);
+      }
+      console.log('  full entity dump:', JSON.stringify(entity, null, 2));
+    }
+
+    if (entity.type === 'ARC' && !loggedArc) {
+      loggedArc = true;
+      console.log('[DXF DEBUG] First ARC raw entity:');
+      console.log('  type:',       entity.type);
+      console.log('  center:',     JSON.stringify(entity.center));
+      console.log('  radius:',     entity.radius);
+      console.log('  startAngle:', entity.startAngle, '(expect degrees ~0-360)');
+      console.log('  endAngle:',   entity.endAngle,   '(expect degrees ~0-360)');
+      console.log('  center.x:',   entity.center?.x, ' center.y:', entity.center?.y);
+      console.log('  full entity dump:', JSON.stringify(entity, null, 2));
+    }
+    // ── END DEBUG ──────────────────────────────────────────────────────────
 
     const geo = convertEntity(entity);
     if (geo) {
