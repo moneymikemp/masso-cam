@@ -167,6 +167,9 @@ export default function OperationParams({ op, tools, onChange }) {
         <div style={S.section}>Clearing</div>
         <Field label="Stepover %"><NumInput value={Math.round((p.stepover || 0.45) * 100)} onChange={v => set('stepover', v / 100)} step={5} min={5} max={95} /></Field>
         <CheckField label="Start from Center" value={p.startFromCenter} onChange={v => set('startFromCenter', v)} />
+        <div style={S.section}>Rest Machining</div>
+        <CheckField label="Rest Machining" value={!!p.restMachining} onChange={v => set('restMachining', v)} />
+        {p.restMachining && <Field label="Prev Tool Dia" unit={distUnit}><NumInput value={toDisp(p.previousToolDiameter ?? 12.7)} onChange={v => set('previousToolDiameter', toMM(v))} min={isInch ? 0.004 : 0.1} step={isInch ? 0.001 : 0.01} /></Field>}
         {commonDepth}
         <div style={S.section}>Finish</div>
         <CheckField label="Finish Pass" value={p.finishPass} onChange={v => set('finishPass', v)} />
@@ -180,6 +183,9 @@ export default function OperationParams({ op, tools, onChange }) {
         <div style={S.section}>Clearing</div>
         <Field label="Stepover %"><NumInput value={Math.round((p.stepover || 0.35) * 100)} onChange={v => set('stepover', v / 100)} step={5} min={5} max={60} /></Field>
         <Field label="Optimal Load %"><NumInput value={Math.round((p.optimalLoad || 0.3) * 100)} onChange={v => set('optimalLoad', v / 100)} step={5} min={5} max={50} /></Field>
+        <div style={S.section}>Rest Machining</div>
+        <CheckField label="Rest Machining" value={!!p.restMachining} onChange={v => set('restMachining', v)} />
+        {p.restMachining && <Field label="Prev Tool Dia" unit={distUnit}><NumInput value={toDisp(p.previousToolDiameter ?? 12.7)} onChange={v => set('previousToolDiameter', toMM(v))} min={isInch ? 0.004 : 0.1} step={isInch ? 0.001 : 0.01} /></Field>}
         {commonDepth}
         <div style={S.section}>Entry</div>
         <Field label="Ramp Angle" unit="°"><NumInput value={p.rampAngle || 2} onChange={v => set('rampAngle', v)} min={0.5} max={15} /></Field>
@@ -232,6 +238,9 @@ export default function OperationParams({ op, tools, onChange }) {
         {toolSelect}
         <Field label="Stepover %"><NumInput value={Math.round((p.stepover || 0.4) * 100)} onChange={v => set('stepover', v / 100)} step={5} /></Field>
         <CheckField label="Helical Entry" value={p.helicalEntry} onChange={v => set('helicalEntry', v)} />
+        <div style={S.section}>Rest Machining</div>
+        <CheckField label="Rest Machining" value={!!p.restMachining} onChange={v => set('restMachining', v)} />
+        {p.restMachining && <Field label="Prev Tool Dia" unit={distUnit}><NumInput value={toDisp(p.previousToolDiameter ?? 12.7)} onChange={v => set('previousToolDiameter', toMM(v))} min={isInch ? 0.004 : 0.1} step={isInch ? 0.001 : 0.01} /></Field>}
         {commonDepth}
         {commonSpeeds}
       </>}
@@ -402,6 +411,8 @@ export default function OperationParams({ op, tools, onChange }) {
             <Field label="Feed Rate" unit={feedUnit}><NumInput value={toDisp(tk.feed ?? 1000)} onChange={v => setPass('taperCleanup', 'feed', toMM(v))} step={isInch ? 1 : 50} /></Field>
             <Field label="Plunge Rate" unit={feedUnit}><NumInput value={toDisp(tk.plunge ?? 300)} onChange={v => setPass('taperCleanup', 'plunge', toMM(v))} step={fStep} /></Field>
             <Field label="Wall Stock" unit={distUnit}><NumInput value={toDisp(tk.wallStock ?? 0.254)} onChange={v => setPass('taperCleanup', 'wallStock', toMM(v))} min={0} step={isInch ? 0.001 : 0.02} /></Field>
+            <CheckField label="Rest Machining" value={!!tk.restMachining} onChange={v => setPass('taperCleanup', 'restMachining', v)} />
+            {tk.restMachining && <Field label="Prev Tool Dia" unit={distUnit}><NumInput value={toDisp(tk.prevDiameter ?? 6.35)} onChange={v => setPass('taperCleanup', 'prevDiameter', toMM(v))} min={isInch ? 0.004 : 0.1} step={isInch ? 0.001 : 0.01} /></Field>}
           </>}
 
           {/* ─ Pass 3: Detail Endmill ─ */}
@@ -420,6 +431,8 @@ export default function OperationParams({ op, tools, onChange }) {
             <Field label="Feed Rate" unit={feedUnit}><NumInput value={toDisp(de.feed ?? 800)} onChange={v => setPass('detailEndmill', 'feed', toMM(v))} step={isInch ? 2 : 50} /></Field>
             <Field label="Plunge Rate" unit={feedUnit}><NumInput value={toDisp(de.plunge ?? 300)} onChange={v => setPass('detailEndmill', 'plunge', toMM(v))} step={fStep} /></Field>
             <Field label="Wall Stock" unit={distUnit}><NumInput value={toDisp(de.wallStock ?? 0.254)} onChange={v => setPass('detailEndmill', 'wallStock', toMM(v))} min={0} step={isInch ? 0.001 : 0.02} /></Field>
+            <CheckField label="Rest Machining" value={!!de.restMachining} onChange={v => setPass('detailEndmill', 'restMachining', v)} />
+            {de.restMachining && <Field label="Prev Tool Dia" unit={distUnit}><NumInput value={toDisp(de.prevDiameter ?? 6.35)} onChange={v => setPass('detailEndmill', 'prevDiameter', toMM(v))} min={isInch ? 0.004 : 0.1} step={isInch ? 0.001 : 0.01} /></Field>}
           </>}
 
           {/* ─ Pass 4: Bulk Endmill ─ */}
@@ -438,6 +451,8 @@ export default function OperationParams({ op, tools, onChange }) {
             <Field label="Feed Rate" unit={feedUnit}><NumInput value={toDisp(be.feed ?? 1500)} onChange={v => setPass('bulkEndmill', 'feed', toMM(v))} step={isInch ? 2 : 50} /></Field>
             <Field label="Plunge Rate" unit={feedUnit}><NumInput value={toDisp(be.plunge ?? 500)} onChange={v => setPass('bulkEndmill', 'plunge', toMM(v))} step={fStep} /></Field>
             <Field label="Wall Stock" unit={distUnit}><NumInput value={toDisp(be.wallStock ?? 0.254)} onChange={v => setPass('bulkEndmill', 'wallStock', toMM(v))} min={0} step={isInch ? 0.001 : 0.02} /></Field>
+            <CheckField label="Rest Machining" value={!!be.restMachining} onChange={v => setPass('bulkEndmill', 'restMachining', v)} />
+            {be.restMachining && <Field label="Prev Tool Dia" unit={distUnit}><NumInput value={toDisp(be.prevDiameter ?? 12.7)} onChange={v => setPass('bulkEndmill', 'prevDiameter', toMM(v))} min={isInch ? 0.004 : 0.1} step={isInch ? 0.001 : 0.01} /></Field>}
           </>}
 
           <div style={S.section}>Cut Side</div>

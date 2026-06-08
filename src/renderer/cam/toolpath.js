@@ -1,6 +1,6 @@
 // CAM Toolpath Engine - all 2.5D operations
 
-import { offsetPolyline, generatePocketOffsets, generateRasterPasses, polygonArea, isClockwise } from './offset.js';
+import { offsetPolyline, generatePocketOffsets, generateRestMachiningPasses, generateRasterPasses, polygonArea, isClockwise } from './offset.js';
 import { circleToPoints, arcToPoints, polylineToPoints } from '../dxf/parser.js';
 
 // ── Entry point ───────────────────────────────────────────────────────────────
@@ -132,8 +132,10 @@ function generatePocket(op, entities) {
       continue;
     }
 
-    // Generate concentric clearing passes, skipping any that enter an island
-    const clearPasses = generatePocketOffsets(boundary, toolR, stepover, islandExclusions);
+    // Generate clearing passes (rest machining = only the strip the previous tool missed)
+    const clearPasses = p.restMachining && (p.previousToolDiameter || 0) > 0
+      ? generateRestMachiningPasses(outerProfile, toolR, p.previousToolDiameter / 2, stepover, islandExclusions)
+      : generatePocketOffsets(boundary, toolR, stepover, islandExclusions);
 
     if (clearPasses.length === 0 && islandExclusions.length === 0) {
       warnings.push('No clearing passes generated - pocket may be too small');
@@ -196,7 +198,9 @@ function generateAdaptive(op, entities) {
     const trochR = toolR * (p.optimalLoad || 0.3);
 
     for (const z of passes) {
-      const clearPasses = generatePocketOffsets(profile, toolR, stepover * 0.8);
+      const clearPasses = p.restMachining && (p.previousToolDiameter || 0) > 0
+        ? generateRestMachiningPasses(profile, toolR, p.previousToolDiameter / 2, stepover * 0.8)
+        : generatePocketOffsets(profile, toolR, stepover * 0.8);
       if (!clearPasses.length) continue;
 
       moves.push({ type: 'rapid', x: profile[0].x, y: profile[0].y, z: safeZ });
@@ -348,10 +352,17 @@ function generateCircular(op, entities) {
 
     for (const z of passes) {
       const step = toolR * 2 * stepover;
-      moves.push({ type: 'rapid', x: center.x, y: center.y, z: p.safeZ || 25 });
-      moves.push(...buildHelicalEntry(center, toolR * 0.5, p.topZ ?? 0, z, p.plungeRate || 400));
+      const restR = p.restMachining && (p.previousToolDiameter || 0) > 0
+        ? Math.max(toolR, radius - p.previousToolDiameter / 2) : toolR;
+      if (restR > toolR) {
+        moves.push({ type: 'rapid', x: center.x + restR, y: center.y, z: p.safeZ || 25 });
+        moves.push({ type: 'feed',  x: center.x + restR, y: center.y, z, f: p.plungeRate || 400 });
+      } else {
+        moves.push({ type: 'rapid', x: center.x, y: center.y, z: p.safeZ || 25 });
+        moves.push(...buildHelicalEntry(center, toolR * 0.5, p.topZ ?? 0, z, p.plungeRate || 400));
+      }
 
-      let r = toolR;
+      let r = restR;
       while (r <= radius - toolR) {
         const segs = Math.max(24, Math.ceil(r * 2 * Math.PI / (toolR * 0.5)));
         for (let i = 0; i <= segs; i++) {
@@ -588,6 +599,7 @@ function buildTaperedPasses(selected, topZ, depth, safeZ, p, warnings) {
   if (tk.enabled !== false) {
     const tkRad = Math.max(0.5, (tk.angle || 10) / 2) * Math.PI / 180;
     const tipR  = (tk.tipDia || 0.5) / 2;
+    const tkPrevR = tk.restMachining && (tk.prevDiameter || 0) > 0 ? tk.prevDiameter / 2 : 0;
     subToolpaths.push({
       name: 'Taper Cleanup', color: '#ffcc44',
       // Share toolKey with contour when same tool, so postprocessor skips M0 between them.
@@ -597,12 +609,13 @@ function buildTaperedPasses(selected, topZ, depth, safeZ, p, warnings) {
       // Single Z pass at full depth — walls were established by the contour pass.
       moves: clearFn(selected, topZ, depth, safeZ,
         tipR, depth, tk.wallStock || 0.254, tk.feed || 1000, tk.plunge || 300,
-        tkRad, 'Taper Cleanup', warnings),
+        tkRad, 'Taper Cleanup', warnings, tkPrevR),
     });
   }
 
   if (de.enabled !== false) {
     const deR = (de.diameter || 1.5875) / 2;
+    const dePrevR = de.restMachining && (de.prevDiameter || 0) > 0 ? de.prevDiameter / 2 : 0;
     subToolpaths.push({
       name: 'Detail Endmill', color: '#44ff88',
       toolKey:  de.toolId ?? 'detailEndmill',
@@ -610,12 +623,13 @@ function buildTaperedPasses(selected, topZ, depth, safeZ, p, warnings) {
       rpm: de.rpm || 18000,
       moves: clearFn(selected, topZ, depth, safeZ,
         deR, de.diameter || 1.5875, de.wallStock || 0.254, de.feed || 800, de.plunge || 300,
-        wallRad, 'Detail Endmill', warnings),
+        wallRad, 'Detail Endmill', warnings, dePrevR),
     });
   }
 
   if (be.enabled !== false) {
     const beR = (be.diameter || 6.35) / 2;
+    const bePrevR = be.restMachining && (be.prevDiameter || 0) > 0 ? be.prevDiameter / 2 : 0;
     subToolpaths.push({
       name: 'Bulk Endmill', color: '#4499ff',
       toolKey:  be.toolId ?? 'bulkEndmill',
@@ -623,7 +637,7 @@ function buildTaperedPasses(selected, topZ, depth, safeZ, p, warnings) {
       rpm: be.rpm || 18000,
       moves: clearFn(selected, topZ, depth, safeZ,
         beR, be.diameter || 6.35, be.wallStock || 0.254, be.feed || 1500, be.plunge || 500,
-        wallRad, 'Bulk Endmill', warnings),
+        wallRad, 'Bulk Endmill', warnings, bePrevR),
     });
   }
 
@@ -667,7 +681,7 @@ function buildTaperTrace(entities, topZ, depth, safeZ, feedRate, plungeRate, tcR
 //   depthPerPass — Z step between levels (pass full depth for single-level)
 //   wallStock   — explicit standoff added on top of the taper geometry clearance
 //   taperRad    — half-angle (rad) of the wall that defines clearance geometry
-function buildPocketClearing(entities, topZ, depth, safeZ, toolR, depthPerPass, wallStock, feedRate, plungeRate, taperRad, passLabel, warnings) {
+function buildPocketClearing(entities, topZ, depth, safeZ, toolR, depthPerPass, wallStock, feedRate, plungeRate, taperRad, passLabel, warnings, prevToolR = 0) {
   const moves     = [];
   const wallLeave = depth * Math.tan(taperRad) + wallStock;
   const inset     = toolR + wallLeave;
@@ -702,9 +716,11 @@ function buildPocketClearing(entities, topZ, depth, safeZ, toolR, depthPerPass, 
     return (expanded && expanded.length >= 3) ? expanded : ccw;
   });
 
-  const clearPasses = generatePocketOffsets(boundary, toolR, 0.45, islandExclusions);
+  const clearPasses = prevToolR > 0
+    ? generateRestMachiningPasses(outerProfile, toolR, prevToolR, 0.45, islandExclusions)
+    : generatePocketOffsets(boundary, toolR, 0.45, islandExclusions);
   if (!clearPasses.length) {
-    if (islandExclusions.length === 0) {
+    if (islandExclusions.length === 0 && prevToolR === 0) {
       warnings.push(`${passLabel}: no clearing passes — contour too small after wall clearance`);
     }
     return moves;
@@ -735,7 +751,7 @@ function buildPocketClearing(entities, topZ, depth, safeZ, toolR, depthPerPass, 
 //
 // Same parameter signature as buildPocketClearing so buildTaperedPasses can
 // dispatch between the two with a single function reference.
-function buildPlugClearing(entities, topZ, depth, safeZ, toolR, depthPerPass, wallStock, feedRate, plungeRate, taperRad, passLabel, warnings) {
+function buildPlugClearing(entities, topZ, depth, safeZ, toolR, depthPerPass, wallStock, feedRate, plungeRate, taperRad, passLabel, warnings, prevToolR = 0) {
   const moves     = [];
   const wallLeave = depth * Math.tan(taperRad) + wallStock;
   const outset    = toolR + wallLeave;
@@ -747,24 +763,32 @@ function buildPlugClearing(entities, topZ, depth, safeZ, toolR, depthPerPass, wa
   profiles.sort((a, b) => polygonArea(b) - polygonArea(a));
   const outerProfile = isClockwise(profiles[0]) ? [...profiles[0]].reverse() : profiles[0];
 
-  // Stock boundary: bounding box of the selected entities expanded by enough to
-  // clear all material around the taper walls.
-  const bounds = getEntityBounds(entities);
-  const stockMargin = Math.max(toolR * 3, outset + toolR * 2);
-  const stockPoly = [
-    { x: bounds.minX - stockMargin, y: bounds.minY - stockMargin },
-    { x: bounds.maxX + stockMargin, y: bounds.minY - stockMargin },
-    { x: bounds.maxX + stockMargin, y: bounds.maxY + stockMargin },
-    { x: bounds.minX - stockMargin, y: bounds.maxY + stockMargin },
-  ];
-
   // Exclusion island: profile expanded outward by (toolR + wallLeave).
   // Negative distance = outward expansion for a CCW polygon.
   const exclusionRaw = offsetPolyline(outerProfile, -outset, true)[0];
   const exclusion = (exclusionRaw && exclusionRaw.length >= 3) ? exclusionRaw : outerProfile;
   const exclusionCCW = isClockwise(exclusion) ? [...exclusion].reverse() : exclusion;
 
-  const clearPasses = generatePocketOffsets(stockPoly, toolR, 0.45, [exclusionCCW]);
+  // Outer clearing boundary: rest machining stops at the previous tool's reach limit;
+  // full clearing starts from a stock bounding box.
+  let outerBoundary;
+  if (prevToolR > 0) {
+    const prevOutset = prevToolR + wallLeave;
+    const prevBoundaryRaw = offsetPolyline(outerProfile, -prevOutset, true)[0];
+    if (prevBoundaryRaw && prevBoundaryRaw.length >= 3) outerBoundary = prevBoundaryRaw;
+  }
+  if (!outerBoundary) {
+    const bounds = getEntityBounds(entities);
+    const stockMargin = Math.max(toolR * 3, outset + toolR * 2);
+    outerBoundary = [
+      { x: bounds.minX - stockMargin, y: bounds.minY - stockMargin },
+      { x: bounds.maxX + stockMargin, y: bounds.minY - stockMargin },
+      { x: bounds.maxX + stockMargin, y: bounds.maxY + stockMargin },
+      { x: bounds.minX - stockMargin, y: bounds.maxY + stockMargin },
+    ];
+  }
+
+  const clearPasses = generatePocketOffsets(outerBoundary, toolR, 0.45, [exclusionCCW]);
   if (!clearPasses.length) {
     warnings.push(`${passLabel}: no outside clearing passes generated`);
     return moves;

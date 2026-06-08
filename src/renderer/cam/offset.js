@@ -104,6 +104,49 @@ export function generatePocketOffsets(outerPoints, toolRadius, stepover, islands
   return passes;
 }
 
+// Generate rest-machining passes: only the strip that the previous (larger) tool
+// could not reach but the current (smaller) tool can.
+//
+//   profile           — raw pocket boundary polygon (closing point optional)
+//   currentToolRadius — radius of the current tool
+//   previousToolRadius — radius of the previous larger tool whose cleared zone is excluded
+//   stepover          — fraction (0–1)
+//   islands           — additional exclusion polygons (pocket islands, etc.)
+export function generateRestMachiningPasses(profile, currentToolRadius, previousToolRadius, stepover, islands = []) {
+  const step = currentToolRadius * 2 * stepover;
+  const clean = stripClose([...profile]);
+
+  // Where the current (small) tool's center can reach.
+  const currentReach = clipperClosedOffset(clean, currentToolRadius);
+  if (!currentReach.length) return [];
+
+  // The previous (large) tool's cleared zone — passes that fall inside are skipped.
+  const previousReach = clipperClosedOffset(clean, previousToolRadius);
+  const prevExclusions = previousReach.map(p => isClockwise(p) ? [...p].reverse() : p);
+
+  const allIslands = [...islands, ...prevExclusions];
+  const passes = [];
+  let queue = currentReach.map(p => isClockwise(p) ? [...p].reverse() : p);
+
+  for (let i = 0; i < 200 && queue.length > 0; i++) {
+    const nextQueue = [];
+    for (const poly of queue) {
+      for (const sp of clipperClosedOffset(poly, step)) {
+        if (polygonArea(sp) < step * step * 0.5) continue;
+        nextQueue.push(sp);
+        const closed = [...sp, sp[0]];
+        if (allIslands.length > 0 &&
+            closed.some(pt => allIslands.some(isl => pointInPolygon(pt, isl)))) {
+          continue;
+        }
+        passes.push(closed);
+      }
+    }
+    queue = nextQueue;
+  }
+  return passes;
+}
+
 // ── Geometry utilities ────────────────────────────────────────────────────────
 
 export function isClockwise(points) {
