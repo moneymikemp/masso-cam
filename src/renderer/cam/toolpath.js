@@ -516,8 +516,13 @@ function generateThread(op, entities) {
 function generateTaperedPocket(op, entities) {
   const p = op.params;
   const warnings = [];
+  // Require explicit entity selection — falling back to all entities risks picking
+  // up stock boundary rectangles or other reference geometry as the pocket outline.
+  if (!op.selectedIds?.length) {
+    return { moves: [], subToolpaths: [], warnings: ['Select specific entities before calculating Tapered Pocket'] };
+  }
   const selected = getSelectedEntities(entities, op.selectedIds);
-  if (!selected.length) return { moves: [], subToolpaths: [], warnings: ['No entities selected'] };
+  if (!selected.length) return { moves: [], subToolpaths: [], warnings: ['No entities found for selected IDs'] };
 
   const topZ   = p.topZ ?? 0;
   const depth  = Math.abs(p.pocketDepth || 5);
@@ -528,8 +533,11 @@ function generateTaperedPocket(op, entities) {
 function generateTaperedPlug(op, entities) {
   const p = op.params;
   const warnings = [];
+  if (!op.selectedIds?.length) {
+    return { moves: [], subToolpaths: [], warnings: ['Select specific entities before calculating Tapered Plug'] };
+  }
   const selected = getSelectedEntities(entities, op.selectedIds);
-  if (!selected.length) return { moves: [], subToolpaths: [], warnings: ['No entities selected'] };
+  if (!selected.length) return { moves: [], subToolpaths: [], warnings: ['No entities found for selected IDs'] };
 
   const depth   = Math.abs(p.pocketDepth || 5);
   const safeZ   = p.safeZ ?? 10;
@@ -649,7 +657,10 @@ function buildPocketClearing(entities, topZ, depth, safeZ, toolR, depthPerPass, 
   const inset     = toolR + wallLeave;
   const zPasses   = buildZPasses(topZ, depth, depthPerPass);
 
+  // Only closed shapes can define a pocket boundary; open geometry (lines, arcs,
+  // open polylines) would produce nonsense results and must be excluded.
   const profiles = entities
+    .filter(e => isEntityClosed(e))
     .map(e => entityToProfile(e))
     .filter(prof => prof && prof.length >= 3);
   if (!profiles.length) return moves;
