@@ -440,6 +440,15 @@ export default function OperationParams({ op, tools, onChange }) {
             <Field label="Wall Stock" unit={distUnit}><NumInput value={toDisp(be.wallStock ?? 0.254)} onChange={v => setPass('bulkEndmill', 'wallStock', toMM(v))} min={0} step={isInch ? 0.001 : 0.02} /></Field>
           </>}
 
+          <div style={S.section}>Cut Side</div>
+          <Field label="Cut Side">
+            <Sel
+              value={p.cutSide ?? (isPlug ? 'outside' : 'inside')}
+              onChange={v => set('cutSide', v)}
+              options={[['inside', 'Inside (Pocket)'], ['outside', 'Outside (Plug)']]}
+            />
+          </Field>
+
           <div style={S.section}>Depth</div>
           <Field label="Pocket Depth" unit={distUnit}><NumInput value={toDisp(p.pocketDepth ?? 5)} onChange={v => set('pocketDepth', toMM(v))} min={isInch ? 0.01 : 0.25} step={dStep} /></Field>
           <Field label="Top of Stock" unit={distUnit}><NumInput value={toDisp(p.topZ ?? 0)} onChange={v => set('topZ', toMM(v))} step={isInch ? 0.02 : 0.5} /></Field>

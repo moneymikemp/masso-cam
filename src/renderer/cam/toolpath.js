@@ -505,13 +505,19 @@ function generateThread(op, entities) {
 //   Detail Endmill — small endmill clears medium-detail areas
 //   Bulk Endmill   — large endmill removes remaining bulk
 //
-// Plug raises the taper contour's topZ by fitTolerance/tan(halfAngle) so the
-// plug engages the pocket walls fractionally higher, leaving a controlled fit gap.
+// cutSide 'inside'  (pocket default): clears inside the profile boundary.
+// cutSide 'outside' (plug default):   clears outside the profile boundary.
+//   For outside cuts the taper-contour tip is offset outward by depth×tan(halfAngle)
+//   so the taper wall intersects the profile edge exactly at the top surface.
+//
+// Plug raises the effective topZ by fitTolerance/tan(halfAngle) so the plug
+// engages the pocket walls fractionally higher, leaving a controlled fit gap.
 //
 // Wall-clearance formula used by all concentric-clearing passes:
 //   wallLeave = depth × tan(halfAngle) + wallStock
-// The outer boundary is inset by (toolR + wallLeave); islands are outset by the
-// same amount to create exclusion zones.
+// Inside: outer boundary inset by (toolR + wallLeave); islands outset by same.
+// Outside: profile outset by (toolR + wallLeave) becomes the exclusion island;
+//          stock bounding box is the outer clearing boundary.
 
 function generateTaperedPocket(op, entities) {
   const p = op.params;
@@ -559,6 +565,9 @@ function buildTaperedPasses(selected, topZ, depth, safeZ, p, warnings) {
   const de = passes.detailEndmill || {};
   const be = passes.bulkEndmill   || {};
 
+  const cutSide = p.cutSide ?? 'inside';
+  const clearFn = cutSide === 'outside' ? buildPlugClearing : buildPocketClearing;
+
   // The contour pass defines the wall geometry; use its angle for endmill clearance.
   const wallAngle = tc.angle ?? tk.angle ?? 10;
   const wallRad   = Math.max(0.5, wallAngle / 2) * Math.PI / 180;
@@ -572,7 +581,7 @@ function buildTaperedPasses(selected, topZ, depth, safeZ, p, warnings) {
       toolKey:  tc.toolId ?? 'taper',
       toolDesc: `Taper bit — tip ⌀${tc.tipDia || 0.5}mm  ${tc.angle || 10}° half-angle`,
       rpm: tc.rpm || 24000,
-      moves: buildTaperTrace(selected, topZ, depth, safeZ, tc.feed || 1000, tc.plunge || 300),
+      moves: buildTaperTrace(selected, topZ, depth, safeZ, tc.feed || 1000, tc.plunge || 300, tcRad, cutSide),
     });
   }
 
@@ -586,7 +595,7 @@ function buildTaperedPasses(selected, topZ, depth, safeZ, p, warnings) {
       toolDesc: `Taper bit — tip ⌀${tk.tipDia || 0.5}mm  ${tk.angle || 10}° half-angle`,
       rpm: tk.rpm || 24000,
       // Single Z pass at full depth — walls were established by the contour pass.
-      moves: buildPocketClearing(selected, topZ, depth, safeZ,
+      moves: clearFn(selected, topZ, depth, safeZ,
         tipR, depth, tk.wallStock || 0.254, tk.feed || 1000, tk.plunge || 300,
         tkRad, 'Taper Cleanup', warnings),
     });
@@ -599,7 +608,7 @@ function buildTaperedPasses(selected, topZ, depth, safeZ, p, warnings) {
       toolKey:  de.toolId ?? 'detailEndmill',
       toolDesc: `Endmill ⌀${de.diameter || 1.5875}mm`,
       rpm: de.rpm || 18000,
-      moves: buildPocketClearing(selected, topZ, depth, safeZ,
+      moves: clearFn(selected, topZ, depth, safeZ,
         deR, de.diameter || 1.5875, de.wallStock || 0.254, de.feed || 800, de.plunge || 300,
         wallRad, 'Detail Endmill', warnings),
     });
@@ -612,7 +621,7 @@ function buildTaperedPasses(selected, topZ, depth, safeZ, p, warnings) {
       toolKey:  be.toolId ?? 'bulkEndmill',
       toolDesc: `Endmill ⌀${be.diameter || 6.35}mm`,
       rpm: be.rpm || 18000,
-      moves: buildPocketClearing(selected, topZ, depth, safeZ,
+      moves: clearFn(selected, topZ, depth, safeZ,
         beR, be.diameter || 6.35, be.wallStock || 0.254, be.feed || 1500, be.plunge || 500,
         wallRad, 'Bulk Endmill', warnings),
     });
@@ -625,20 +634,27 @@ function buildTaperedPasses(selected, topZ, depth, safeZ, p, warnings) {
 // Trace selected contours with the taper bit at full depth.
 // The V-bit axis follows the contour line directly — the taper geometry
 // automatically creates the angled pocket/plug walls.
-function buildTaperTrace(entities, topZ, depth, safeZ, feedRate, plungeRate) {
+//
+// cutSide 'outside': the tip is offset outward by depth × tan(halfAngle) so
+// the taper wall intersects the profile edge exactly at the top surface.
+function buildTaperTrace(entities, topZ, depth, safeZ, feedRate, plungeRate, tcRad, cutSide) {
   const moves = [];
   const z = topZ - depth;
-  for (const entity of entities) {
-    const profile = entityToProfile(entity);
+  // Negative distance = outward expansion of a CCW polygon.
+  const traceOffset = cutSide === 'outside' ? -(depth * Math.tan(tcRad)) : 0;
+
+  const profiles = buildPocketProfiles(entities);
+  for (const rawProfile of profiles) {
+    const profile = traceOffset !== 0
+      ? (offsetPolyline(rawProfile, traceOffset, true)[0] ?? rawProfile)
+      : rawProfile;
     if (!profile || profile.length < 2) continue;
     moves.push({ type: 'rapid', x: profile[0].x, y: profile[0].y, z: safeZ });
     moves.push({ type: 'feed',  x: profile[0].x, y: profile[0].y, z, f: plungeRate });
     for (let i = 1; i < profile.length; i++) {
       moves.push({ type: 'feed', x: profile[i].x, y: profile[i].y, z, f: feedRate });
     }
-    if (isEntityClosed(entity)) {
-      moves.push({ type: 'feed', x: profile[0].x, y: profile[0].y, z, f: feedRate });
-    }
+    moves.push({ type: 'feed', x: profile[0].x, y: profile[0].y, z, f: feedRate });
     moves.push({ type: 'rapid', x: profile[0].x, y: profile[0].y, z: safeZ });
   }
   return moves;
@@ -691,6 +707,66 @@ function buildPocketClearing(entities, topZ, depth, safeZ, toolR, depthPerPass, 
     if (islandExclusions.length === 0) {
       warnings.push(`${passLabel}: no clearing passes — contour too small after wall clearance`);
     }
+    return moves;
+  }
+
+  const startPt = clearPasses[0][0];
+  moves.push({ type: 'rapid', x: startPt.x, y: startPt.y, z: safeZ });
+  moves.push({ type: 'feed',  x: startPt.x, y: startPt.y, z: zPasses[0], f: plungeRate });
+
+  for (const z of zPasses) {
+    for (const pass of clearPasses) {
+      if (!pass || pass.length < 2) continue;
+      moves.push({ type: 'rapid', x: pass[0].x, y: pass[0].y, z: z + 0.5 });
+      moves.push({ type: 'feed',  x: pass[0].x, y: pass[0].y, z, f: plungeRate });
+      for (let i = 1; i < pass.length; i++) {
+        moves.push({ type: 'feed', x: pass[i].x, y: pass[i].y, z, f: feedRate });
+      }
+    }
+  }
+  moves.push({ type: 'rapid', x: outerProfile[0].x, y: outerProfile[0].y, z: safeZ });
+  return moves;
+}
+
+// Concentric clearing for outside cuts (tapered plug).
+// The profile is expanded outward by (toolR + wallLeave) to create an exclusion
+// island. Passes are generated inside a stock bounding box and filtered to skip
+// anything that enters the exclusion, effectively clearing around the plug.
+//
+// Same parameter signature as buildPocketClearing so buildTaperedPasses can
+// dispatch between the two with a single function reference.
+function buildPlugClearing(entities, topZ, depth, safeZ, toolR, depthPerPass, wallStock, feedRate, plungeRate, taperRad, passLabel, warnings) {
+  const moves     = [];
+  const wallLeave = depth * Math.tan(taperRad) + wallStock;
+  const outset    = toolR + wallLeave;
+  const zPasses   = buildZPasses(topZ, depth, depthPerPass);
+
+  const profiles = buildPocketProfiles(entities);
+  if (!profiles.length) return moves;
+
+  profiles.sort((a, b) => polygonArea(b) - polygonArea(a));
+  const outerProfile = isClockwise(profiles[0]) ? [...profiles[0]].reverse() : profiles[0];
+
+  // Stock boundary: bounding box of the selected entities expanded by enough to
+  // clear all material around the taper walls.
+  const bounds = getEntityBounds(entities);
+  const stockMargin = Math.max(toolR * 3, outset + toolR * 2);
+  const stockPoly = [
+    { x: bounds.minX - stockMargin, y: bounds.minY - stockMargin },
+    { x: bounds.maxX + stockMargin, y: bounds.minY - stockMargin },
+    { x: bounds.maxX + stockMargin, y: bounds.maxY + stockMargin },
+    { x: bounds.minX - stockMargin, y: bounds.maxY + stockMargin },
+  ];
+
+  // Exclusion island: profile expanded outward by (toolR + wallLeave).
+  // Negative distance = outward expansion for a CCW polygon.
+  const exclusionRaw = offsetPolyline(outerProfile, -outset, true)[0];
+  const exclusion = (exclusionRaw && exclusionRaw.length >= 3) ? exclusionRaw : outerProfile;
+  const exclusionCCW = isClockwise(exclusion) ? [...exclusion].reverse() : exclusion;
+
+  const clearPasses = generatePocketOffsets(stockPoly, toolR, 0.45, [exclusionCCW]);
+  if (!clearPasses.length) {
+    warnings.push(`${passLabel}: no outside clearing passes generated`);
     return moves;
   }
 
