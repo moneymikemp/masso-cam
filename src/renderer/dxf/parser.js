@@ -612,10 +612,45 @@ export function getBounds(entities) {
     if (y < minY) minY = y; if (y > maxY) maxY = y;
   }
   for (const e of entities) {
-    if      (e.type === 'line')     { addPt(e.start.x, e.start.y); addPt(e.end.x, e.end.y); }
-    else if (e.type === 'circle')   { addPt(e.center.x - e.radius, e.center.y - e.radius); addPt(e.center.x + e.radius, e.center.y + e.radius); }
-    else if (e.type === 'arc')      { addPt(e.center.x - e.radius, e.center.y - e.radius); addPt(e.center.x + e.radius, e.center.y + e.radius); }
-    else if (e.type === 'polyline') { for (const v of e.vertices) addPt(v.x, v.y); }
+    if (e.type === 'line') {
+      addPt(e.start.x, e.start.y);
+      addPt(e.end.x,   e.end.y);
+
+    } else if (e.type === 'circle') {
+      // Full circle — all four extremes apply.
+      addPt(e.center.x - e.radius, e.center.y);
+      addPt(e.center.x + e.radius, e.center.y);
+      addPt(e.center.x, e.center.y - e.radius);
+      addPt(e.center.x, e.center.y + e.radius);
+
+    } else if (e.type === 'arc') {
+      // Tight bounding box: include the arc's start and end points, then add any
+      // cardinal-direction extremes (0°, 90°, 180°, 270°) that fall inside the sweep.
+      //
+      // Using center ± radius (the full-circle box) massively over-estimates bounds
+      // for large-radius arcs that span only a few degrees — the root cause of
+      // "128 × 145 inch" bounds on small geometry.
+      const { center: c, radius: r, startAngle: sa, endAngle: ea } = e;
+      addPt(c.x + Math.cos(sa) * r, c.y + Math.sin(sa) * r);
+      addPt(c.x + Math.cos(ea) * r, c.y + Math.sin(ea) * r);
+
+      // Normalize end so the sweep is strictly CCW from sa to end.
+      let end = ea;
+      if (end <= sa) end += Math.PI * 2;
+
+      // Test each cardinal angle.
+      for (let k = 0; k < 4; k++) {
+        const cardinal = k * Math.PI / 2;          // 0, π/2, π, 3π/2
+        let a = cardinal;
+        while (a < sa) a += Math.PI * 2;           // normalise into [sa, sa+2π)
+        if (a <= end) {                             // cardinal is inside the sweep
+          addPt(c.x + Math.cos(cardinal) * r, c.y + Math.sin(cardinal) * r);
+        }
+      }
+
+    } else if (e.type === 'polyline') {
+      for (const v of e.vertices) addPt(v.x, v.y);
+    }
   }
   if (!isFinite(minX)) return { minX: -100, minY: -100, maxX: 100, maxY: 100, width: 200, height: 200 };
   return { minX, minY, maxX, maxY, width: maxX - minX, height: maxY - minY };
