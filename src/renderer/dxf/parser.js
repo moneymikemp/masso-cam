@@ -503,12 +503,17 @@ function bulgeToPts(p1, p2, bulge) {
   const startAngle = Math.atan2(p1.y - cy, p1.x - cx);
   const endAngle   = Math.atan2(p2.y - cy, p2.x - cx);
   const segs = Math.max(4, Math.ceil(angle * 8));
-  // arcToPoints always sweeps CCW (from start toward end, adding 2π if end < start).
-  // For a CW arc (negative bulge) we swap the angles so the same CCW sweep traces
-  // the equivalent clockwise path from p1 to p2.
+  // Positive bulge (CCW): arcToPoints sweeps CCW from startAngle (p1) to endAngle (p2).
+  //   → result[0] ≈ p1, result[last] ≈ p2  ✓
+  //
+  // Negative bulge (CW): swap the angles so arcToPoints follows the same arc path
+  //   but traced in the CCW sense from endAngle (p2) back to startAngle (p1).
+  //   That gives result[0] ≈ p2, result[last] ≈ p1 — WRONG insertion order.
+  //   .reverse() flips it so result[0] ≈ p1, result[last] ≈ p2, matching the
+  //   p1→p2 direction that polylineToPoints expects.
   return bulge > 0
     ? arcToPoints({ x: cx, y: cy }, r, startAngle, endAngle, segs)
-    : arcToPoints({ x: cx, y: cy }, r, endAngle,   startAngle, segs);
+    : arcToPoints({ x: cx, y: cy }, r, endAngle,   startAngle, segs).reverse();
 }
 
 function sampleEllipse(entity, count) {
