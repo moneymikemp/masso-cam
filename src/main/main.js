@@ -25,6 +25,7 @@ function initDatabase() {
         flutes INTEGER DEFAULT 2,
         material TEXT DEFAULT 'HSS',
         notes TEXT DEFAULT '',
+        tool_number INTEGER DEFAULT 1,
         created_at DATETIME DEFAULT CURRENT_TIMESTAMP
       );
 
@@ -48,6 +49,9 @@ function initDatabase() {
         updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
       );
     `);
+
+    // Add tool_number column to existing databases that predate this migration.
+    try { db.exec(`ALTER TABLE tools ADD COLUMN tool_number INTEGER DEFAULT 1`); } catch (_) {}
 
     const toolCount = db.prepare('SELECT COUNT(*) as count FROM tools').get();
     if (toolCount.count === 0) {
@@ -289,13 +293,14 @@ ipcMain.handle('db-save-tool', (_, tool) => {
   if (!db) return null;
   const { feeds, ...toolData } = tool;
   let toolId = toolData.id;
+  const toolNum = toolData.tool_number ?? 1;
   if (toolId) {
-    db.prepare('UPDATE tools SET name=?, type=?, diameter=?, flutes=?, material=?, notes=? WHERE id=?')
-      .run(toolData.name, toolData.type, toolData.diameter, toolData.flutes, toolData.material, toolData.notes, toolId);
+    db.prepare('UPDATE tools SET name=?, type=?, diameter=?, flutes=?, material=?, notes=?, tool_number=? WHERE id=?')
+      .run(toolData.name, toolData.type, toolData.diameter, toolData.flutes, toolData.material, toolData.notes, toolNum, toolId);
     db.prepare('DELETE FROM feeds WHERE tool_id=?').run(toolId);
   } else {
-    const result = db.prepare('INSERT INTO tools (name,type,diameter,flutes,material,notes) VALUES (?,?,?,?,?,?)')
-      .run(toolData.name, toolData.type, toolData.diameter, toolData.flutes, toolData.material, toolData.notes || '');
+    const result = db.prepare('INSERT INTO tools (name,type,diameter,flutes,material,notes,tool_number) VALUES (?,?,?,?,?,?,?)')
+      .run(toolData.name, toolData.type, toolData.diameter, toolData.flutes, toolData.material, toolData.notes || '', toolNum);
     toolId = result.lastInsertRowid;
   }
   const insertFeed = db.prepare('INSERT INTO feeds (tool_id,material,spindle_rpm,feed_rate,plunge_rate,depth_per_pass,stepover) VALUES (?,?,?,?,?,?,?)');

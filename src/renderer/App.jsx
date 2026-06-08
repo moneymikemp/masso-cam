@@ -318,7 +318,14 @@ export default function App() {
       {modal === 'post' && (
         <PostSettingsModal
           config={state.postConfig}
-          onSave={cfg => dispatch({ type: 'SET_POST_CONFIG', payload: cfg })}
+          onSave={cfg => {
+            dispatch({ type: 'SET_POST_CONFIG', payload: cfg });
+            if (window.electron) {
+              window.electron.storeSet('pref.units',       cfg.units);
+              window.electron.storeSet('pref.safeZ',       cfg.safeZ);
+              window.electron.storeSet('pref.toolChangeZ', cfg.toolChangeZ);
+            }
+          }}
           onClose={() => setModal(null)}
         />
       )}

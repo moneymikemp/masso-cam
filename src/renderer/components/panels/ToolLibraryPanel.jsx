@@ -21,6 +21,7 @@ const S = {
   select: { flex: 1, background: '#0d0d20', border: '1px solid #2a2a50', color: '#ccccee', borderRadius: 3, padding: '2px 4px', fontSize: 11 },
   section: { color: '#5555aa', fontSize: 9, textTransform: 'uppercase', letterSpacing: 1, marginTop: 8, marginBottom: 3, borderBottom: '1px solid #1a1a38', paddingBottom: 2 },
   saveBtn: { background: '#2a2a5a', border: '1px solid #3a3aaa', color: '#8888ff', cursor: 'pointer', fontSize: 10, padding: '4px 12px', borderRadius: 3, marginTop: 8, width: '100%' },
+  dupWarn: { fontSize: 10, color: '#ffaa44', background: '#2a1a00', border: '1px solid #554400', borderRadius: 3, padding: '4px 6px', marginTop: 4 },
   feedRow: { background: '#0d0d20', borderRadius: 3, padding: '4px 6px', marginBottom: 4 },
   feedLabel: { color: '#7777aa', fontSize: 9, marginBottom: 2 },
   feedGrid: { display: 'grid', gridTemplateColumns: '1fr 1fr 1fr', gap: 3 },
@@ -28,7 +29,7 @@ const S = {
   delFeed: { background: 'none', border: 'none', color: '#884444', cursor: 'pointer', fontSize: 10, padding: 0 },
 };
 
-const newTool = () => ({ name: '', type: 'flat', diameter: 6.35, flutes: 2, material: 'Carbide', notes: '', feeds: [] });
+const newTool = () => ({ name: '', type: 'flat', diameter: 6.35, flutes: 2, material: 'Carbide', notes: '', tool_number: 1, feeds: [] });
 const newFeed = () => ({ material: 'MDF', spindle_rpm: 18000, feed_rate: 1500, plunge_rate: 500, depth_per_pass: 3, stepover: 0.45 });
 
 export default function ToolLibraryPanel() {
@@ -133,6 +134,12 @@ export default function ToolLibraryPanel() {
               {TOOL_TYPES.map(t => <option key={t} value={t}>{typeIcon[t]} {t}</option>)}
             </select>
           </div>
+          <div style={S.row2}><span style={S.label}>Tool Number</span><input style={{ ...S.input, width: 60, flex: 'none' }} type="number" step="1" min="1" max="99" value={editTool.tool_number ?? 1} onChange={e => setField('tool_number', Math.max(1, Math.min(99, parseInt(e.target.value) || 1)))} /></div>
+          {(() => {
+            const num = editTool.tool_number ?? 1;
+            const dup = tools.find(t => t.id !== editTool.id && (t.tool_number ?? 1) === num);
+            return dup ? <div style={S.dupWarn}>⚠ Tool number {num} is already used by "{dup.name}"</div> : null;
+          })()}
           <div style={S.row2}><span style={S.label}>Diameter (mm)</span><input style={S.input} type="number" step="0.01" min="0.1" value={editTool.diameter} onChange={e => setField('diameter', parseFloat(e.target.value) || 0)} /></div>
           {editTool.type === 'tapered' && <>
             <div style={S.row2}><span style={S.label}>Tip Dia (mm)</span><input style={S.input} type="number" step="0.01" min="0" value={editTool.tipDiameter ?? 0.5} onChange={e => setField('tipDiameter', parseFloat(e.target.value) || 0)} /></div>

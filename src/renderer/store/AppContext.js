@@ -1,4 +1,4 @@
-import React, { createContext, useContext, useReducer, useCallback } from 'react';
+import React, { createContext, useContext, useReducer, useCallback, useEffect } from 'react';
 import { v4 as uuid } from 'uuid';
 
 const AppContext = createContext(null);
@@ -184,6 +184,8 @@ function reducer(state, action) {
     // Machine
     case 'SET_MACHINE_CONFIG': return { ...state, machineConfig: { ...state.machineConfig, ...action.payload }, dirty: true };
     case 'SET_POST_CONFIG':    return { ...state, postConfig: { ...state.postConfig, ...action.payload }, dirty: true };
+    // Restore persisted user preferences without marking the project dirty.
+    case 'APPLY_SAVED_PREFS': return { ...state, postConfig: { ...state.postConfig, ...action.payload } };
     case 'SET_STOCK_CONFIG':   return { ...state, stockConfig: { ...state.stockConfig, ...action.payload }, dirty: true };
 
     // Viewport
@@ -226,6 +228,25 @@ function reducer(state, action) {
 export function AppProvider({ children }) {
   const [state, dispatch] = useReducer(reducer, initialState);
 
+  // Restore persisted user preferences on first mount.
+  // Uses APPLY_SAVED_PREFS so the project is not marked dirty.
+  useEffect(() => {
+    if (!window.electron) return;
+    Promise.all([
+      window.electron.storeGet('pref.units'),
+      window.electron.storeGet('pref.safeZ'),
+      window.electron.storeGet('pref.toolChangeZ'),
+    ]).then(([units, safeZ, toolChangeZ]) => {
+      const overrides = {};
+      if (units      != null) overrides.units       = units;
+      if (safeZ      != null) overrides.safeZ       = safeZ;
+      if (toolChangeZ != null) overrides.toolChangeZ = toolChangeZ;
+      if (Object.keys(overrides).length > 0) {
+        dispatch({ type: 'APPLY_SAVED_PREFS', payload: overrides });
+      }
+    });
+  }, []);
+
   const getProject = useCallback(() => ({
     entities: state.entities,
     layers: state.layers,
@@ -265,8 +286,10 @@ export function getDefaultParams(type) {
     case 'thread':        return { safeZ: 25, topZ: 0, feedRate: 400, plungeRate: 200, totalDepth: 15, toolDiameter: 6.35, pitch: 1.25, internal: true, direction: 'right', spindleRpm: 1000 };
     case 'taperedinlay':  return {
       topZ: 0, safeZ: 10,
+      taperToolId: null,   // ID of the selected taper/vbit tool from the library
       tipDiameter: 0.5, taperAngle: 10,
       taperFeedRate: 1000, taperPlungeRate: 300, taperSpindleRpm: 24000,
+      endmillToolId: null, // ID of the selected cleanup endmill from the library
       endmillDiameter: 3.175,
       endmillFeedRate: 1500, endmillPlungeRate: 500, endmillSpindleRpm: 18000,
       pocketDepth: 5,

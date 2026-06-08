@@ -94,7 +94,7 @@ export function generateGcode(operations, postConfig = {}) {
       emit(`${n()}G0 Z${fmt(cfg.toolChangeZ)} (Retract)`);
       emit(`${n()}M5 (Spindle off)`);
       if (cfg.coolant !== 'off') emit(`${n()}M9 (Coolant off)`);
-      emit(`${n()}T${tool.toolNumber || 1} M6 (Tool change)`);
+      emit(`${n()}T${tool.tool_number ?? tool.toolNumber ?? 1} M6 (Tool change)`);
       currentTool = tool.id;
       currentSpindle = 0;
     }
