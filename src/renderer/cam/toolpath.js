@@ -99,7 +99,8 @@ function generatePocket(op, entities) {
 
   // Largest polygon = outer boundary; anything smaller inside it = island
   profiles.sort((a, b) => polygonArea(b) - polygonArea(a));
-  const outerProfile = profiles[0];
+  // Normalise to CCW so a positive inset offset always shrinks inward
+  const outerProfile = isClockwise(profiles[0]) ? [...profiles[0]].reverse() : profiles[0];
   const islandProfiles = profiles.slice(1);
 
   if (islandProfiles.length > 0) {
@@ -666,8 +667,13 @@ function buildPocketClearing(entities, topZ, depth, safeZ, toolR, depthPerPass, 
   if (!profiles.length) return moves;
 
   profiles.sort((a, b) => polygonArea(b) - polygonArea(a));
-  const outerProfile   = profiles[0];
   const islandProfiles = profiles.slice(1);
+
+  // Normalise outer profile to CCW so that a positive offset distance shrinks
+  // it inward — the same convention generatePocketOffsets uses internally.
+  // DXF entities can be wound either way; without this a CW profile would
+  // expand outward under a positive offset, producing the exploding-star paths.
+  const outerProfile = isClockwise(profiles[0]) ? [...profiles[0]].reverse() : profiles[0];
 
   const boundary = offsetPolyline(outerProfile, inset, true)[0];
   if (!boundary || boundary.length < 4 || polygonArea(boundary) < toolR * toolR * Math.PI * 0.25) {
