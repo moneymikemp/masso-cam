@@ -90,10 +90,9 @@ function generatePocket(op, entities) {
   const selected = getSelectedEntities(entities, op.selectedIds);
   if (!selected.length) return { moves: [], warnings: ['No entities selected'] };
 
-  // Build a profile for every selected entity; keep those with ≥ 3 points
-  const profiles = selected
-    .map(e => entityToProfile(e))
-    .filter(prof => prof && prof.length >= 3);
+  // Build profiles: chain individual LINE/ARC segments into one closed polygon
+  // when the selection consists of disconnected segments rather than a polyline.
+  const profiles = buildPocketProfiles(selected);
 
   if (!profiles.length) return { moves: [], warnings: ['No valid closed entities selected'] };
 
@@ -658,12 +657,9 @@ function buildPocketClearing(entities, topZ, depth, safeZ, toolR, depthPerPass, 
   const inset     = toolR + wallLeave;
   const zPasses   = buildZPasses(topZ, depth, depthPerPass);
 
-  // Profile extraction identical to generatePocket — map all selected entities,
-  // no isEntityClosed pre-filter (SPLINEs and open polylines are stored as
-  // polyline entities with closed:false and must not be excluded here).
-  const profiles = entities
-    .map(e => entityToProfile(e))
-    .filter(prof => prof && prof.length >= 3);
+  // Profile extraction: chain individual LINE/ARC segments when selected
+  // instead of a closed polyline, same logic as generatePocket.
+  const profiles = buildPocketProfiles(entities);
   if (!profiles.length) return moves;
 
   profiles.sort((a, b) => polygonArea(b) - polygonArea(a));
@@ -783,6 +779,71 @@ function isEntityClosed(entity) {
 function getSelectedEntities(entities, ids) {
   if (!ids || ids.length === 0) return entities;
   return entities.filter(e => ids.includes(e.id));
+}
+
+// Chains individual LINE and ARC entities into one closed point array by
+// matching endpoints within SNAP tolerance. Returns null if the result has
+// fewer than 3 points or the segments cannot be connected.
+function chainSegments(entities) {
+  const SNAP = 0.01;
+  function ptDist(a, b) { return Math.hypot(a.x - b.x, a.y - b.y); }
+
+  const segs = entities
+    .filter(e => e.type === 'line' || e.type === 'arc')
+    .map(e => ({ pts: entityToProfile(e), used: false }))
+    .filter(s => s.pts && s.pts.length >= 2);
+
+  if (!segs.length) return null;
+
+  const chain = [...segs[0].pts];
+  segs[0].used = true;
+
+  for (let pass = 0; pass < segs.length; pass++) {
+    const tail = chain[chain.length - 1];
+    let found = false;
+    for (const seg of segs) {
+      if (seg.used) continue;
+      const head = seg.pts[0];
+      const foot = seg.pts[seg.pts.length - 1];
+      if (ptDist(tail, head) <= SNAP) {
+        chain.push(...seg.pts.slice(1));
+        seg.used = true; found = true; break;
+      }
+      if (ptDist(tail, foot) <= SNAP) {
+        chain.push(...[...seg.pts].reverse().slice(1));
+        seg.used = true; found = true; break;
+      }
+    }
+    if (!found) break;
+  }
+
+  // Drop duplicate closing point if chain loops back to start
+  if (chain.length > 1 && ptDist(chain[0], chain[chain.length - 1]) <= SNAP) {
+    chain.pop();
+  }
+  return chain.length >= 3 ? chain : null;
+}
+
+// Build profiles for pocket operations. When selected entities are individual
+// LINE/ARC segments (not a closed polyline), chains them into a single closed
+// polygon first. Falls back to per-entity conversion for polylines and circles.
+function buildPocketProfiles(entities) {
+  const segEnts   = entities.filter(e => e.type === 'line' || e.type === 'arc');
+  const otherEnts = entities.filter(e => e.type !== 'line' && e.type !== 'arc');
+
+  const profiles = otherEnts
+    .map(e => entityToProfile(e))
+    .filter(p => p && p.length >= 3);
+
+  if (segEnts.length >= 2) {
+    const chained = chainSegments(segEnts);
+    if (chained) profiles.push(chained);
+  } else if (segEnts.length === 1) {
+    const pts = entityToProfile(segEnts[0]);
+    if (pts && pts.length >= 3) profiles.push(pts);
+  }
+
+  return profiles;
 }
 
 function getEntityBounds(entities) {
