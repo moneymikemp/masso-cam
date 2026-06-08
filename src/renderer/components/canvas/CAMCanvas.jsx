@@ -130,7 +130,11 @@ export default function CAMCanvas() {
   }
 
   function drawOrigin(ctx) {
-    const o = w2c(0, 0);
+    // Crosshair sits at the datum point, which may not be world (0,0) when
+    // the stock has been fitted to the part without moving geometry.
+    const ox = stockConfig?.stockOriginX ?? 0;
+    const oy = stockConfig?.stockOriginY ?? 0;
+    const o = w2c(ox, oy);
     const size = 12;
     ctx.strokeStyle = '#ff4444';
     ctx.lineWidth = 1.5;
@@ -141,10 +145,14 @@ export default function CAMCanvas() {
 
   function drawStock(ctx) {
     if (!stockConfig || stockConfig.width <= 0 || stockConfig.length <= 0) return;
+    // stockOriginX/Y is the world position of the datum point.
+    // The stock rectangle is offset from it based on the datum fraction.
+    const ox   = stockConfig.stockOriginX ?? 0;
+    const oy   = stockConfig.stockOriginY ?? 0;
     const xOff = (stockConfig.datum[1] === 'l' ? 0 : stockConfig.datum[1] === 'c' ? 0.5 : 1) * stockConfig.width;
     const yOff = (stockConfig.datum[0] === 'b' ? 0 : stockConfig.datum[0] === 'm' ? 0.5 : 1) * stockConfig.length;
-    const minX = -xOff, maxX = stockConfig.width - xOff;
-    const minY = -yOff, maxY = stockConfig.length - yOff;
+    const minX = ox - xOff,                    maxX = ox + stockConfig.width  - xOff;
+    const minY = oy - yOff,                    maxY = oy + stockConfig.length - yOff;
     const tl = w2c(minX, maxY);
     const br = w2c(maxX, minY);
     const w = br.x - tl.x, h = br.y - tl.y;

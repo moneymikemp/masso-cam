@@ -264,7 +264,12 @@ export default function App() {
       dispatch({ type: 'SET_PANEL_TAB', payload: 'gcode' });
       return;
     }
-    const gcode = generateGcode(enabled, { ...state.postConfig, wcs: state.stockConfig.wcs });
+    const gcode = generateGcode(enabled, {
+      ...state.postConfig,
+      wcs: state.stockConfig.wcs,
+      stockOriginX: state.stockConfig.stockOriginX ?? 0,
+      stockOriginY: state.stockConfig.stockOriginY ?? 0,
+    });
     dispatch({ type: 'SET_GCODE', payload: gcode });
     dispatch({ type: 'SET_PANEL_TAB', payload: 'gcode' });
     if (window.electron) {

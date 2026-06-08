@@ -32,7 +32,12 @@ export default function GcodePanel() {
       dispatch({ type: 'SET_STATUS', payload: 'No calculated operations to export' });
       return;
     }
-    const gcode = generateGcode(enabled, { ...postConfig, wcs: stockConfig.wcs });
+    const gcode = generateGcode(enabled, {
+      ...postConfig,
+      wcs: stockConfig.wcs,
+      stockOriginX: stockConfig.stockOriginX ?? 0,
+      stockOriginY: stockConfig.stockOriginY ?? 0,
+    });
     dispatch({ type: 'SET_GCODE', payload: gcode });
   }
 

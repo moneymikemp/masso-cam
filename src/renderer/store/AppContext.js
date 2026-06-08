@@ -34,6 +34,8 @@ const initialState = {
     datum: 'bl',
     topZ: 0,
     wcs: 'G54',
+    stockOriginX: 0,  // world-space X of the datum point
+    stockOriginY: 0,  // world-space Y of the datum point
   },
 
   // Machine / post config

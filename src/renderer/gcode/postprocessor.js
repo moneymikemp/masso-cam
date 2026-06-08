@@ -112,6 +112,14 @@ export function generateGcode(operations, postConfig = {}) {
     else if (cfg.coolant === 'mist') emit(`${n()}M7`);
 
     // ── Move emission helper (shared by regular ops and sub-toolpaths) ──────────
+    // Datum offset: all X/Y moves are output relative to the stock datum position.
+    // When fitStockToPart repositions the stock without moving geometry, these
+    // offsets shift coordinates so G-code is always datum-relative.
+    const sox = cfg.stockOriginX ?? 0;
+    const soy = cfg.stockOriginY ?? 0;
+    function fmtX(v) { return fmt(v - sox); }
+    function fmtY(v) { return fmt(v - soy); }
+
     function emitMoves(moves) {
       modalG = null;
       currentFeed = 0;
@@ -119,8 +127,8 @@ export function generateGcode(operations, postConfig = {}) {
         switch (move.type) {
           case 'rapid': {
             const parts = ['G0'];
-            if (move.x !== undefined) parts.push(`X${fmt(move.x)}`);
-            if (move.y !== undefined) parts.push(`Y${fmt(move.y)}`);
+            if (move.x !== undefined) parts.push(`X${fmtX(move.x)}`);
+            if (move.y !== undefined) parts.push(`Y${fmtY(move.y)}`);
             if (move.z !== undefined) parts.push(`Z${fmt(move.z)}`);
             emit(`${n()}${parts.join(' ')}`);
             modalG = 'G0';
@@ -129,8 +137,8 @@ export function generateGcode(operations, postConfig = {}) {
           case 'feed': {
             const parts = [];
             if (modalG !== 'G1') { parts.push('G1'); modalG = 'G1'; }
-            if (move.x !== undefined) parts.push(`X${fmt(move.x)}`);
-            if (move.y !== undefined) parts.push(`Y${fmt(move.y)}`);
+            if (move.x !== undefined) parts.push(`X${fmtX(move.x)}`);
+            if (move.y !== undefined) parts.push(`Y${fmtY(move.y)}`);
             if (move.z !== undefined) parts.push(`Z${fmt(move.z)}`);
             if (move.f !== undefined && move.f !== currentFeed) {
               parts.push(`F${fmtF(move.f)}`);
@@ -141,8 +149,8 @@ export function generateGcode(operations, postConfig = {}) {
           }
           case 'arc_cw': {
             const parts = ['G2'];
-            if (move.x !== undefined) parts.push(`X${fmt(move.x)}`);
-            if (move.y !== undefined) parts.push(`Y${fmt(move.y)}`);
+            if (move.x !== undefined) parts.push(`X${fmtX(move.x)}`);
+            if (move.y !== undefined) parts.push(`Y${fmtY(move.y)}`);
             if (move.z !== undefined) parts.push(`Z${fmt(move.z)}`);
             if (move.i !== undefined) parts.push(`I${fmt(move.i)}`);
             if (move.j !== undefined) parts.push(`J${fmt(move.j)}`);
@@ -152,8 +160,8 @@ export function generateGcode(operations, postConfig = {}) {
           }
           case 'arc_ccw': {
             const parts = ['G3'];
-            if (move.x !== undefined) parts.push(`X${fmt(move.x)}`);
-            if (move.y !== undefined) parts.push(`Y${fmt(move.y)}`);
+            if (move.x !== undefined) parts.push(`X${fmtX(move.x)}`);
+            if (move.y !== undefined) parts.push(`Y${fmtY(move.y)}`);
             if (move.z !== undefined) parts.push(`Z${fmt(move.z)}`);
             if (move.i !== undefined) parts.push(`I${fmt(move.i)}`);
             if (move.j !== undefined) parts.push(`J${fmt(move.j)}`);

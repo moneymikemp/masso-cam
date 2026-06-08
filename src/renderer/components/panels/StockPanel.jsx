@@ -123,15 +123,15 @@ export default function StockPanel() {
     if (gW < 1e-6 || gH < 1e-6) return;
 
     const newW = gW * 1.1, newL = gH * 1.1;
-    const mX = gW * 0.05, mY = gH * 0.05;  // 5% each side → 10% total margin
+    const mX   = gW * 0.05, mY = gH * 0.05;  // 5 % each side
 
-    // Shift geometry so the datum-positioned stock surrounds it with equal margins
-    const shiftX = -datumXFrac(stockConfig.datum) * newW + mX - gMinX;
-    const shiftY = -datumYFrac(stockConfig.datum) * newL + mY - gMinY;
+    // The stock lower-left corner lands at (gMinX - mX, gMinY - mY).
+    // The datum point is offset from that corner by (xFrac*newW, yFrac*newL).
+    const stockOriginX = gMinX - mX + datumXFrac(stockConfig.datum) * newW;
+    const stockOriginY = gMinY - mY + datumYFrac(stockConfig.datum) * newL;
 
-    const shifted = applyShift(entities, shiftX, shiftY);
-    dispatch({ type: 'SET_DXF', payload: { entities: shifted, layers, bounds: getBounds(shifted) } });
-    dispatch({ type: 'SET_STOCK_CONFIG', payload: { width: newW, length: newL } });
+    // Reposition and resize the stock — geometry is NOT moved.
+    dispatch({ type: 'SET_STOCK_CONFIG', payload: { width: newW, length: newL, stockOriginX, stockOriginY } });
   }
 
   function moveToOrigin() {
@@ -139,18 +139,22 @@ export default function StockPanel() {
     const { minX: gMinX, minY: gMinY, maxX: gMaxX, maxY: gMaxY } = bounds;
     const gCX = (gMinX + gMaxX) / 2, gCY = (gMinY + gMaxY) / 2;
 
-    // Shift so the datum-appropriate reference point lands exactly at (0, 0)
+    // Compute which point in the geometry should land at world (0, 0)
     const refX = stockConfig.datum[1] === 'l' ? gMinX : stockConfig.datum[1] === 'c' ? gCX : gMaxX;
     const refY = stockConfig.datum[0] === 'b' ? gMinY : stockConfig.datum[0] === 'm' ? gCY : gMaxY;
 
-    const shifted = applyShift(entities, -refX, -refY);
+    // Shift entities so that datum reference is at (0, 0)
+    const shifted   = applyShift(entities, -refX, -refY);
     const newBounds = getBounds(shifted);
     dispatch({ type: 'SET_DXF', payload: { entities: shifted, layers, bounds: newBounds } });
 
-    // Size stock to cover shifted geometry with 10 % overhang beyond the datum side
     const nW = newBounds.maxX - newBounds.minX;
     const nH = newBounds.maxY - newBounds.minY;
-    dispatch({ type: 'SET_STOCK_CONFIG', payload: { width: nW * 1.1, length: nH * 1.1 } });
+    // Reset datum origin to world (0, 0) and size stock to fit moved geometry
+    dispatch({ type: 'SET_STOCK_CONFIG', payload: {
+      width: nW * 1.1, length: nH * 1.1,
+      stockOriginX: 0, stockOriginY: 0,
+    }});
   }
 
   function toDisp(v) { return isInch ? +(v / MM_PER_INCH).toFixed(4) : v; }
