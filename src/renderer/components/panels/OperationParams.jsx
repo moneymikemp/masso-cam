@@ -355,6 +355,14 @@ export default function OperationParams({ op, tools, onChange }) {
         const zRaise    = isPlug ? (p.fitTolerance || 0.127) / Math.tan(taperRad) : 0;
 
         return <>
+          {/* Reactive entity-assignment guard — reads op.selectedIds directly so it
+              clears immediately after the Assign button is clicked, not after recalculate. */}
+          {!op.selectedIds?.length && (
+            <div style={{ margin: '4px 0 6px', padding: '5px 8px', background: '#2a1a00', border: '1px solid #664400', borderRadius: 3, fontSize: 10, color: '#ffaa44' }}>
+              ⚠ Select entities on the canvas then click ← Assign before calculating.
+            </div>
+          )}
+
           {/* ─ Pass 1: Taper Contour ─ */}
           <PassHdr label="Taper Contour" passKey="taperContour" passObj={tc} />
           {tc.enabled !== false && <>
