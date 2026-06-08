@@ -20,7 +20,8 @@ export function generateToolpath(operation, entities) {
     case 'slot':      return generateSlot(operation, entities);
     case 'chamfer':      return generateChamfer(operation, entities);
     case 'thread':       return generateThread(operation, entities);
-    case 'taperedinlay': return generateTaperedInlay(operation, entities);
+    case 'taperedpocket': return generateTaperedPocket(operation, entities);
+    case 'taperedplug':   return generateTaperedPlug(operation, entities);
     default:             return { moves: [], warnings: ['Unknown operation: ' + type] };
   }
 }
@@ -496,9 +497,14 @@ function generateThread(op, entities) {
   return { moves, warnings: [] };
 }
 
-// ── Tapered Inlay ─────────────────────────────────────────────────────────────
+// ── Tapered Pocket / Tapered Plug ────────────────────────────────────────────
+//
+// Both operations share the same two-pass structure (taper trace + endmill
+// cleanup).  The only difference is that Tapered Plug raises topZ by
+// fitTolerance / tan(halfAngle) so the plug engages the pocket walls slightly
+// higher, leaving a controlled fit gap around the perimeter.
 
-function generateTaperedInlay(op, entities) {
+function generateTaperedPocket(op, entities) {
   const p = op.params;
   const warnings = [];
   const selected = getSelectedEntities(entities, op.selectedIds);
@@ -507,44 +513,42 @@ function generateTaperedInlay(op, entities) {
   const topZ     = p.topZ ?? 0;
   const depth    = Math.abs(p.pocketDepth || 5);
   const safeZ    = p.safeZ ?? 10;
-  // p.taperAngle is the full included angle shown in the UI (e.g. 10°).
-  // All geometry calculations need the half-angle (axis → cutting edge).
+  const taperRad = Math.max(0.5, (p.taperAngle || 10) / 2) * Math.PI / 180;
+
+  const subToolpaths = [
+    { name: 'Taper Cut', color: '#ff8844', toolHint: 'taper',
+      moves: buildTaperTrace(selected, topZ, depth, safeZ, p.taperFeedRate || 1000, p.taperPlungeRate || 300) },
+    { name: 'Cleanup',   color: '#44ff88', toolHint: 'endmill',
+      moves: buildTaperCleanup(selected, topZ, depth, safeZ, p, taperRad, warnings) },
+  ];
+
+  const moves = subToolpaths.flatMap(st => st.moves);
+  return { moves, subToolpaths, warnings };
+}
+
+function generateTaperedPlug(op, entities) {
+  const p = op.params;
+  const warnings = [];
+  const selected = getSelectedEntities(entities, op.selectedIds);
+  if (!selected.length) return { moves: [], subToolpaths: [], warnings: ['No entities selected'] };
+
+  const topZ     = p.topZ ?? 0;
+  const depth    = Math.abs(p.pocketDepth || 5);
+  const safeZ    = p.safeZ ?? 10;
+  // p.taperAngle is the full included angle; all geometry uses the half-angle.
   // Guard at 0.5° half-angle to prevent tan() blowing up for near-zero tapers.
   const taperRad = Math.max(0.5, (p.taperAngle || 10) / 2) * Math.PI / 180;
-  // Raising the plug's Z reference by this amount makes the plug fractionally
-  // smaller — it engages the angled pocket walls at a slightly higher position,
-  // leaving a fitTolerance gap all around the perimeter.
+  // Raising topZ makes the plug engage the pocket walls fractionally higher,
+  // creating the fitTolerance gap uniformly around the perimeter.
   const plugTopZ = topZ + (p.fitTolerance || 0.127) / Math.tan(taperRad);
 
-  const subToolpaths = [];
+  const subToolpaths = [
+    { name: 'Taper Cut', color: '#ff44bb', toolHint: 'taper',
+      moves: buildTaperTrace(selected, plugTopZ, depth, safeZ, p.taperFeedRate || 1000, p.taperPlungeRate || 300) },
+    { name: 'Cleanup',   color: '#4499ff', toolHint: 'endmill',
+      moves: buildTaperCleanup(selected, plugTopZ, depth, safeZ, p, taperRad, warnings) },
+  ];
 
-  if (p.doPocketTaper !== false) {
-    subToolpaths.push({
-      name: 'Pocket Taper', color: '#ff8844', toolHint: 'taper',
-      moves: buildTaperTrace(selected, topZ, depth, safeZ, p.taperFeedRate || 1000, p.taperPlungeRate || 300),
-    });
-  }
-  if (p.doPocketCleanup !== false) {
-    subToolpaths.push({
-      name: 'Pocket Cleanup', color: '#44ff88', toolHint: 'endmill',
-      moves: buildInlayCleanup(selected, topZ, depth, safeZ, p, taperRad, warnings),
-    });
-  }
-  if (p.doPlugTaper !== false) {
-    subToolpaths.push({
-      name: 'Plug Taper', color: '#ff44bb', toolHint: 'taper',
-      moves: buildTaperTrace(selected, plugTopZ, depth, safeZ, p.taperFeedRate || 1000, p.taperPlungeRate || 300),
-    });
-  }
-  if (p.doPlugCleanup !== false) {
-    subToolpaths.push({
-      name: 'Plug Cleanup', color: '#4499ff', toolHint: 'endmill',
-      moves: buildInlayCleanup(selected, plugTopZ, depth, safeZ, p, taperRad, warnings),
-    });
-  }
-
-  // Flatten all sub-moves into toolpath.moves so the rest of the pipeline
-  // (cycle-time, canvas) can treat this like any other operation.
   const moves = subToolpaths.flatMap(st => st.moves);
   return { moves, subToolpaths, warnings };
 }
@@ -571,27 +575,25 @@ function buildTaperTrace(entities, topZ, depth, safeZ, feedRate, plungeRate) {
   return moves;
 }
 
-// Clear the material between the outer taper wall and any island taper walls.
+// Clear material between outer and island taper walls with the endmill.
 //
 // Wall-stock formula (taperRad is the half-angle):
-//   wallLeave = depth × tan(halfAngle) + safetyMargin
+//   wallLeave = depth × tan(halfAngle) + wallStockToLeave
 //
 // The outer boundary is inset by (endmillR + wallLeave) so the endmill centre
-// stays clear of the angled pocket wall.  Each island is outset by the same
-// amount to create an exclusion zone — passes that enter any exclusion zone are
-// discarded by generatePocketOffsets, preventing the endmill from cutting into
-// island taper walls.
+// stays clear of the angled wall.  Each island is outset by the same amount
+// to create an exclusion zone; passes that enter an exclusion zone are discarded
+// by generatePocketOffsets, preventing the endmill from cutting into island walls.
 //
 // When multiple entities are selected the largest polygon is the outer boundary
-// and all smaller polygons inside it are treated as islands (mirrors generatePocket).
-function buildInlayCleanup(entities, topZ, depth, safeZ, p, taperRad, warnings) {
+// and all smaller polygons inside it are treated as islands.
+function buildTaperCleanup(entities, topZ, depth, safeZ, p, taperRad, warnings) {
   const moves      = [];
   const endmillR   = (p.endmillDiameter || 3.175) / 2;
-  const wallLeave  = depth * Math.tan(taperRad) + (p.safetyMargin || 0.254);
+  const wallLeave  = depth * Math.tan(taperRad) + (p.wallStockToLeave || 0.254);
   const inset      = endmillR + wallLeave;
   const zPasses    = buildZPasses(topZ, depth, p.endmillDiameter || 3.175);
 
-  // Build profiles and sort by area: largest = outer boundary, rest = islands
   const profiles = entities
     .map(e => entityToProfile(e))
     .filter(prof => prof && prof.length >= 3);
@@ -602,14 +604,12 @@ function buildInlayCleanup(entities, topZ, depth, safeZ, p, taperRad, warnings) 
   const outerProfile   = profiles[0];
   const islandProfiles = profiles.slice(1);
 
-  // Inset outer boundary — endmill centre must stay ≥ inset from the taper wall
   const boundary = offsetPolyline(outerProfile, inset, true)[0];
   if (!boundary || boundary.length < 4 || polygonArea(boundary) < endmillR * endmillR * Math.PI * 0.25) {
     warnings.push(`Cleanup: outer contour too small for ⌀${(p.endmillDiameter || 3.175).toFixed(2)}mm endmill + wall clearance`);
     return moves;
   }
 
-  // Outset each island by inset to create an exclusion zone the endmill must avoid
   const islandExclusions = islandProfiles.map(island => {
     const ccw      = isClockwise(island) ? [...island].reverse() : island;
     const expanded = offsetPolyline(ccw, -inset, true)[0];

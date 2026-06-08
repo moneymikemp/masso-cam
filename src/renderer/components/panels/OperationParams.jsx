@@ -287,13 +287,14 @@ export default function OperationParams({ op, tools, onChange }) {
         <Field label="Safe Z" unit={distUnit}><NumInput value={toDisp(p.safeZ ?? 25)} onChange={v => set('safeZ', toMM(v))} step={isInch ? 0.05 : 1} /></Field>
       </>}
 
-      {/* ── Tapered Inlay ── */}
-      {op.type === 'taperedinlay' && (() => {
-        const taperTools  = tools.filter(t => ['tapered','vbit','engraving'].includes(t.type));
+      {/* ── Tapered Pocket / Tapered Plug ── */}
+      {(op.type === 'taperedpocket' || op.type === 'taperedplug') && (() => {
+        const taperTools   = tools.filter(t => ['tapered','vbit','engraving'].includes(t.type));
         const endmillTools = tools.filter(t => ['flat','upcut','downcut','compression'].includes(t.type));
+        const isPlug = op.type === 'taperedplug';
 
         function selectTaperTool(e) {
-          const id  = e.target.value || null;
+          const id   = e.target.value || null;
           const tool = id ? tools.find(t => String(t.id) === id) : null;
           const updates = { taperToolId: id };
           if (tool?.tipDiameter != null) updates.tipDiameter = tool.tipDiameter;
@@ -302,7 +303,7 @@ export default function OperationParams({ op, tools, onChange }) {
         }
 
         function selectEndmill(e) {
-          const id  = e.target.value || null;
+          const id   = e.target.value || null;
           const tool = id ? tools.find(t => String(t.id) === id) : null;
           const updates = { endmillToolId: id };
           if (tool?.diameter != null) updates.endmillDiameter = tool.diameter;
@@ -322,6 +323,11 @@ export default function OperationParams({ op, tools, onChange }) {
           const dia = isInch ? (t.diameter / MM_PER_INCH).toFixed(4) : t.diameter;
           return `${t.name} (⌀${dia}${distUnit})`;
         }
+
+        // Z raise = fitTolerance / tan(halfAngle); recomputed live so user can
+        // verify the effect of changing angle or tolerance before saving.
+        const taperRad = Math.max(0.5, (p.taperAngle || 10) / 2) * Math.PI / 180;
+        const zRaise   = isPlug ? (p.fitTolerance || 0.127) / Math.tan(taperRad) : 0;
 
         return <>
           <div style={S.section}>Taper Bit</div>
@@ -360,15 +366,33 @@ export default function OperationParams({ op, tools, onChange }) {
           <Field label="Top of Stock" unit={distUnit}><NumInput value={toDisp(p.topZ ?? 0)} onChange={v => set('topZ', toMM(v))} step={isInch ? 0.02 : 0.5} /></Field>
           <Field label="Safe Z" unit={distUnit}><NumInput value={toDisp(p.safeZ ?? 10)} onChange={v => set('safeZ', toMM(v))} step={isInch ? 0.05 : 1} /></Field>
 
-          <div style={S.section}>Fit</div>
-          <Field label="Fit Tolerance" unit={distUnit}><NumInput value={toDisp(p.fitTolerance ?? 0.127)} onChange={v => set('fitTolerance', toMM(v))} min={0} step={isInch ? 0.0005 : 0.01} /></Field>
-          <Field label="Wall Safety" unit={distUnit}><NumInput value={toDisp(p.safetyMargin ?? 0.254)} onChange={v => set('safetyMargin', toMM(v))} min={0} step={isInch ? 0.001 : 0.02} /></Field>
+          <div style={S.section}>Clearance</div>
+          <Field label="Wall Stock" unit={distUnit}><NumInput value={toDisp(p.wallStockToLeave ?? 0.254)} onChange={v => set('wallStockToLeave', toMM(v))} min={0} step={isInch ? 0.001 : 0.02} /></Field>
 
-          <div style={S.section}>Passes to Generate</div>
-          <CheckField label="Pocket Taper"   value={p.doPocketTaper   !== false} onChange={v => set('doPocketTaper',   v)} />
-          <CheckField label="Pocket Cleanup" value={p.doPocketCleanup !== false} onChange={v => set('doPocketCleanup', v)} />
-          <CheckField label="Plug Taper"     value={p.doPlugTaper     !== false} onChange={v => set('doPlugTaper',     v)} />
-          <CheckField label="Plug Cleanup"   value={p.doPlugCleanup   !== false} onChange={v => set('doPlugCleanup',   v)} />
+          {isPlug && (() => {
+            const engDepthIn = zRaise / MM_PER_INCH;
+            const fitQuality = engDepthIn < 0.030 ? 'tight' : engDepthIn > 0.080 ? 'loose' : 'ideal';
+            const fitColor   = { tight: '#ff4444', ideal: '#44cc66', loose: '#ffaa33' }[fitQuality];
+            const fitBadge   = { tight: '● Too tight', ideal: '● Ideal', loose: '● Loose' }[fitQuality];
+            const readout    = { flex: 1, background: '#0a0a18', border: '1px solid #1a1a38', color: '#88aacc', borderRadius: 3, padding: '2px 5px', fontSize: 11, minWidth: 0 };
+
+            return <>
+              <div style={S.section}>Fit</div>
+              <Field label="Fit Tolerance" unit={distUnit}><NumInput value={toDisp(p.fitTolerance ?? 0.127)} onChange={v => set('fitTolerance', toMM(v))} min={0} step={isInch ? 0.0005 : 0.01} /></Field>
+              <Field label="Z Raise (calc.)" unit={distUnit}>
+                <span style={readout}>{toDisp(zRaise).toFixed(isInch ? 4 : 3)}</span>
+              </Field>
+
+              <div style={S.section}>Fit Preview</div>
+              <Field label="Engagement Depth" unit={distUnit}>
+                <span style={readout}>{toDisp(zRaise).toFixed(isInch ? 4 : 3)}</span>
+                <span style={{ color: fitColor, fontSize: 10, flexShrink: 0, fontWeight: 600 }}>{fitBadge}</span>
+              </Field>
+              <Field label="Interference" unit={distUnit}>
+                <span style={readout}>{toDisp(p.fitTolerance ?? 0.127).toFixed(isInch ? 4 : 3)}</span>
+              </Field>
+            </>;
+          })()}
         </>;
       })()}
     </div>

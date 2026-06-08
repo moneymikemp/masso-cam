@@ -16,7 +16,8 @@ const OP_TYPES = [
   { type: 'slot',     label: 'Slot',                 icon: '▭', desc: 'Slot with ramp entry' },
   { type: 'chamfer',      label: '2D Chamfer',    icon: '◤', desc: 'Chamfer mill along contour' },
   { type: 'thread',       label: 'Thread',        icon: '⌀', desc: 'Thread milling (helical)' },
-  { type: 'taperedinlay', label: 'Tapered Inlay', icon: '◇', desc: '4-pass V-bit inlay — pocket + plug' },
+  { type: 'taperedpocket', label: 'Tapered Pocket', icon: '◈', desc: 'V-bit profile + endmill cleanup — pocket half' },
+  { type: 'taperedplug',   label: 'Tapered Plug',   icon: '◇', desc: 'V-bit profile + endmill cleanup — plug half, fit raised' },
 ];
 
 const S = {

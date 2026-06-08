@@ -177,7 +177,7 @@ export function generateGcode(operations, postConfig = {}) {
     }
 
     if (toolpath.subToolpaths?.length > 0) {
-      // ── Tapered inlay: emit each pass with a manual tool-change stop ──────
+      // ── Multi-pass op: emit each sub-pass with a manual tool-change stop ──
       let activeHint = null;
       for (const sub of toolpath.subToolpaths) {
         if (!sub.moves?.length) continue;
