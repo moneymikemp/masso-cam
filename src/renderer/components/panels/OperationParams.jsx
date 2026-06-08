@@ -289,25 +289,38 @@ export default function OperationParams({ op, tools, onChange }) {
 
       {/* ── Tapered Pocket / Tapered Plug ── */}
       {(op.type === 'taperedpocket' || op.type === 'taperedplug') && (() => {
+        const isPlug       = op.type === 'taperedplug';
+        const passes       = p.passes || {};
+        const tc = passes.taperContour  || {};
+        const tk = passes.taperCleanup  || {};
+        const de = passes.detailEndmill || {};
+        const be = passes.bulkEndmill   || {};
+
         const taperTools   = tools.filter(t => ['tapered','vbit','engraving'].includes(t.type));
         const endmillTools = tools.filter(t => ['flat','upcut','downcut','compression'].includes(t.type));
-        const isPlug = op.type === 'taperedplug';
 
-        function selectTaperTool(e) {
-          const id   = e.target.value || null;
-          const tool = id ? tools.find(t => String(t.id) === id) : null;
-          const updates = { taperToolId: id };
-          if (tool?.tipDiameter != null) updates.tipDiameter = tool.tipDiameter;
-          if (tool?.taperAngle  != null) updates.taperAngle  = tool.taperAngle;
-          onChange({ params: { ...p, ...updates } });
+        function setPass(key, field, val) {
+          const cur = passes[key] || {};
+          onChange({ params: { ...p, passes: { ...passes, [key]: { ...cur, [field]: val } } } });
         }
 
-        function selectEndmill(e) {
+        function selectTaperPass(key, e) {
           const id   = e.target.value || null;
           const tool = id ? tools.find(t => String(t.id) === id) : null;
-          const updates = { endmillToolId: id };
-          if (tool?.diameter != null) updates.endmillDiameter = tool.diameter;
-          onChange({ params: { ...p, ...updates } });
+          const cur  = passes[key] || {};
+          const upd  = { ...cur, toolId: id };
+          if (tool?.tipDiameter != null) upd.tipDia = tool.tipDiameter;
+          if (tool?.taperAngle  != null) upd.angle  = tool.taperAngle;
+          onChange({ params: { ...p, passes: { ...passes, [key]: upd } } });
+        }
+
+        function selectEndmillPass(key, e) {
+          const id   = e.target.value || null;
+          const tool = id ? tools.find(t => String(t.id) === id) : null;
+          const cur  = passes[key] || {};
+          const upd  = { ...cur, toolId: id };
+          if (tool?.diameter != null) upd.diameter = tool.diameter;
+          onChange({ params: { ...p, passes: { ...passes, [key]: upd } } });
         }
 
         function taperLabel(t) {
@@ -324,50 +337,105 @@ export default function OperationParams({ op, tools, onChange }) {
           return `${t.name} (⌀${dia}${distUnit})`;
         }
 
-        // Z raise = fitTolerance / tan(halfAngle); recomputed live so user can
-        // verify the effect of changing angle or tolerance before saving.
-        const taperRad = Math.max(0.5, (p.taperAngle || 10) / 2) * Math.PI / 180;
-        const zRaise   = isPlug ? (p.fitTolerance || 0.127) / Math.tan(taperRad) : 0;
+        // Pass section header with inline enable checkbox
+        function PassHdr({ label, passKey, passObj }) {
+          return (
+            <div style={{ ...S.section, display: 'flex', alignItems: 'center', gap: 5 }}>
+              <input type="checkbox" style={{ margin: 0, cursor: 'pointer' }}
+                checked={passObj.enabled !== false}
+                onChange={e => setPass(passKey, 'enabled', e.target.checked)} />
+              {label}
+            </div>
+          );
+        }
+
+        // Fit-preview calcs (plug only) — driven by taperContour angle
+        const wallAngle = tc.angle ?? tk.angle ?? 10;
+        const taperRad  = Math.max(0.5, wallAngle / 2) * Math.PI / 180;
+        const zRaise    = isPlug ? (p.fitTolerance || 0.127) / Math.tan(taperRad) : 0;
 
         return <>
-          <div style={S.section}>Taper Bit</div>
-          <Field label="Tool">
-            <select style={S.select} value={p.taperToolId || ''} onChange={selectTaperTool}>
-              <option value="">Manual settings...</option>
-              {taperTools.map(t => <option key={t.id} value={t.id}>{taperLabel(t)}</option>)}
-            </select>
-          </Field>
-          <Field label="Tip Diameter" unit={distUnit}>
-            <NumInput value={toDisp(p.tipDiameter ?? 0.5)} onChange={v => set('tipDiameter', toMM(v))} min={0} step={isInch ? 0.001 : 0.01} />
-          </Field>
-          <Field label="Taper Angle" unit="°">
-            <NumInput value={p.taperAngle ?? 10} onChange={v => set('taperAngle', v)} min={1} max={60} step={0.5} />
-          </Field>
-          <Field label="Spindle RPM" unit="rpm"><NumInput value={p.taperSpindleRpm || 24000} onChange={v => set('taperSpindleRpm', v)} step={100} /></Field>
-          <Field label="Feed Rate" unit={feedUnit}><NumInput value={toDisp(p.taperFeedRate ?? 1000)} onChange={v => set('taperFeedRate', toMM(v))} step={isInch ? 1 : 50} /></Field>
-          <Field label="Plunge Rate" unit={feedUnit}><NumInput value={toDisp(p.taperPlungeRate ?? 300)} onChange={v => set('taperPlungeRate', toMM(v))} step={fStep} /></Field>
+          {/* ─ Pass 1: Taper Contour ─ */}
+          <PassHdr label="Taper Contour" passKey="taperContour" passObj={tc} />
+          {tc.enabled !== false && <>
+            <Field label="Tool">
+              <select style={S.select} value={tc.toolId || ''} onChange={e => selectTaperPass('taperContour', e)}>
+                <option value="">Manual settings...</option>
+                {taperTools.map(t => <option key={t.id} value={t.id}>{taperLabel(t)}</option>)}
+              </select>
+            </Field>
+            <Field label="Tip Diameter" unit={distUnit}>
+              <NumInput value={toDisp(tc.tipDia ?? 0.5)} onChange={v => setPass('taperContour', 'tipDia', toMM(v))} min={0} step={isInch ? 0.001 : 0.01} />
+            </Field>
+            <Field label="Taper Angle" unit="°">
+              <NumInput value={tc.angle ?? 10} onChange={v => setPass('taperContour', 'angle', v)} min={1} max={60} step={0.5} />
+            </Field>
+            <Field label="Spindle RPM" unit="rpm"><NumInput value={tc.rpm || 24000} onChange={v => setPass('taperContour', 'rpm', v)} step={100} /></Field>
+            <Field label="Feed Rate" unit={feedUnit}><NumInput value={toDisp(tc.feed ?? 1000)} onChange={v => setPass('taperContour', 'feed', toMM(v))} step={isInch ? 1 : 50} /></Field>
+            <Field label="Plunge Rate" unit={feedUnit}><NumInput value={toDisp(tc.plunge ?? 300)} onChange={v => setPass('taperContour', 'plunge', toMM(v))} step={fStep} /></Field>
+          </>}
 
-          <div style={S.section}>Cleanup Endmill</div>
-          <Field label="Tool">
-            <select style={S.select} value={p.endmillToolId || ''} onChange={selectEndmill}>
-              <option value="">Manual settings...</option>
-              {endmillTools.map(t => <option key={t.id} value={t.id}>{endmillLabel(t)}</option>)}
-            </select>
-          </Field>
-          <Field label="Diameter" unit={distUnit}>
-            <NumInput value={toDisp(p.endmillDiameter ?? 3.175)} onChange={v => set('endmillDiameter', toMM(v))} min={isInch ? 0.01 : 0.25} step={isInch ? 0.001 : 0.01} />
-          </Field>
-          <Field label="Spindle RPM" unit="rpm"><NumInput value={p.endmillSpindleRpm || 18000} onChange={v => set('endmillSpindleRpm', v)} step={100} /></Field>
-          <Field label="Feed Rate" unit={feedUnit}><NumInput value={toDisp(p.endmillFeedRate ?? 1500)} onChange={v => set('endmillFeedRate', toMM(v))} step={isInch ? 2 : 50} /></Field>
-          <Field label="Plunge Rate" unit={feedUnit}><NumInput value={toDisp(p.endmillPlungeRate ?? 500)} onChange={v => set('endmillPlungeRate', toMM(v))} step={fStep} /></Field>
+          {/* ─ Pass 2: Taper Cleanup ─ */}
+          <PassHdr label="Taper Cleanup" passKey="taperCleanup" passObj={tk} />
+          {tk.enabled !== false && <>
+            <Field label="Tool">
+              <select style={S.select} value={tk.toolId || ''} onChange={e => selectTaperPass('taperCleanup', e)}>
+                <option value="">Manual settings...</option>
+                {taperTools.map(t => <option key={t.id} value={t.id}>{taperLabel(t)}</option>)}
+              </select>
+            </Field>
+            <Field label="Tip Diameter" unit={distUnit}>
+              <NumInput value={toDisp(tk.tipDia ?? 0.5)} onChange={v => setPass('taperCleanup', 'tipDia', toMM(v))} min={0} step={isInch ? 0.001 : 0.01} />
+            </Field>
+            <Field label="Taper Angle" unit="°">
+              <NumInput value={tk.angle ?? 10} onChange={v => setPass('taperCleanup', 'angle', v)} min={1} max={60} step={0.5} />
+            </Field>
+            <Field label="Spindle RPM" unit="rpm"><NumInput value={tk.rpm || 24000} onChange={v => setPass('taperCleanup', 'rpm', v)} step={100} /></Field>
+            <Field label="Feed Rate" unit={feedUnit}><NumInput value={toDisp(tk.feed ?? 1000)} onChange={v => setPass('taperCleanup', 'feed', toMM(v))} step={isInch ? 1 : 50} /></Field>
+            <Field label="Plunge Rate" unit={feedUnit}><NumInput value={toDisp(tk.plunge ?? 300)} onChange={v => setPass('taperCleanup', 'plunge', toMM(v))} step={fStep} /></Field>
+            <Field label="Wall Stock" unit={distUnit}><NumInput value={toDisp(tk.wallStock ?? 0.254)} onChange={v => setPass('taperCleanup', 'wallStock', toMM(v))} min={0} step={isInch ? 0.001 : 0.02} /></Field>
+          </>}
+
+          {/* ─ Pass 3: Detail Endmill ─ */}
+          <PassHdr label="Detail Endmill" passKey="detailEndmill" passObj={de} />
+          {de.enabled !== false && <>
+            <Field label="Tool">
+              <select style={S.select} value={de.toolId || ''} onChange={e => selectEndmillPass('detailEndmill', e)}>
+                <option value="">Manual settings...</option>
+                {endmillTools.map(t => <option key={t.id} value={t.id}>{endmillLabel(t)}</option>)}
+              </select>
+            </Field>
+            <Field label="Diameter" unit={distUnit}>
+              <NumInput value={toDisp(de.diameter ?? 1.5875)} onChange={v => setPass('detailEndmill', 'diameter', toMM(v))} min={isInch ? 0.01 : 0.25} step={isInch ? 0.001 : 0.01} />
+            </Field>
+            <Field label="Spindle RPM" unit="rpm"><NumInput value={de.rpm || 18000} onChange={v => setPass('detailEndmill', 'rpm', v)} step={100} /></Field>
+            <Field label="Feed Rate" unit={feedUnit}><NumInput value={toDisp(de.feed ?? 800)} onChange={v => setPass('detailEndmill', 'feed', toMM(v))} step={isInch ? 2 : 50} /></Field>
+            <Field label="Plunge Rate" unit={feedUnit}><NumInput value={toDisp(de.plunge ?? 300)} onChange={v => setPass('detailEndmill', 'plunge', toMM(v))} step={fStep} /></Field>
+            <Field label="Wall Stock" unit={distUnit}><NumInput value={toDisp(de.wallStock ?? 0.254)} onChange={v => setPass('detailEndmill', 'wallStock', toMM(v))} min={0} step={isInch ? 0.001 : 0.02} /></Field>
+          </>}
+
+          {/* ─ Pass 4: Bulk Endmill ─ */}
+          <PassHdr label="Bulk Endmill" passKey="bulkEndmill" passObj={be} />
+          {be.enabled !== false && <>
+            <Field label="Tool">
+              <select style={S.select} value={be.toolId || ''} onChange={e => selectEndmillPass('bulkEndmill', e)}>
+                <option value="">Manual settings...</option>
+                {endmillTools.map(t => <option key={t.id} value={t.id}>{endmillLabel(t)}</option>)}
+              </select>
+            </Field>
+            <Field label="Diameter" unit={distUnit}>
+              <NumInput value={toDisp(be.diameter ?? 6.35)} onChange={v => setPass('bulkEndmill', 'diameter', toMM(v))} min={isInch ? 0.01 : 0.25} step={isInch ? 0.001 : 0.01} />
+            </Field>
+            <Field label="Spindle RPM" unit="rpm"><NumInput value={be.rpm || 18000} onChange={v => setPass('bulkEndmill', 'rpm', v)} step={100} /></Field>
+            <Field label="Feed Rate" unit={feedUnit}><NumInput value={toDisp(be.feed ?? 1500)} onChange={v => setPass('bulkEndmill', 'feed', toMM(v))} step={isInch ? 2 : 50} /></Field>
+            <Field label="Plunge Rate" unit={feedUnit}><NumInput value={toDisp(be.plunge ?? 500)} onChange={v => setPass('bulkEndmill', 'plunge', toMM(v))} step={fStep} /></Field>
+            <Field label="Wall Stock" unit={distUnit}><NumInput value={toDisp(be.wallStock ?? 0.254)} onChange={v => setPass('bulkEndmill', 'wallStock', toMM(v))} min={0} step={isInch ? 0.001 : 0.02} /></Field>
+          </>}
 
           <div style={S.section}>Depth</div>
           <Field label="Pocket Depth" unit={distUnit}><NumInput value={toDisp(p.pocketDepth ?? 5)} onChange={v => set('pocketDepth', toMM(v))} min={isInch ? 0.01 : 0.25} step={dStep} /></Field>
           <Field label="Top of Stock" unit={distUnit}><NumInput value={toDisp(p.topZ ?? 0)} onChange={v => set('topZ', toMM(v))} step={isInch ? 0.02 : 0.5} /></Field>
           <Field label="Safe Z" unit={distUnit}><NumInput value={toDisp(p.safeZ ?? 10)} onChange={v => set('safeZ', toMM(v))} step={isInch ? 0.05 : 1} /></Field>
-
-          <div style={S.section}>Clearance</div>
-          <Field label="Wall Stock" unit={distUnit}><NumInput value={toDisp(p.wallStockToLeave ?? 0.254)} onChange={v => set('wallStockToLeave', toMM(v))} min={0} step={isInch ? 0.001 : 0.02} /></Field>
 
           {isPlug && (() => {
             const engDepthIn = zRaise / MM_PER_INCH;
@@ -375,14 +443,12 @@ export default function OperationParams({ op, tools, onChange }) {
             const fitColor   = { tight: '#ff4444', ideal: '#44cc66', loose: '#ffaa33' }[fitQuality];
             const fitBadge   = { tight: '● Too tight', ideal: '● Ideal', loose: '● Loose' }[fitQuality];
             const readout    = { flex: 1, background: '#0a0a18', border: '1px solid #1a1a38', color: '#88aacc', borderRadius: 3, padding: '2px 5px', fontSize: 11, minWidth: 0 };
-
             return <>
               <div style={S.section}>Fit</div>
               <Field label="Fit Tolerance" unit={distUnit}><NumInput value={toDisp(p.fitTolerance ?? 0.127)} onChange={v => set('fitTolerance', toMM(v))} min={0} step={isInch ? 0.0005 : 0.01} /></Field>
               <Field label="Z Raise (calc.)" unit={distUnit}>
                 <span style={readout}>{toDisp(zRaise).toFixed(isInch ? 4 : 3)}</span>
               </Field>
-
               <div style={S.section}>Fit Preview</div>
               <Field label="Engagement Depth" unit={distUnit}>
                 <span style={readout}>{toDisp(zRaise).toFixed(isInch ? 4 : 3)}</span>

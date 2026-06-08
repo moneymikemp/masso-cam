@@ -499,10 +499,19 @@ function generateThread(op, entities) {
 
 // ── Tapered Pocket / Tapered Plug ────────────────────────────────────────────
 //
-// Both operations share the same two-pass structure (taper trace + endmill
-// cleanup).  The only difference is that Tapered Plug raises topZ by
-// fitTolerance / tan(halfAngle) so the plug engages the pocket walls slightly
-// higher, leaving a controlled fit gap around the perimeter.
+// Each operation has four independently-enabled passes:
+//   Taper Contour  — V-bit traces the exact profile at full depth (defines walls)
+//   Taper Cleanup  — V-bit concentric clearing of floor area near walls
+//   Detail Endmill — small endmill clears medium-detail areas
+//   Bulk Endmill   — large endmill removes remaining bulk
+//
+// Plug raises the taper contour's topZ by fitTolerance/tan(halfAngle) so the
+// plug engages the pocket walls fractionally higher, leaving a controlled fit gap.
+//
+// Wall-clearance formula used by all concentric-clearing passes:
+//   wallLeave = depth × tan(halfAngle) + wallStock
+// The outer boundary is inset by (toolR + wallLeave); islands are outset by the
+// same amount to create exclusion zones.
 
 function generateTaperedPocket(op, entities) {
   const p = op.params;
@@ -510,20 +519,10 @@ function generateTaperedPocket(op, entities) {
   const selected = getSelectedEntities(entities, op.selectedIds);
   if (!selected.length) return { moves: [], subToolpaths: [], warnings: ['No entities selected'] };
 
-  const topZ     = p.topZ ?? 0;
-  const depth    = Math.abs(p.pocketDepth || 5);
-  const safeZ    = p.safeZ ?? 10;
-  const taperRad = Math.max(0.5, (p.taperAngle || 10) / 2) * Math.PI / 180;
-
-  const subToolpaths = [
-    { name: 'Taper Cut', color: '#ff8844', toolHint: 'taper',
-      moves: buildTaperTrace(selected, topZ, depth, safeZ, p.taperFeedRate || 1000, p.taperPlungeRate || 300) },
-    { name: 'Cleanup',   color: '#44ff88', toolHint: 'endmill',
-      moves: buildTaperCleanup(selected, topZ, depth, safeZ, p, taperRad, warnings) },
-  ];
-
-  const moves = subToolpaths.flatMap(st => st.moves);
-  return { moves, subToolpaths, warnings };
+  const topZ   = p.topZ ?? 0;
+  const depth  = Math.abs(p.pocketDepth || 5);
+  const safeZ  = p.safeZ ?? 10;
+  return buildTaperedPasses(selected, topZ, depth, safeZ, p, warnings);
 }
 
 function generateTaperedPlug(op, entities) {
@@ -532,22 +531,84 @@ function generateTaperedPlug(op, entities) {
   const selected = getSelectedEntities(entities, op.selectedIds);
   if (!selected.length) return { moves: [], subToolpaths: [], warnings: ['No entities selected'] };
 
-  const topZ     = p.topZ ?? 0;
-  const depth    = Math.abs(p.pocketDepth || 5);
-  const safeZ    = p.safeZ ?? 10;
-  // p.taperAngle is the full included angle; all geometry uses the half-angle.
-  // Guard at 0.5° half-angle to prevent tan() blowing up for near-zero tapers.
-  const taperRad = Math.max(0.5, (p.taperAngle || 10) / 2) * Math.PI / 180;
-  // Raising topZ makes the plug engage the pocket walls fractionally higher,
-  // creating the fitTolerance gap uniformly around the perimeter.
-  const plugTopZ = topZ + (p.fitTolerance || 0.127) / Math.tan(taperRad);
+  const depth   = Math.abs(p.pocketDepth || 5);
+  const safeZ   = p.safeZ ?? 10;
+  const passes  = p.passes || {};
+  const tcAngle = passes.taperContour?.angle ?? passes.taperCleanup?.angle ?? 10;
+  const wallRad = Math.max(0.5, tcAngle / 2) * Math.PI / 180;
+  // Raise topZ so the plug engages the pocket walls fractionally higher,
+  // leaving a fitTolerance gap uniformly around the perimeter.
+  const plugTopZ = (p.topZ ?? 0) + (p.fitTolerance || 0.127) / Math.tan(wallRad);
+  return buildTaperedPasses(selected, plugTopZ, depth, safeZ, p, warnings);
+}
 
-  const subToolpaths = [
-    { name: 'Taper Cut', color: '#ff44bb', toolHint: 'taper',
-      moves: buildTaperTrace(selected, plugTopZ, depth, safeZ, p.taperFeedRate || 1000, p.taperPlungeRate || 300) },
-    { name: 'Cleanup',   color: '#4499ff', toolHint: 'endmill',
-      moves: buildTaperCleanup(selected, plugTopZ, depth, safeZ, p, taperRad, warnings) },
-  ];
+// Shared 4-pass builder used by both Pocket and Plug.
+// topZ is the caller's effective origin (stock top for pocket, raised for plug).
+function buildTaperedPasses(selected, topZ, depth, safeZ, p, warnings) {
+  const passes  = p.passes || {};
+  const tc = passes.taperContour  || {};
+  const tk = passes.taperCleanup  || {};
+  const de = passes.detailEndmill || {};
+  const be = passes.bulkEndmill   || {};
+
+  // The contour pass defines the wall geometry; use its angle for endmill clearance.
+  const wallAngle = tc.angle ?? tk.angle ?? 10;
+  const wallRad   = Math.max(0.5, wallAngle / 2) * Math.PI / 180;
+
+  const subToolpaths = [];
+
+  if (tc.enabled !== false) {
+    const tcRad = Math.max(0.5, (tc.angle || 10) / 2) * Math.PI / 180;
+    subToolpaths.push({
+      name: 'Taper Contour', color: '#ff8844',
+      toolKey:  tc.toolId ?? 'taper',
+      toolDesc: `Taper bit — tip ⌀${tc.tipDia || 0.5}mm  ${tc.angle || 10}° half-angle`,
+      rpm: tc.rpm || 24000,
+      moves: buildTaperTrace(selected, topZ, depth, safeZ, tc.feed || 1000, tc.plunge || 300),
+    });
+  }
+
+  if (tk.enabled !== false) {
+    const tkRad = Math.max(0.5, (tk.angle || 10) / 2) * Math.PI / 180;
+    const tipR  = (tk.tipDia || 0.5) / 2;
+    subToolpaths.push({
+      name: 'Taper Cleanup', color: '#ffcc44',
+      // Share toolKey with contour when same tool, so postprocessor skips M0 between them.
+      toolKey:  tk.toolId ?? 'taper',
+      toolDesc: `Taper bit — tip ⌀${tk.tipDia || 0.5}mm  ${tk.angle || 10}° half-angle`,
+      rpm: tk.rpm || 24000,
+      // Single Z pass at full depth — walls were established by the contour pass.
+      moves: buildPocketClearing(selected, topZ, depth, safeZ,
+        tipR, depth, tk.wallStock || 0.254, tk.feed || 1000, tk.plunge || 300,
+        tkRad, 'Taper Cleanup', warnings),
+    });
+  }
+
+  if (de.enabled !== false) {
+    const deR = (de.diameter || 1.5875) / 2;
+    subToolpaths.push({
+      name: 'Detail Endmill', color: '#44ff88',
+      toolKey:  de.toolId ?? 'detailEndmill',
+      toolDesc: `Endmill ⌀${de.diameter || 1.5875}mm`,
+      rpm: de.rpm || 18000,
+      moves: buildPocketClearing(selected, topZ, depth, safeZ,
+        deR, de.diameter || 1.5875, de.wallStock || 0.254, de.feed || 800, de.plunge || 300,
+        wallRad, 'Detail Endmill', warnings),
+    });
+  }
+
+  if (be.enabled !== false) {
+    const beR = (be.diameter || 6.35) / 2;
+    subToolpaths.push({
+      name: 'Bulk Endmill', color: '#4499ff',
+      toolKey:  be.toolId ?? 'bulkEndmill',
+      toolDesc: `Endmill ⌀${be.diameter || 6.35}mm`,
+      rpm: be.rpm || 18000,
+      moves: buildPocketClearing(selected, topZ, depth, safeZ,
+        beR, be.diameter || 6.35, be.wallStock || 0.254, be.feed || 1500, be.plunge || 500,
+        wallRad, 'Bulk Endmill', warnings),
+    });
+  }
 
   const moves = subToolpaths.flatMap(st => st.moves);
   return { moves, subToolpaths, warnings };
@@ -575,29 +636,22 @@ function buildTaperTrace(entities, topZ, depth, safeZ, feedRate, plungeRate) {
   return moves;
 }
 
-// Clear material between outer and island taper walls with the endmill.
+// Generic concentric pocket-clearing pass.
+// Works for both V-bit cleanup (small toolR, single Z pass) and endmill passes.
 //
-// Wall-stock formula (taperRad is the half-angle):
-//   wallLeave = depth × tan(halfAngle) + wallStockToLeave
-//
-// The outer boundary is inset by (endmillR + wallLeave) so the endmill centre
-// stays clear of the angled wall.  Each island is outset by the same amount
-// to create an exclusion zone; passes that enter an exclusion zone are discarded
-// by generatePocketOffsets, preventing the endmill from cutting into island walls.
-//
-// When multiple entities are selected the largest polygon is the outer boundary
-// and all smaller polygons inside it are treated as islands.
-function buildTaperCleanup(entities, topZ, depth, safeZ, p, taperRad, warnings) {
-  const moves      = [];
-  const endmillR   = (p.endmillDiameter || 3.175) / 2;
-  const wallLeave  = depth * Math.tan(taperRad) + (p.wallStockToLeave || 0.254);
-  const inset      = endmillR + wallLeave;
-  const zPasses    = buildZPasses(topZ, depth, p.endmillDiameter || 3.175);
+//   toolR       — effective cutting radius for stepover / offset generation
+//   depthPerPass — Z step between levels (pass full depth for single-level)
+//   wallStock   — explicit standoff added on top of the taper geometry clearance
+//   taperRad    — half-angle (rad) of the wall that defines clearance geometry
+function buildPocketClearing(entities, topZ, depth, safeZ, toolR, depthPerPass, wallStock, feedRate, plungeRate, taperRad, passLabel, warnings) {
+  const moves     = [];
+  const wallLeave = depth * Math.tan(taperRad) + wallStock;
+  const inset     = toolR + wallLeave;
+  const zPasses   = buildZPasses(topZ, depth, depthPerPass);
 
   const profiles = entities
     .map(e => entityToProfile(e))
     .filter(prof => prof && prof.length >= 3);
-
   if (!profiles.length) return moves;
 
   profiles.sort((a, b) => polygonArea(b) - polygonArea(a));
@@ -605,8 +659,8 @@ function buildTaperCleanup(entities, topZ, depth, safeZ, p, taperRad, warnings) 
   const islandProfiles = profiles.slice(1);
 
   const boundary = offsetPolyline(outerProfile, inset, true)[0];
-  if (!boundary || boundary.length < 4 || polygonArea(boundary) < endmillR * endmillR * Math.PI * 0.25) {
-    warnings.push(`Cleanup: outer contour too small for ⌀${(p.endmillDiameter || 3.175).toFixed(2)}mm endmill + wall clearance`);
+  if (!boundary || boundary.length < 4 || polygonArea(boundary) < toolR * toolR * Math.PI * 0.25) {
+    warnings.push(`${passLabel}: contour too small for ⌀${(toolR * 2).toFixed(2)}mm + wall clearance`);
     return moves;
   }
 
@@ -616,25 +670,25 @@ function buildTaperCleanup(entities, topZ, depth, safeZ, p, taperRad, warnings) 
     return (expanded && expanded.length >= 3) ? expanded : ccw;
   });
 
-  const clearPasses = generatePocketOffsets(boundary, endmillR, 0.45, islandExclusions);
+  const clearPasses = generatePocketOffsets(boundary, toolR, 0.45, islandExclusions);
   if (!clearPasses.length) {
     if (islandExclusions.length === 0) {
-      warnings.push('Cleanup: no clearing passes — contour may be too small after wall clearance');
+      warnings.push(`${passLabel}: no clearing passes — contour too small after wall clearance`);
     }
     return moves;
   }
 
   const startPt = clearPasses[0][0];
   moves.push({ type: 'rapid', x: startPt.x, y: startPt.y, z: safeZ });
-  moves.push({ type: 'feed',  x: startPt.x, y: startPt.y, z: zPasses[0], f: p.endmillPlungeRate || 500 });
+  moves.push({ type: 'feed',  x: startPt.x, y: startPt.y, z: zPasses[0], f: plungeRate });
 
   for (const z of zPasses) {
     for (const pass of clearPasses) {
       if (!pass || pass.length < 2) continue;
       moves.push({ type: 'rapid', x: pass[0].x, y: pass[0].y, z: z + 0.5 });
-      moves.push({ type: 'feed',  x: pass[0].x, y: pass[0].y, z, f: p.endmillPlungeRate || 500 });
+      moves.push({ type: 'feed',  x: pass[0].x, y: pass[0].y, z, f: plungeRate });
       for (let i = 1; i < pass.length; i++) {
-        moves.push({ type: 'feed', x: pass[i].x, y: pass[i].y, z, f: p.endmillFeedRate || 1500 });
+        moves.push({ type: 'feed', x: pass[i].x, y: pass[i].y, z, f: feedRate });
       }
     }
   }

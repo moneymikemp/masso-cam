@@ -178,24 +178,23 @@ export function generateGcode(operations, postConfig = {}) {
 
     if (toolpath.subToolpaths?.length > 0) {
       // ── Multi-pass op: emit each sub-pass with a manual tool-change stop ──
-      let activeHint = null;
+      // toolKey identifies the physical tool; consecutive passes sharing the same
+      // key (e.g. Taper Contour + Taper Cleanup on the same bit) skip the M0.
+      let activeToolKey = null;
       for (const sub of toolpath.subToolpaths) {
         if (!sub.moves?.length) continue;
         emit('');
         emit(`(Pass: ${sub.name})`);
-        if (sub.toolHint !== activeHint) {
-          const toolDesc = sub.toolHint === 'taper'
-            ? `Taper bit — tip ⌀${params?.tipDiameter || 0.5}mm  ${params?.taperAngle || 10}° half-angle`
-            : `Endmill ⌀${params?.endmillDiameter || 3.175}mm`;
-          const subRpm = sub.toolHint === 'taper'
-            ? (params?.taperSpindleRpm || 24000)
-            : (params?.endmillSpindleRpm || 18000);
+        const subKey = sub.toolKey ?? sub.toolHint ?? null;
+        if (subKey !== activeToolKey) {
+          const toolDesc = sub.toolDesc || `Tool (${sub.name})`;
+          const subRpm   = sub.rpm || 18000;
           emit(`${n()}G0 Z${fmt(cfg.safeZ)}`);
           emit(`${n()}M5`);
           emit(`${n()}M0 (Install: ${toolDesc})`);
           emit(`${n()}S${subRpm} M3`);
           if (cfg.spindleDelay > 0) emit(`${n()}G4 P${cfg.spindleDelay * 1000}`);
-          activeHint = sub.toolHint;
+          activeToolKey = subKey;
         }
         if (cfg.coolant === 'flood') emit(`${n()}M8`);
         else if (cfg.coolant === 'mist') emit(`${n()}M7`);
