@@ -793,6 +793,9 @@ function chainSegments(entities) {
     .map(e => ({ pts: entityToProfile(e), used: false }))
     .filter(s => s.pts && s.pts.length >= 2);
 
+  const inputTypes = entities.filter(e => e.type === 'line' || e.type === 'arc').map(e => `${e.type}(${entityToProfile(e)?.length ?? 0}pts)`);
+  console.log('[chainSegments] segments in:', segs.length, inputTypes);
+
   if (!segs.length) return null;
 
   const chain = [...segs[0].pts];
@@ -818,9 +821,10 @@ function chainSegments(entities) {
   }
 
   // Drop duplicate closing point if chain loops back to start
-  if (chain.length > 1 && ptDist(chain[0], chain[chain.length - 1]) <= SNAP) {
-    chain.pop();
-  }
+  const closeDist = chain.length > 1 ? ptDist(chain[0], chain[chain.length - 1]) : Infinity;
+  const isClosed = closeDist <= SNAP;
+  console.log('[chainSegments] points out:', chain.length, '| closed:', isClosed, `(first-last dist: ${closeDist.toFixed(4)}mm)`);
+  if (isClosed) chain.pop();
   return chain.length >= 3 ? chain : null;
 }
 
@@ -828,12 +832,16 @@ function chainSegments(entities) {
 // LINE/ARC segments (not a closed polyline), chains them into a single closed
 // polygon first. Falls back to per-entity conversion for polylines and circles.
 function buildPocketProfiles(entities) {
+  console.log('[buildPocketProfiles] entity types:', entities.map(e => e.type));
+
   const segEnts   = entities.filter(e => e.type === 'line' || e.type === 'arc');
   const otherEnts = entities.filter(e => e.type !== 'line' && e.type !== 'arc');
 
   const profiles = otherEnts
     .map(e => entityToProfile(e))
     .filter(p => p && p.length >= 3);
+
+  console.log('[buildPocketProfiles] non-segment profiles:', profiles.map(p => p.length + 'pts'));
 
   if (segEnts.length >= 2) {
     const chained = chainSegments(segEnts);
@@ -843,6 +851,7 @@ function buildPocketProfiles(entities) {
     if (pts && pts.length >= 3) profiles.push(pts);
   }
 
+  console.log('[buildPocketProfiles] final profiles:', profiles.map(p => p.length + 'pts'));
   return profiles;
 }
 
