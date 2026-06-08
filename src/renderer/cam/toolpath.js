@@ -658,10 +658,10 @@ function buildPocketClearing(entities, topZ, depth, safeZ, toolR, depthPerPass, 
   const inset     = toolR + wallLeave;
   const zPasses   = buildZPasses(topZ, depth, depthPerPass);
 
-  // Only closed shapes can define a pocket boundary; open geometry (lines, arcs,
-  // open polylines) would produce nonsense results and must be excluded.
+  // Profile extraction identical to generatePocket — map all selected entities,
+  // no isEntityClosed pre-filter (SPLINEs and open polylines are stored as
+  // polyline entities with closed:false and must not be excluded here).
   const profiles = entities
-    .filter(e => isEntityClosed(e))
     .map(e => entityToProfile(e))
     .filter(prof => prof && prof.length >= 3);
   if (!profiles.length) return moves;
@@ -669,15 +669,18 @@ function buildPocketClearing(entities, topZ, depth, safeZ, toolR, depthPerPass, 
   profiles.sort((a, b) => polygonArea(b) - polygonArea(a));
   const islandProfiles = profiles.slice(1);
 
-  // Normalise outer profile to CCW so that a positive offset distance shrinks
-  // it inward — the same convention generatePocketOffsets uses internally.
-  // DXF entities can be wound either way; without this a CW profile would
-  // expand outward under a positive offset, producing the exploding-star paths.
+  // Normalise to CCW so a positive offset shrinks inward (generatePocketOffsets
+  // does the same internally; doing it here keeps offsetPolyline correct too).
   const outerProfile = isClockwise(profiles[0]) ? [...profiles[0]].reverse() : profiles[0];
 
-  const boundary = offsetPolyline(outerProfile, inset, true)[0];
+  // Use toolR for the outer boundary inset — identical to generatePocket.
+  // Using the full (toolR + wallLeave) inset in a single offsetPolyline call
+  // creates large spikes at concave arc junctions in complex shapes; toolR
+  // keeps the offset small and spike-free.  Island exclusion zones still use
+  // the full inset so the endmill stays clear of inner taper walls.
+  const boundary = offsetPolyline(outerProfile, toolR, true)[0];
   if (!boundary || boundary.length < 4 || polygonArea(boundary) < toolR * toolR * Math.PI * 0.25) {
-    warnings.push(`${passLabel}: contour too small for ⌀${(toolR * 2).toFixed(2)}mm + wall clearance`);
+    warnings.push(`${passLabel}: contour too small for ⌀${(toolR * 2).toFixed(2)}mm tool`);
     return moves;
   }
 
