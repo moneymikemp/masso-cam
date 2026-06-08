@@ -1,97 +1,116 @@
-// Geometry offset engine - pure JS, no external dependencies
-// Uses normal-based offsetting for convex/simple polygons
-// Good enough for 2.5D CAM on typical CNC router geometry
+// Geometry offset engine
+// Uses Clipper (Angus Johnson's polygon clipping library) for all closed-polygon
+// offsetting. Clipper correctly handles concave polygons — no spikes at reflex
+// corners, and automatically splits shapes that separate under deep inset.
 
+import ClipperLib from 'clipper-lib';
+
+// ── Clipper coordinate helpers ────────────────────────────────────────────────
+// Clipper requires integer coordinates. 1 unit = 0.001 mm (micron precision).
+
+const SCALE = 1000;
+
+function toClipper(pts) {
+  return pts.map(p => ({ X: Math.round(p.x * SCALE), Y: Math.round(p.y * SCALE) }));
+}
+
+function fromClipper(path) {
+  return path.map(p => ({ x: p.X / SCALE, y: p.Y / SCALE }));
+}
+
+function stripClose(pts) {
+  if (pts.length > 1 &&
+      Math.hypot(pts[pts.length - 1].x - pts[0].x, pts[pts.length - 1].y - pts[0].y) < 1e-6) {
+    return pts.slice(0, -1);
+  }
+  return pts;
+}
+
+// Offset a closed polygon.
+// positive distance = shrink inward; negative = expand outward.
+// Returns result polygons (CCW, no closing point) sorted by area descending.
+// Concave shapes may split into >1 polygon when inset far enough.
+function clipperClosedOffset(points, distance) {
+  const co = new ClipperLib.ClipperOffset();
+  co.AddPath(toClipper(points), ClipperLib.JoinType.jtMiter, ClipperLib.EndType.etClosedPolygon);
+  const solution = new ClipperLib.Paths();
+  co.Execute(solution, -distance * SCALE);
+  return solution
+    .map(fromClipper)
+    .filter(p => p.length >= 3)
+    .map(p => isClockwise(p) ? [...p].reverse() : p)
+    .sort((a, b) => polygonArea(b) - polygonArea(a));
+}
+
+// ── Public API ────────────────────────────────────────────────────────────────
+
+// Offset a polyline or closed polygon by `distance`.
+// For closed paths, returns an array of result polygons (usually one, but may be
+// more when a concave shape splits). Callers that handle one polygon use [0].
+// For open paths, returns a single offset path.
 export function offsetPolyline(points, distance, closed = true) {
   if (!points || points.length < 2) return [points || []];
   if (!closed) return [simpleOpenOffset(points, distance)];
-  return [simpleClosedOffset(points, distance)];
+
+  const pts = stripClose([...points]);
+  if (pts.length < 3) return [pts];
+
+  const results = clipperClosedOffset(pts, distance);
+  if (!results.length) return [[]];
+
+  // Add closing point to each result to match the pre-existing API contract.
+  return results.map(r => [...r, { ...r[0] }]);
 }
 
-function simpleClosedOffset(points, distance) {
-  // Remove duplicate last point if closed
-  let pts = [...points];
-  if (pts.length > 1) {
-    const last = pts[pts.length - 1];
-    const first = pts[0];
-    if (Math.hypot(last.x - first.x, last.y - first.y) < 1e-6) {
-      pts = pts.slice(0, -1);
-    }
-  }
-  if (pts.length < 3) return pts;
+// Generate concentric pocket clearing passes by repeatedly shrinking the polygon.
+// Uses Clipper for each offset step so concave corners are handled correctly.
+// When a concave shape splits into sub-polygons, each sub-polygon continues
+// shrinking independently — all sub-regions get clearing passes.
+export function generatePocketOffsets(outerPoints, toolRadius, stepover, islands = []) {
+  const passes = [];
+  const step = toolRadius * 2 * stepover;
 
-  const result = [];
-  const n = pts.length;
+  let start = stripClose([...outerPoints]);
+  if (isClockwise(start)) start = [...start].reverse();
 
-  for (let i = 0; i < n; i++) {
-    const prev = pts[(i + n - 1) % n];
-    const curr = pts[i];
-    const next = pts[(i + 1) % n];
+  if (polygonArea(start) < step * step) return passes;
 
-    // Inward normal of prev->curr edge
-    const d1x = curr.x - prev.x, d1y = curr.y - prev.y;
-    const l1 = Math.hypot(d1x, d1y);
-    const n1x = -d1y / l1, n1y = d1x / l1;
+  // Queue of active sub-polygons at the current shrink level.
+  let queue = [start];
+  const MAX_PASSES = 200;
 
-    // Inward normal of curr->next edge
-    const d2x = next.x - curr.x, d2y = next.y - curr.y;
-    const l2 = Math.hypot(d2x, d2y);
-    const n2x = -d2y / l2, n2y = d2x / l2;
+  for (let i = 0; i < MAX_PASSES && queue.length > 0; i++) {
+    const nextQueue = [];
 
-    // Bisector
-    let bx = n1x + n2x, by = n1y + n2y;
-    const bl = Math.hypot(bx, by);
-    if (bl < 1e-9) {
-      bx = n1x; by = n1y;
-    } else {
-      // Scale bisector so offset is correct distance
-      const dot = n1x * (bx / bl) + n1y * (by / bl);
-      const scale = dot > 0.1 ? distance / dot : distance;
-      bx = (bx / bl) * scale;
-      by = (by / bl) * scale;
+    for (const poly of queue) {
+      const shrunkList = clipperClosedOffset(poly, step);
+
+      for (const sp of shrunkList) {
+        if (polygonArea(sp) < step * step * 0.5) continue;
+        nextQueue.push(sp);
+
+        const closed = [...sp, sp[0]];
+        if (islands.length > 0 &&
+            closed.some(pt => islands.some(isl => pointInPolygon(pt, isl)))) {
+          continue;
+        }
+        passes.push(closed);
+      }
     }
 
-    result.push({ x: curr.x + bx, y: curr.y + by });
+    queue = nextQueue;
   }
 
-  // Close the polygon
-  result.push({ ...result[0] });
-  return result;
+  return passes;
 }
 
-function simpleOpenOffset(points, distance) {
-  const result = [];
-  const n = points.length;
-  for (let i = 0; i < n; i++) {
-    let nx, ny;
-    if (i === 0) {
-      const dx = points[1].x - points[0].x;
-      const dy = points[1].y - points[0].y;
-      const l = Math.hypot(dx, dy);
-      nx = -dy / l; ny = dx / l;
-    } else if (i === n - 1) {
-      const dx = points[n-1].x - points[n-2].x;
-      const dy = points[n-1].y - points[n-2].y;
-      const l = Math.hypot(dx, dy);
-      nx = -dy / l; ny = dx / l;
-    } else {
-      const d1x = points[i].x - points[i-1].x, d1y = points[i].y - points[i-1].y;
-      const l1 = Math.hypot(d1x, d1y);
-      const d2x = points[i+1].x - points[i].x, d2y = points[i+1].y - points[i].y;
-      const l2 = Math.hypot(d2x, d2y);
-      nx = (-d1y/l1 + -d2y/l2) / 2;
-      ny = (d1x/l1 + d2x/l2) / 2;
-    }
-    result.push({ x: points[i].x + nx * distance, y: points[i].y + ny * distance });
-  }
-  return result;
-}
+// ── Geometry utilities ────────────────────────────────────────────────────────
 
 export function isClockwise(points) {
   let sum = 0;
   const n = points.length;
   for (let i = 0; i < n - 1; i++) {
-    sum += (points[i+1].x - points[i].x) * (points[i+1].y + points[i].y);
+    sum += (points[i + 1].x - points[i].x) * (points[i + 1].y + points[i].y);
   }
   return sum > 0;
 }
@@ -124,60 +143,6 @@ export function polygonArea(points) {
   return Math.abs(area / 2);
 }
 
-// Generate concentric pocket passes by repeatedly shrinking the polygon.
-// islands: array of pre-expanded exclusion polygons (tool-radius-offset island boundaries).
-// Any pass with a point inside an island exclusion zone is discarded.
-export function generatePocketOffsets(outerPoints, toolRadius, stepover, islands = []) {
-  const passes = [];
-  const step = toolRadius * 2 * stepover;
-
-  // Remove closing point if present
-  let current = [...outerPoints];
-  if (current.length > 1) {
-    const last = current[current.length - 1];
-    if (Math.hypot(last.x - current[0].x, last.y - current[0].y) < 1e-6) {
-      current = current.slice(0, -1);
-    }
-  }
-
-  const initialArea = polygonArea(current);
-  if (initialArea < step * step) return passes;
-
-  // Make sure winding is consistent (CCW for inward offset)
-  if (isClockwise(current)) current = current.reverse();
-
-  const MAX_PASSES = 200;
-
-  for (let i = 0; i < MAX_PASSES; i++) {
-    // Shrink by one step (positive distance = inward for CCW polygon)
-    const shrunk = simpleClosedOffset(current, +step);
-
-    if (!shrunk || shrunk.length < 4) break;
-
-    const area = polygonArea(shrunk);
-
-    // Stop if area is too small or has collapsed
-    if (area < step * step * 0.5) break;
-    if (area > initialArea * 1.1) break; // Sanity check - area should shrink
-
-    // Check for self-intersection collapse by verifying area decreased
-    if (i > 0 && area >= polygonArea(current) * 0.98) break;
-
-    // Advance current before the island check so the loop always makes progress
-    current = shrunk.slice(0, -1);
-
-    // Discard this pass if any of its points fall inside an island exclusion zone
-    if (islands.length > 0 && shrunk.some(pt => islands.some(isl => pointInPolygon(pt, isl)))) {
-      continue;
-    }
-
-    passes.push([...shrunk]);
-  }
-
-  return passes;
-}
-
-// Generate zig-zag raster passes for face milling
 export function generateRasterPasses(bounds, angle, stepover, toolRadius) {
   const step = toolRadius * 2 * stepover;
   const passes = [];
@@ -202,4 +167,32 @@ export function generateRasterPasses(bounds, angle, stepover, toolRadius) {
     dir = -dir;
   }
   return passes;
+}
+
+// ── Open-path offset (unchanged) ──────────────────────────────────────────────
+
+function simpleOpenOffset(points, distance) {
+  const result = [];
+  const n = points.length;
+  for (let i = 0; i < n; i++) {
+    let nx, ny;
+    if (i === 0) {
+      const dx = points[1].x - points[0].x, dy = points[1].y - points[0].y;
+      const l = Math.hypot(dx, dy);
+      nx = -dy / l; ny = dx / l;
+    } else if (i === n - 1) {
+      const dx = points[n - 1].x - points[n - 2].x, dy = points[n - 1].y - points[n - 2].y;
+      const l = Math.hypot(dx, dy);
+      nx = -dy / l; ny = dx / l;
+    } else {
+      const d1x = points[i].x - points[i - 1].x, d1y = points[i].y - points[i - 1].y;
+      const l1 = Math.hypot(d1x, d1y);
+      const d2x = points[i + 1].x - points[i].x, d2y = points[i + 1].y - points[i].y;
+      const l2 = Math.hypot(d2x, d2y);
+      nx = (-d1y / l1 + -d2y / l2) / 2;
+      ny = (d1x / l1 + d2x / l2) / 2;
+    }
+    result.push({ x: points[i].x + nx * distance, y: points[i].y + ny * distance });
+  }
+  return result;
 }
