@@ -131,18 +131,21 @@ function generatePocket(op, entities) {
     let clearPasses;
 
     if (p.cutSide === 'outside') {
-      // Outside (boss) mode: clear the area surrounding the profile
-      const islandRaw = offsetPolyline(outerProfile, -toolR, true)[0];
-      const island = (islandRaw && islandRaw.length >= 3) ? islandRaw : outerProfile;
-      const b = getEntityBounds(selected);
-      const margin = Math.max(toolR * 4, 20);
-      const outerBound = [
-        { x: b.minX - margin, y: b.minY - margin },
-        { x: b.maxX + margin, y: b.minY - margin },
-        { x: b.maxX + margin, y: b.maxY + margin },
-        { x: b.minX - margin, y: b.maxY + margin },
-      ];
-      clearPasses = generatePocketOffsets(outerBound, toolR, stepover, [island]);
+      // Outside (boss) mode: expand outward from the profile itself
+      // Each ring is computed directly from the original profile at increasing distance,
+      // so the reference geometry is always the selected shape, not a bounding box.
+      clearPasses = [];
+      const step = toolR * 2 * stepover;
+      for (let i = 0, dist = toolR; i < 200; i++, dist += step) {
+        const rings = offsetPolyline(outerProfile, -dist, true); // negative = expand outward
+        let any = false;
+        for (const ring of rings) {
+          if (!ring || ring.length < 3 || polygonArea(ring) < step * step * 0.5) continue;
+          clearPasses.push(ring);
+          any = true;
+        }
+        if (!any) break;
+      }
       if (!clearPasses.length) warnings.push('No outside clearing passes generated');
     } else {
       const boundaryOffset = toolR + (p.finishPass ? (p.finishAllowance || 0.2) : 0);
