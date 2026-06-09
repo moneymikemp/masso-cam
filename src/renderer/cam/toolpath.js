@@ -20,8 +20,8 @@ export function generateToolpath(operation, entities, context = {}) {
     case 'slot':      return generateSlot(operation, entities);
     case 'chamfer':      return generateChamfer(operation, entities);
     case 'thread':       return generateThread(operation, entities);
-    case 'taperedpocket': return generateTaperedPocket(operation, entities);
-    case 'taperedplug':   return generateTaperedPlug(operation, entities);
+    case 'taperedpocket': return generateTaperedPocket(operation, entities, context);
+    case 'taperedplug':   return generateTaperedPlug(operation, entities, context);
     default:             return { moves: [], warnings: ['Unknown operation: ' + type] };
   }
 }
@@ -615,7 +615,7 @@ function mirrorEntitiesX(entities) {
   });
 }
 
-function generateTaperedPocket(op, entities) {
+function generateTaperedPocket(op, entities, context = {}) {
   const p = op.params;
   const warnings = [];
   // Require explicit entity selection — falling back to all entities risks picking
@@ -630,10 +630,10 @@ function generateTaperedPocket(op, entities) {
   const topZ   = p.topZ ?? 0;
   const depth  = Math.abs(p.pocketDepth || 5);
   const safeZ  = p.safeZ ?? 10;
-  return buildTaperedPasses(selected, topZ, depth, safeZ, p, warnings);
+  return buildTaperedPasses(selected, topZ, depth, safeZ, p, warnings, null);
 }
 
-function generateTaperedPlug(op, entities) {
+function generateTaperedPlug(op, entities, context = {}) {
   const p = op.params;
   const warnings = [];
   if (!op.selectedIds?.length) {
@@ -651,12 +651,13 @@ function generateTaperedPlug(op, entities) {
   // Raise topZ so the plug engages the pocket walls fractionally higher,
   // leaving a fitTolerance gap uniformly around the perimeter.
   const plugTopZ = (p.topZ ?? 0) + (p.fitTolerance || 0.127) / Math.tan(wallRad);
-  return buildTaperedPasses(selected, plugTopZ, depth, safeZ, p, warnings);
+  const stockBound = getStockBoundary(context, op, context.allEntities);
+  return buildTaperedPasses(selected, plugTopZ, depth, safeZ, p, warnings, stockBound);
 }
 
 // Shared 4-pass builder used by both Pocket and Plug.
 // topZ is the caller's effective origin (stock top for pocket, raised for plug).
-function buildTaperedPasses(selected, topZ, depth, safeZ, p, warnings) {
+function buildTaperedPasses(selected, topZ, depth, safeZ, p, warnings, stockBound = null) {
   const passes  = p.passes || {};
   const tc = passes.taperContour  || {};
   const tk = passes.taperCleanup  || {};
@@ -696,7 +697,7 @@ function buildTaperedPasses(selected, topZ, depth, safeZ, p, warnings) {
       // Single Z pass at full depth — walls were established by the contour pass.
       moves: clearFn(selected, topZ, depth, safeZ,
         tipR, depth, tk.wallStock || 0.254, tk.feed || 1000, tk.plunge || 300,
-        tkRad, 'Taper Cleanup', warnings, tkPrevR),
+        tkRad, 'Taper Cleanup', warnings, tkPrevR, stockBound),
     });
   }
 
@@ -710,7 +711,7 @@ function buildTaperedPasses(selected, topZ, depth, safeZ, p, warnings) {
       rpm: de.rpm || 18000,
       moves: clearFn(selected, topZ, depth, safeZ,
         deR, de.diameter || 1.5875, de.wallStock || 0.254, de.feed || 800, de.plunge || 300,
-        wallRad, 'Detail Endmill', warnings, dePrevR),
+        wallRad, 'Detail Endmill', warnings, dePrevR, stockBound),
     });
   }
 
@@ -724,7 +725,7 @@ function buildTaperedPasses(selected, topZ, depth, safeZ, p, warnings) {
       rpm: be.rpm || 18000,
       moves: clearFn(selected, topZ, depth, safeZ,
         beR, be.diameter || 6.35, be.wallStock || 0.254, be.feed || 1500, be.plunge || 500,
-        wallRad, 'Bulk Endmill', warnings, bePrevR),
+        wallRad, 'Bulk Endmill', warnings, bePrevR, stockBound),
     });
   }
 
@@ -768,7 +769,7 @@ function buildTaperTrace(entities, topZ, depth, safeZ, feedRate, plungeRate, tcR
 //   depthPerPass — Z step between levels (pass full depth for single-level)
 //   wallStock   — explicit standoff added on top of the taper geometry clearance
 //   taperRad    — half-angle (rad) of the wall that defines clearance geometry
-function buildPocketClearing(entities, topZ, depth, safeZ, toolR, depthPerPass, wallStock, feedRate, plungeRate, taperRad, passLabel, warnings, prevToolR = 0) {
+function buildPocketClearing(entities, topZ, depth, safeZ, toolR, depthPerPass, wallStock, feedRate, plungeRate, taperRad, passLabel, warnings, prevToolR = 0, stockBound = null) {
   const moves     = [];
   const wallLeave = depth * Math.tan(taperRad) + wallStock;
   const inset     = toolR + wallLeave;
@@ -838,7 +839,7 @@ function buildPocketClearing(entities, topZ, depth, safeZ, toolR, depthPerPass, 
 //
 // Same parameter signature as buildPocketClearing so buildTaperedPasses can
 // dispatch between the two with a single function reference.
-function buildPlugClearing(entities, topZ, depth, safeZ, toolR, depthPerPass, wallStock, feedRate, plungeRate, taperRad, passLabel, warnings, prevToolR = 0) {
+function buildPlugClearing(entities, topZ, depth, safeZ, toolR, depthPerPass, wallStock, feedRate, plungeRate, taperRad, passLabel, warnings, prevToolR = 0, stockBound = null) {
   const moves     = [];
   const wallLeave = depth * Math.tan(taperRad) + wallStock;
   const outset    = toolR + wallLeave;
@@ -857,7 +858,8 @@ function buildPlugClearing(entities, topZ, depth, safeZ, toolR, depthPerPass, wa
   const exclusionCCW = isClockwise(exclusion) ? [...exclusion].reverse() : exclusion;
 
   // Outer clearing boundary: rest machining stops at the previous tool's reach limit;
-  // full clearing starts from a stock bounding box.
+  // full clearing is bounded by the stock rectangle (inset by toolR so the tool
+  // centre stays within stock). Falls back to entity bounds when no stock is configured.
   let outerBoundary;
   if (prevToolR > 0) {
     const prevOutset = prevToolR + wallLeave;
@@ -865,14 +867,20 @@ function buildPlugClearing(entities, topZ, depth, safeZ, toolR, depthPerPass, wa
     if (prevBoundaryRaw && prevBoundaryRaw.length >= 3) outerBoundary = prevBoundaryRaw;
   }
   if (!outerBoundary) {
-    const bounds = getEntityBounds(entities);
-    const stockMargin = Math.max(toolR * 3, outset + toolR * 2);
-    outerBoundary = [
-      { x: bounds.minX - stockMargin, y: bounds.minY - stockMargin },
-      { x: bounds.maxX + stockMargin, y: bounds.minY - stockMargin },
-      { x: bounds.maxX + stockMargin, y: bounds.maxY + stockMargin },
-      { x: bounds.minX - stockMargin, y: bounds.maxY + stockMargin },
-    ];
+    if (stockBound) {
+      // Shrink the stock boundary by toolR so the tool centre stays inside stock.
+      const insetStock = offsetPolyline(stockBound, toolR, true)[0];
+      outerBoundary = (insetStock && insetStock.length >= 3) ? insetStock : stockBound;
+    } else {
+      const bounds = getEntityBounds(entities);
+      const stockMargin = Math.max(toolR * 3, outset + toolR * 2);
+      outerBoundary = [
+        { x: bounds.minX - stockMargin, y: bounds.minY - stockMargin },
+        { x: bounds.maxX + stockMargin, y: bounds.minY - stockMargin },
+        { x: bounds.maxX + stockMargin, y: bounds.maxY + stockMargin },
+        { x: bounds.minX - stockMargin, y: bounds.maxY + stockMargin },
+      ];
+    }
   }
 
   const clearPasses = generatePocketOffsets(outerBoundary, toolR, 0.45, [exclusionCCW]);
