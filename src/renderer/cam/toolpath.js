@@ -610,6 +610,8 @@ function mirrorEntitiesX(entities) {
 
   const origCx = allPts.reduce((s, p) => s + p.x, 0) / allPts.length;
   const origCy = allPts.reduce((s, p) => s + p.y, 0) / allPts.length;
+  console.log('[mirrorEntitiesX] profiles:', cleanProfiles.length, 'total pts:', allPts.length,
+    '| orig centroid:', origCx.toFixed(4), origCy.toFixed(4));
 
   const mirrored = cleanProfiles.map(pts =>
     pts.map(pt => ({ x: pt.x, y: 2 * origCy - pt.y }))
@@ -621,6 +623,8 @@ function mirrorEntitiesX(entities) {
   const mirCy  = mirPts.reduce((s, p) => s + p.y, 0) / mirPts.length;
   const dx = origCx - mirCx;
   const dy = origCy - mirCy;
+  console.log('[mirrorEntitiesX] post-mirror centroid:', mirCx.toFixed(4), mirCy.toFixed(4),
+    '| translation dx:', dx.toFixed(6), 'dy:', dy.toFixed(6));
 
   return mirrored.map((pts, i) => ({
     id: `__mirror_${i}`,
