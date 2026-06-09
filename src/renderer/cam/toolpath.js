@@ -50,6 +50,7 @@ function generateContour(op, entities) {
       const offsets = offsetPolyline(profile, offset, true);
       if (offsets[0]?.length >= 3) contourPts = offsets[0];
     }
+    if (p.climb === false) contourPts = [...contourPts].reverse();
 
     const passes = buildZPasses(p.topZ ?? 0, p.totalDepth || 10, p.depthPerPass || 3);
 
@@ -142,13 +143,14 @@ function generatePocket(op, entities) {
     }
 
     const sortedPasses = p.startFromCenter ? [...clearPasses].reverse() : clearPasses;
+    const directedPasses = p.climb === false ? sortedPasses.map(pass => [...pass].reverse()) : sortedPasses;
 
-    if (sortedPasses.length > 0) {
-      const startPt = sortedPasses[0][0];
+    if (directedPasses.length > 0) {
+      const startPt = directedPasses[0][0];
       moves.push({ type: 'rapid', x: startPt.x, y: startPt.y, z: safeZ });
       moves.push({ type: 'feed', x: startPt.x, y: startPt.y, z, f: plungeRate });
 
-      for (const pass of sortedPasses) {
+      for (const pass of directedPasses) {
         if (!pass || pass.length < 2) continue;
         moves.push({ type: 'rapid', x: pass[0].x, y: pass[0].y, z: z + 0.5 });
         moves.push({ type: 'feed', x: pass[0].x, y: pass[0].y, z, f: plungeRate });
@@ -206,14 +208,16 @@ function generateAdaptive(op, entities) {
       moves.push({ type: 'rapid', x: profile[0].x, y: profile[0].y, z: safeZ });
       moves.push(...buildRampEntry(clearPasses[clearPasses.length - 1] || profile, p.topZ ?? 0, z, p.rampAngle || 2, p.feedRate || 2000, p.plungeRate || 500));
 
-      for (const pass of [...clearPasses].reverse()) {
+      const arcDir = p.climb === false ? -1 : 1;
+      const passOrder = p.climb === false ? clearPasses : [...clearPasses].reverse();
+      for (const pass of passOrder) {
         if (!pass || pass.length < 2) continue;
         for (let i = 0; i < pass.length - 1; i++) {
           const pt = pass[i];
           const next = pass[i + 1];
           const angle = Math.atan2(next.y - pt.y, next.x - pt.x);
           for (let t = 0; t <= 1; t += 0.2) {
-            const arcA = angle + Math.PI / 2 + t * Math.PI * 2;
+            const arcA = angle + arcDir * (Math.PI / 2 + t * Math.PI * 2);
             moves.push({ type: 'feed', x: pt.x + t * (next.x - pt.x) + Math.cos(arcA) * trochR, y: pt.y + t * (next.y - pt.y) + Math.sin(arcA) * trochR, z, f: p.feedRate || 2000 });
           }
         }
@@ -362,11 +366,12 @@ function generateCircular(op, entities) {
         moves.push(...buildHelicalEntry(center, toolR * 0.5, p.topZ ?? 0, z, p.plungeRate || 400));
       }
 
+      const circDir = p.climb === false ? -1 : 1;
       let r = restR;
       while (r <= radius - toolR) {
         const segs = Math.max(24, Math.ceil(r * 2 * Math.PI / (toolR * 0.5)));
         for (let i = 0; i <= segs; i++) {
-          const a = (i / segs) * Math.PI * 2;
+          const a = circDir * (i / segs) * Math.PI * 2;
           moves.push({ type: 'feed', x: center.x + Math.cos(a) * r, y: center.y + Math.sin(a) * r, z, f: p.feedRate || 1200 });
         }
         r += step;
@@ -376,7 +381,7 @@ function generateCircular(op, entities) {
       const finR = radius - toolR;
       if (finR > 0) {
         for (let i = 0; i <= 72; i++) {
-          const a = (i / 72) * Math.PI * 2;
+          const a = circDir * (i / 72) * Math.PI * 2;
           moves.push({ type: 'feed', x: center.x + Math.cos(a) * finR, y: center.y + Math.sin(a) * finR, z, f: (p.feedRate || 1200) * 0.7 });
         }
       }
@@ -396,8 +401,9 @@ function generateEngrave(op, entities) {
   const selected = getSelectedEntities(entities, op.selectedIds);
 
   for (const entity of selected) {
-    const profile = entityToProfile(entity);
+    let profile = entityToProfile(entity);
     if (!profile || profile.length < 2) continue;
+    if (p.climb === false) profile = [...profile].reverse();
     moves.push({ type: 'rapid', x: profile[0].x, y: profile[0].y, z: safeZ });
     moves.push({ type: 'feed', x: profile[0].x, y: profile[0].y, z, f: p.plungeRate || 300 });
     for (let i = 1; i < profile.length; i++) {
@@ -420,8 +426,9 @@ function generateSlot(op, entities) {
   const selected = getSelectedEntities(entities, op.selectedIds);
 
   for (const entity of selected) {
-    const profile = entityToProfile(entity);
+    let profile = entityToProfile(entity);
     if (!profile || profile.length < 2) continue;
+    if (p.climb === false) profile = [...profile].reverse();
     const passes = buildZPasses(p.topZ ?? 0, p.totalDepth || 10, p.depthPerPass || 3);
 
     for (const z of passes) {
@@ -457,7 +464,8 @@ function generateChamfer(op, entities) {
     if (!profile || profile.length < 2) continue;
     const tipOffset = -((p.chamferWidth || 1) + (p.stockToLeave || 0));
     const offsets = offsetPolyline(profile, tipOffset, isEntityClosed(entity));
-    const contourPts = offsets[0] || profile;
+    let contourPts = offsets[0] || profile;
+    if (p.climb === false) contourPts = [...contourPts].reverse();
 
     moves.push({ type: 'rapid', x: contourPts[0].x, y: contourPts[0].y, z: p.safeZ || 25 });
     moves.push({ type: 'feed', x: contourPts[0].x, y: contourPts[0].y, z: tipZ, f: p.plungeRate || 300 });

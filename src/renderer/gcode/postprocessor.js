@@ -83,6 +83,7 @@ export function generateGcode(operations, postConfig = {}) {
 
     emit('');
     emit(`(--- ${op.name} [${op.type}] ---)`);
+    emit(`; ${params?.climb === false ? 'Conventional' : 'Climb'}`);
     if (tool) emit(`(Tool: ${tool.name} dia=${tool.diameter}mm)`);
     if (toolpath.warnings?.length > 0) {
       for (const w of toolpath.warnings) emit(`(WARNING: ${w})`);

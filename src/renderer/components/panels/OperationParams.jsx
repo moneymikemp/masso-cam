@@ -109,6 +109,14 @@ export default function OperationParams({ op, tools, onChange }) {
     </>
   );
 
+  const commonDirection = (
+    <Field label="Direction">
+      <Sel value={p.climb === false ? 'conventional' : 'climb'}
+           onChange={v => set('climb', v === 'climb')}
+           options={[['climb','Climb'],['conventional','Conventional']]} />
+    </Field>
+  );
+
   const toolSelect = (
     <>
       <div style={S.section}>Tool</div>
@@ -145,6 +153,7 @@ export default function OperationParams({ op, tools, onChange }) {
         </Field>
         <CheckField label="Flip Side" value={!!p.flipSide} onChange={v => set('flipSide', v)} />
         <Field label="Stock to Leave" unit={distUnit}><NumInput value={toDisp(p.stockToLeave ?? 0)} onChange={v => set('stockToLeave', toMM(v))} step={isInch ? 0.002 : 0.05} /></Field>
+        {commonDirection}
         {commonDepth}
         <div style={S.section}>Entry</div>
         <CheckField label="Ramp Entry" value={p.rampEntry} onChange={v => set('rampEntry', v)} />
@@ -170,6 +179,7 @@ export default function OperationParams({ op, tools, onChange }) {
         <div style={S.section}>Rest Machining</div>
         <CheckField label="Rest Machining" value={!!p.restMachining} onChange={v => set('restMachining', v)} />
         {p.restMachining && <Field label="Prev Tool Dia" unit={distUnit}><NumInput value={toDisp(p.previousToolDiameter ?? 12.7)} onChange={v => set('previousToolDiameter', toMM(v))} min={isInch ? 0.004 : 0.1} step={isInch ? 0.001 : 0.01} /></Field>}
+        {commonDirection}
         {commonDepth}
         <div style={S.section}>Finish</div>
         <CheckField label="Finish Pass" value={p.finishPass} onChange={v => set('finishPass', v)} />
@@ -186,6 +196,7 @@ export default function OperationParams({ op, tools, onChange }) {
         <div style={S.section}>Rest Machining</div>
         <CheckField label="Rest Machining" value={!!p.restMachining} onChange={v => set('restMachining', v)} />
         {p.restMachining && <Field label="Prev Tool Dia" unit={distUnit}><NumInput value={toDisp(p.previousToolDiameter ?? 12.7)} onChange={v => set('previousToolDiameter', toMM(v))} min={isInch ? 0.004 : 0.1} step={isInch ? 0.001 : 0.01} /></Field>}
+        {commonDirection}
         {commonDepth}
         <div style={S.section}>Entry</div>
         <Field label="Ramp Angle" unit="°"><NumInput value={p.rampAngle || 2} onChange={v => set('rampAngle', v)} min={0.5} max={15} /></Field>
@@ -238,6 +249,7 @@ export default function OperationParams({ op, tools, onChange }) {
         {toolSelect}
         <Field label="Stepover %"><NumInput value={Math.round((p.stepover || 0.4) * 100)} onChange={v => set('stepover', v / 100)} step={5} /></Field>
         <CheckField label="Helical Entry" value={p.helicalEntry} onChange={v => set('helicalEntry', v)} />
+        {commonDirection}
         <div style={S.section}>Rest Machining</div>
         <CheckField label="Rest Machining" value={!!p.restMachining} onChange={v => set('restMachining', v)} />
         {p.restMachining && <Field label="Prev Tool Dia" unit={distUnit}><NumInput value={toDisp(p.previousToolDiameter ?? 12.7)} onChange={v => set('previousToolDiameter', toMM(v))} min={isInch ? 0.004 : 0.1} step={isInch ? 0.001 : 0.01} /></Field>}
@@ -251,6 +263,7 @@ export default function OperationParams({ op, tools, onChange }) {
         <Field label="Depth" unit={distUnit}><NumInput value={toDisp(p.depth ?? 1.5)} onChange={v => set('depth', toMM(v))} step={dStep} min={isInch ? 0.001 : 0.01} /></Field>
         <Field label="Top of Stock" unit={distUnit}><NumInput value={toDisp(p.topZ ?? 0)} onChange={v => set('topZ', toMM(v))} step={isInch ? 0.02 : 0.5} /></Field>
         <Field label="Safe Z" unit={distUnit}><NumInput value={toDisp(p.safeZ ?? 25)} onChange={v => set('safeZ', toMM(v))} step={isInch ? 0.05 : 1} /></Field>
+        {commonDirection}
         <div style={S.section}>Feeds & Speeds</div>
         <Field label="Spindle RPM" unit="rpm"><NumInput value={p.spindleRpm || 18000} onChange={v => set('spindleRpm', v)} step={100} /></Field>
         <Field label="Feed Rate" unit={feedUnit}><NumInput value={toDisp(p.feedRate ?? 800)} onChange={v => set('feedRate', toMM(v))} step={isInch ? 2 : 50} /></Field>
@@ -262,6 +275,7 @@ export default function OperationParams({ op, tools, onChange }) {
         {toolSelect}
         <CheckField label="Ramp Entry" value={p.rampEntry} onChange={v => set('rampEntry', v)} />
         {p.rampEntry && <Field label="Ramp Angle" unit="°"><NumInput value={p.rampAngle || 3} onChange={v => set('rampAngle', v)} min={0.5} max={30} /></Field>}
+        {commonDirection}
         {commonDepth}
         {commonSpeeds}
       </>}
@@ -274,6 +288,7 @@ export default function OperationParams({ op, tools, onChange }) {
         <Field label="Chamfer Width" unit={distUnit}><NumInput value={toDisp(p.chamferWidth ?? 1.0)} onChange={v => set('chamferWidth', toMM(v))} step={isInch ? 0.005 : 0.1} min={isInch ? 0.004 : 0.1} /></Field>
         <Field label="Top Z" unit={distUnit}><NumInput value={toDisp(p.topZ ?? 0)} onChange={v => set('topZ', toMM(v))} step={isInch ? 0.02 : 0.5} /></Field>
         <Field label="Safe Z" unit={distUnit}><NumInput value={toDisp(p.safeZ ?? 25)} onChange={v => set('safeZ', toMM(v))} step={isInch ? 0.05 : 1} /></Field>
+        {commonDirection}
         {commonSpeeds}
       </>}
 

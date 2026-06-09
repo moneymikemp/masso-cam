@@ -405,9 +405,11 @@ export default function CAMCanvas() {
     }
   }, [viewport, c2w, entities, layers, dispatch]);
 
-  const onWheel = useCallback((e) => {
+  const onWheelRef = useRef(null);
+  onWheelRef.current = (e) => {
     e.preventDefault();
     const canvas = canvasRef.current;
+    if (!canvas) return;
     const rect = canvas.getBoundingClientRect();
     const mx = e.clientX - rect.left;
     const my = e.clientY - rect.top;
@@ -418,7 +420,15 @@ export default function CAMCanvas() {
     const newPanX = mx - canvas.width / 2 - worldX * newZoom;
     const newPanY = my - canvas.height / 2 - worldY * newZoom;
     dispatch({ type: 'SET_VIEWPORT', payload: { zoom: newZoom, panX: newPanX, panY: newPanY } });
-  }, [viewport, dispatch]);
+  };
+
+  useEffect(() => {
+    const canvas = canvasRef.current;
+    if (!canvas) return;
+    const handler = (e) => onWheelRef.current(e);
+    canvas.addEventListener('wheel', handler, { passive: false });
+    return () => canvas.removeEventListener('wheel', handler);
+  }, []);
 
   function findEntityAt(world, tolerance) {
     for (let i = entities.length - 1; i >= 0; i--) {
@@ -484,7 +494,6 @@ export default function CAMCanvas() {
         onMouseUp={onMouseUp}
         onMouseLeave={onMouseUp}
         onDoubleClick={onDoubleClick}
-        onWheel={onWheel}
       />
       {/* Toolbar overlays */}
       <div style={{ position: 'absolute', top: 8, right: 8, display: 'flex', gap: 4 }}>
