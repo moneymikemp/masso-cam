@@ -32,18 +32,22 @@ function generateContour(op, entities) {
   const moves = [], warnings = [];
   const p = op.params;
   const toolR = (p.toolDiameter || 6.35) / 2;
-  const flip = p.flipSide ? -1 : 1;
-  const offset = p.compensation === 'center' ? 0
-    : (toolR + (p.stockToLeave || 0)) * (p.compensation === 'right' ? 1 : -1) * flip;
+  // cutSide: 'outside' = expand outward (negative dist), 'inside' = shrink inward (positive dist)
+  const cutSide = p.cutSide || 'outside';
+  const sign = cutSide === 'inside' ? 1 : cutSide === 'center' ? 0 : -1;
+  const offset = sign * (toolR + (p.stockToLeave || 0));
 
   const selected = getSelectedEntities(entities, op.selectedIds);
   if (!selected.length) return { moves: [], warnings: ['No entities selected'] };
 
   for (const entity of selected) {
-    const profile = entityToProfile(entity);
+    let profile = entityToProfile(entity);
     if (!profile || profile.length < 2) continue;
 
     const closed = isEntityClosed(entity);
+    // Normalize closed profiles to CCW so inside/outside offset is unambiguous
+    if (closed && isClockwise(profile)) profile = [...profile].reverse();
+
     let contourPts = profile;
 
     if (offset !== 0 && closed) {
@@ -124,22 +128,35 @@ function generatePocket(op, entities) {
   const zPasses = buildZPasses(topZ, p.totalDepth || 10, p.depthPerPass || 3);
 
   for (const z of zPasses) {
-    // Inset outer boundary by toolR (+ finish allowance when finishing)
-    const boundaryOffset = +(toolR + (p.finishPass ? (p.finishAllowance || 0.2) : 0));
-    const boundary = offsetPolyline(outerProfile, boundaryOffset, true)[0];
+    let clearPasses;
 
-    if (!boundary || boundary.length < 4 || polygonArea(boundary) < toolR * toolR) {
-      warnings.push('Shape too small for pocket after tool offset');
-      continue;
-    }
-
-    // Generate clearing passes (rest machining = only the strip the previous tool missed)
-    const clearPasses = p.restMachining && (p.previousToolDiameter || 0) > 0
-      ? generateRestMachiningPasses(outerProfile, toolR, p.previousToolDiameter / 2, stepover, islandExclusions)
-      : generatePocketOffsets(boundary, toolR, stepover, islandExclusions);
-
-    if (clearPasses.length === 0 && islandExclusions.length === 0) {
-      warnings.push('No clearing passes generated - pocket may be too small');
+    if (p.cutSide === 'outside') {
+      // Outside (boss) mode: clear the area surrounding the profile
+      const islandRaw = offsetPolyline(outerProfile, -toolR, true)[0];
+      const island = (islandRaw && islandRaw.length >= 3) ? islandRaw : outerProfile;
+      const b = getEntityBounds(selected);
+      const margin = Math.max(toolR * 4, 20);
+      const outerBound = [
+        { x: b.minX - margin, y: b.minY - margin },
+        { x: b.maxX + margin, y: b.minY - margin },
+        { x: b.maxX + margin, y: b.maxY + margin },
+        { x: b.minX - margin, y: b.maxY + margin },
+      ];
+      clearPasses = generatePocketOffsets(outerBound, toolR, stepover, [island]);
+      if (!clearPasses.length) warnings.push('No outside clearing passes generated');
+    } else {
+      const boundaryOffset = toolR + (p.finishPass ? (p.finishAllowance || 0.2) : 0);
+      const boundary = offsetPolyline(outerProfile, boundaryOffset, true)[0];
+      if (!boundary || boundary.length < 4 || polygonArea(boundary) < toolR * toolR) {
+        warnings.push('Shape too small for pocket after tool offset');
+        continue;
+      }
+      clearPasses = p.restMachining && (p.previousToolDiameter || 0) > 0
+        ? generateRestMachiningPasses(outerProfile, toolR, p.previousToolDiameter / 2, stepover, islandExclusions)
+        : generatePocketOffsets(boundary, toolR, stepover, islandExclusions);
+      if (clearPasses.length === 0 && islandExclusions.length === 0) {
+        warnings.push('No clearing passes generated - pocket may be too small');
+      }
     }
 
     const sortedPasses = p.startFromCenter ? [...clearPasses].reverse() : clearPasses;
@@ -160,9 +177,10 @@ function generatePocket(op, entities) {
       }
     }
 
-    // Finish pass along the outer boundary wall
+    // Finish pass: trace the pocket wall (inside mode) or boss perimeter (outside mode)
     if (p.finishPass) {
-      const finBoundary = offsetPolyline(outerProfile, +toolR, true)[0];
+      const finSign = p.cutSide === 'outside' ? -1 : 1;
+      const finBoundary = offsetPolyline(outerProfile, finSign * toolR, true)[0];
       if (finBoundary && finBoundary.length >= 3) {
         moves.push({ type: 'rapid', x: finBoundary[0].x, y: finBoundary[0].y, z: safeZ });
         moves.push({ type: 'feed', x: finBoundary[0].x, y: finBoundary[0].y, z, f: plungeRate });
@@ -193,16 +211,32 @@ function generateAdaptive(op, entities) {
   if (!selected.length) return { moves: [], warnings: ['No entities selected'] };
 
   for (const entity of selected) {
-    const profile = entityToProfile(entity);
+    let profile = entityToProfile(entity);
     if (!profile || profile.length < 3) continue;
+    if (isClockwise(profile)) profile = [...profile].reverse();
 
     const passes = buildZPasses(p.topZ ?? 0, p.totalDepth || 15, p.depthPerPass || 5);
     const trochR = toolR * (p.optimalLoad || 0.3);
 
     for (const z of passes) {
-      const clearPasses = p.restMachining && (p.previousToolDiameter || 0) > 0
-        ? generateRestMachiningPasses(profile, toolR, p.previousToolDiameter / 2, stepover * 0.8)
-        : generatePocketOffsets(profile, toolR, stepover * 0.8);
+      let clearPasses;
+      if (p.cutSide === 'outside') {
+        const islandRaw = offsetPolyline(profile, -toolR, true)[0];
+        const island = (islandRaw && islandRaw.length >= 3) ? islandRaw : profile;
+        const b = getEntityBounds([entity]);
+        const margin = Math.max(toolR * 4, 20);
+        const outerBound = [
+          { x: b.minX - margin, y: b.minY - margin },
+          { x: b.maxX + margin, y: b.minY - margin },
+          { x: b.maxX + margin, y: b.maxY + margin },
+          { x: b.minX - margin, y: b.maxY + margin },
+        ];
+        clearPasses = generatePocketOffsets(outerBound, toolR, stepover * 0.8, [island]);
+      } else {
+        clearPasses = p.restMachining && (p.previousToolDiameter || 0) > 0
+          ? generateRestMachiningPasses(profile, toolR, p.previousToolDiameter / 2, stepover * 0.8)
+          : generatePocketOffsets(profile, toolR, stepover * 0.8);
+      }
       if (!clearPasses.length) continue;
 
       moves.push({ type: 'rapid', x: profile[0].x, y: profile[0].y, z: safeZ });
@@ -460,10 +494,14 @@ function generateChamfer(op, entities) {
   const selected = getSelectedEntities(entities, op.selectedIds);
 
   for (const entity of selected) {
-    const profile = entityToProfile(entity);
+    let profile = entityToProfile(entity);
     if (!profile || profile.length < 2) continue;
-    const tipOffset = -((p.chamferWidth || 1) + (p.stockToLeave || 0));
-    const offsets = offsetPolyline(profile, tipOffset, isEntityClosed(entity));
+    const closed = isEntityClosed(entity);
+    if (closed && isClockwise(profile)) profile = [...profile].reverse();
+    const cutSide = p.cutSide || 'outside';
+    const sign = cutSide === 'inside' ? 1 : -1;
+    const tipOffset = sign * ((p.chamferWidth || 1) + (p.stockToLeave || 0));
+    const offsets = offsetPolyline(profile, tipOffset, closed);
     let contourPts = offsets[0] || profile;
     if (p.climb === false) contourPts = [...contourPts].reverse();
 
@@ -472,7 +510,7 @@ function generateChamfer(op, entities) {
     for (let i = 1; i < contourPts.length; i++) {
       moves.push({ type: 'feed', x: contourPts[i].x, y: contourPts[i].y, z: tipZ, f: p.feedRate || 800 });
     }
-    if (isEntityClosed(entity)) {
+    if (closed) {
       moves.push({ type: 'feed', x: contourPts[0].x, y: contourPts[0].y, z: tipZ, f: p.feedRate || 800 });
     }
     moves.push({ type: 'rapid', x: contourPts[0].x, y: contourPts[0].y, z: p.safeZ || 25 });

@@ -148,10 +148,9 @@ export default function OperationParams({ op, tools, onChange }) {
       {op.type === 'contour' && <>
         {toolSelect}
         <div style={S.section}>Compensation</div>
-        <Field label="Side">
-          <Sel value={p.compensation || 'left'} onChange={v => set('compensation', v)} options={[['left','Left (outside CW)'],['right','Right (inside CW)'],['center','On line']]} />
+        <Field label="Cut Side">
+          <Sel value={p.cutSide || 'outside'} onChange={v => set('cutSide', v)} options={[['outside','Outside'],['inside','Inside'],['center','Center line']]} />
         </Field>
-        <CheckField label="Flip Side" value={!!p.flipSide} onChange={v => set('flipSide', v)} />
         <Field label="Stock to Leave" unit={distUnit}><NumInput value={toDisp(p.stockToLeave ?? 0)} onChange={v => set('stockToLeave', toMM(v))} step={isInch ? 0.002 : 0.05} /></Field>
         {commonDirection}
         {commonDepth}
@@ -174,6 +173,9 @@ export default function OperationParams({ op, tools, onChange }) {
       {op.type === 'pocket' && <>
         {toolSelect}
         <div style={S.section}>Clearing</div>
+        <Field label="Cut Side">
+          <Sel value={p.cutSide || 'inside'} onChange={v => set('cutSide', v)} options={[['inside','Inside (pocket)'],['outside','Outside (boss)']]} />
+        </Field>
         <Field label="Stepover %"><NumInput value={Math.round((p.stepover || 0.45) * 100)} onChange={v => set('stepover', v / 100)} step={5} min={5} max={95} /></Field>
         <CheckField label="Start from Center" value={p.startFromCenter} onChange={v => set('startFromCenter', v)} />
         <div style={S.section}>Rest Machining</div>
@@ -191,6 +193,9 @@ export default function OperationParams({ op, tools, onChange }) {
       {op.type === 'adaptive' && <>
         {toolSelect}
         <div style={S.section}>Clearing</div>
+        <Field label="Cut Side">
+          <Sel value={p.cutSide || 'inside'} onChange={v => set('cutSide', v)} options={[['inside','Inside (pocket)'],['outside','Outside (boss)']]} />
+        </Field>
         <Field label="Stepover %"><NumInput value={Math.round((p.stepover || 0.35) * 100)} onChange={v => set('stepover', v / 100)} step={5} min={5} max={60} /></Field>
         <Field label="Optimal Load %"><NumInput value={Math.round((p.optimalLoad || 0.3) * 100)} onChange={v => set('optimalLoad', v / 100)} step={5} min={5} max={50} /></Field>
         <div style={S.section}>Rest Machining</div>
@@ -284,6 +289,9 @@ export default function OperationParams({ op, tools, onChange }) {
       {op.type === 'chamfer' && <>
         {toolSelect}
         <div style={S.section}>Chamfer</div>
+        <Field label="Cut Side">
+          <Sel value={p.cutSide || 'outside'} onChange={v => set('cutSide', v)} options={[['outside','Outside edge'],['inside','Inside edge']]} />
+        </Field>
         <Field label="Chamfer Angle" unit="°"><NumInput value={p.chamferAngle || 45} onChange={v => set('chamferAngle', v)} step={5} min={10} max={80} /></Field>
         <Field label="Chamfer Width" unit={distUnit}><NumInput value={toDisp(p.chamferWidth ?? 1.0)} onChange={v => set('chamferWidth', toMM(v))} step={isInch ? 0.005 : 0.1} min={isInch ? 0.004 : 0.1} /></Field>
         <Field label="Top Z" unit={distUnit}><NumInput value={toDisp(p.topZ ?? 0)} onChange={v => set('topZ', toMM(v))} step={isInch ? 0.02 : 0.5} /></Field>
