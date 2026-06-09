@@ -8,6 +8,7 @@ import GcodePanel from './components/panels/GcodePanel';
 import StockPanel from './components/panels/StockPanel';
 import { parseDxf, getBounds } from './dxf/parser';
 import { generateGcode, generateGcodeByTool } from './gcode/postprocessor';
+import InlayWizard from './components/panels/InlayWizard';
 
 // ── Modal styles ──────────────────────────────────────────────────────────────
 const MS = {
@@ -191,7 +192,7 @@ const S = {
 export default function App() {
   const { state, dispatch, getProject } = useApp();
   const { activePanelTab, statusMessage, selectedEntityIds, entities, operations, postConfig } = state;
-  const [modal, setModal] = useState(null); // 'machine' | 'post' | 'about'
+  const [modal, setModal] = useState(null); // 'machine' | 'post' | 'about' | 'inlay-wizard'
 
   useEffect(() => {
     if (window.electron) {
@@ -212,6 +213,7 @@ export default function App() {
         case 'menu-machine-setup':    setModal('machine'); break;
         case 'menu-post-settings':    setModal('post'); break;
         case 'menu-about':            setModal('about'); break;
+        case 'menu-inlay-wizard':    setModal('inlay-wizard'); break;
         case 'menu-new-project':      newProject(); break;
         case 'menu-open-project':     openProject(); break;
         case 'menu-save-project':     saveProject(false); break;
@@ -359,6 +361,13 @@ export default function App() {
     }
   }, [getProject, state.projectPath, dispatch]);
 
+  function handleInlayGenerate(pocketOp, plugOp) {
+    dispatch({ type: 'ADD_OPERATION', payload: pocketOp });
+    dispatch({ type: 'ADD_OPERATION', payload: plugOp });
+    dispatch({ type: 'SET_PANEL_TAB', payload: 'operations' });
+    dispatch({ type: 'SET_STATUS', payload: `Inlay wizard: created "${pocketOp.name}" and "${plugOp.name}"` });
+  }
+
   const enabledOpsCount = operations.filter(o => o.enabled).length;
   const calculatedCount = operations.filter(o => o.enabled && o.toolpath).length;
   const unitsLabel = postConfig.units === 'inch' ? 'INCH' : 'MM';
@@ -388,6 +397,16 @@ export default function App() {
         />
       )}
       {modal === 'about' && <AboutModal onClose={() => setModal(null)} />}
+      {modal === 'inlay-wizard' && (
+        <InlayWizard
+          onClose={() => setModal(null)}
+          onGenerate={handleInlayGenerate}
+          selectedEntityIds={selectedEntityIds}
+          entities={entities}
+          tools={state.tools || []}
+          isInch={postConfig.units === 'inch'}
+        />
+      )}
 
       {/* Top Toolbar */}
       <div style={S.topbar}>
@@ -395,6 +414,7 @@ export default function App() {
         <div style={{ display:'flex', gap:4, flex:1 }}>
           <button style={S.tbBtn} onClick={importDxf}>📐 Import DXF</button>
           <button style={S.tbBtn} onClick={exportGcode}>💾 Export G-code</button>
+          <button style={{ ...S.tbBtn, borderColor:'#3a4a2a', color:'#99cc88' }} onClick={() => setModal('inlay-wizard')}>⬡ Inlay Wizard</button>
           <div style={{ width:1, background:'#2a2a50', margin:'0 4px' }} />
           <button style={{ ...S.tbBtn, ...(state.showToolpaths ? S.tbBtnActive : {}) }} onClick={() => dispatch({ type: 'TOGGLE_TOOLPATHS' })}>⬡ Paths</button>
           <button style={{ ...S.tbBtn, ...(state.showRapids ? S.tbBtnActive : {}) }} onClick={() => dispatch({ type: 'TOGGLE_RAPIDS' })}>↗ Rapids</button>

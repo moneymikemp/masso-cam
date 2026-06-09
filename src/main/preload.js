@@ -25,7 +25,8 @@ contextBridge.exposeInMainWorld('electron', {
       'menu-import-dxf', 'menu-export-gcode', 'menu-undo', 'menu-redo',
       'menu-select-all', 'menu-delete-selected', 'menu-zoom-fit', 'menu-zoom-in',
       'menu-zoom-out', 'menu-toggle-toolpaths', 'menu-toggle-rapids',
-      'menu-machine-setup', 'menu-post-settings', 'menu-tool-library', 'menu-about'
+      'menu-machine-setup', 'menu-post-settings', 'menu-tool-library', 'menu-about',
+      'menu-inlay-wizard'
     ];
     const handlers = {};
     for (const event of events) {

@@ -207,6 +207,8 @@ function buildMenu() {
         { label: 'Machine Setup...', click: () => mainWindow.webContents.send('menu-machine-setup') },
         { label: 'Post Processor Settings...', click: () => mainWindow.webContents.send('menu-post-settings') },
         { label: 'Tool Library...', click: () => mainWindow.webContents.send('menu-tool-library') },
+        { type: 'separator' },
+        { label: 'Inlay Wizard...', accelerator: 'CmdOrCtrl+Shift+W', click: () => mainWindow.webContents.send('menu-inlay-wizard') },
       ]
     },
     {
