@@ -1,4 +1,4 @@
-import React, { useRef, useEffect, useCallback, useState } from 'react';
+import React, { useRef, useEffect, useCallback, useState, useMemo } from 'react';
 import { useApp } from '../../store/AppContext';
 import { circleToPoints, arcToPoints, polylineToPoints } from '../../dxf/parser';
 
@@ -34,6 +34,51 @@ export default function CAMCanvas() {
   }
 
   const { viewport, entities, layers, operations, selectedEntityIds, hoveredEntityId, showToolpaths, showRapids, bounds, stockConfig } = state;
+
+  const [zSliderPos, setZSliderPos] = useState(0); // 0 = all passes; 1..N = pass index
+  const [isAnimating, setIsAnimating] = useState(false);
+
+  // Unique Z levels where cutting happens, sorted shallowest → deepest.
+  const zLevels = useMemo(() => {
+    const zSet = new Set();
+    for (const op of operations) {
+      if (!op.enabled || !op.toolpath) continue;
+      const moveLists = op.toolpath.subToolpaths?.length > 0
+        ? op.toolpath.subToolpaths.map(st => st.moves)
+        : [op.toolpath.moves];
+      for (const moves of moveLists) {
+        if (!moves) continue;
+        let curZ = 0;
+        for (const m of moves) {
+          if (m.z !== undefined) curZ = m.z;
+          if (m.type === 'feed') zSet.add(Math.round(curZ * 1000) / 1000);
+        }
+      }
+    }
+    return [...zSet].sort((a, b) => b - a);
+  }, [operations]);
+
+  // Resolved index into zLevels (null = show all).
+  const filterZIndex = zSliderPos === 0 ? null : zSliderPos - 1;
+
+  // Reset slider whenever the toolpath depth structure changes.
+  useEffect(() => {
+    setZSliderPos(0);
+    setIsAnimating(false);
+  }, [zLevels.length]);
+
+  // Step-by-step animation: advance one pass every 700 ms.
+  useEffect(() => {
+    if (!isAnimating) return;
+    if (zSliderPos >= zLevels.length) { setIsAnimating(false); return; }
+    const t = setTimeout(() => setZSliderPos(p => p + 1), 700);
+    return () => clearTimeout(t);
+  }, [isAnimating, zSliderPos, zLevels.length]);
+
+  function togglePlay() {
+    if (isAnimating) { setIsAnimating(false); }
+    else { setZSliderPos(1); setIsAnimating(true); }
+  }
 
   // World to canvas
   const w2c = useCallback((x, y) => {
@@ -231,13 +276,17 @@ export default function CAMCanvas() {
     ctx.stroke();
   }
 
-  function drawMoveList(ctx, moves, cutColor) {
-    let prevX = 0, prevY = 0;
+  function drawMoveList(ctx, moves, baseCutColor) {
+    const SNAP = 0.001;
+    let prevX = 0, prevY = 0, curZ = 0;
     for (const move of moves) {
       const x = move.x ?? prevX;
       const y = move.y ?? prevY;
+      if (move.z !== undefined) curZ = move.z;
+
       if (move.type === 'rapid') {
-        if (showRapids) {
+        // Hide rapid air-moves when a specific pass is selected — they're distracting.
+        if (showRapids && filterZIndex === null) {
           ctx.strokeStyle = COLORS.toolpathRapid;
           ctx.lineWidth = 0.7;
           ctx.setLineDash([4, 4]);
@@ -248,17 +297,28 @@ export default function CAMCanvas() {
           ctx.setLineDash([]);
         }
       } else if (move.type === 'feed') {
-        const isPlunge = (x === prevX && y === prevY);
-        ctx.strokeStyle = isPlunge ? COLORS.toolpathPlunge : cutColor;
-        ctx.lineWidth = 1;
-        ctx.setLineDash([]);
-        ctx.beginPath();
-        const s = w2c(prevX, prevY), e = w2c(x, y);
-        ctx.moveTo(s.x, s.y); ctx.lineTo(e.x, e.y);
-        ctx.stroke();
+        const targetZ = filterZIndex !== null ? zLevels[filterZIndex] : null;
+        const atTarget = targetZ === null || Math.abs(curZ - targetZ) <= SNAP;
+        if (atTarget) {
+          const isPlunge = (x === prevX && y === prevY);
+          // Color each Z-level pass distinctly; plunges keep their orange marker.
+          let cutColor = baseCutColor;
+          if (!isPlunge && zLevels.length > 0) {
+            const zi = zLevels.findIndex(zl => Math.abs(zl - curZ) < SNAP);
+            if (zi >= 0) cutColor = passColor(zi, zLevels.length);
+          }
+          ctx.strokeStyle = isPlunge ? COLORS.toolpathPlunge : cutColor;
+          ctx.lineWidth = filterZIndex !== null ? 1.5 : 1;
+          ctx.setLineDash([]);
+          ctx.beginPath();
+          const s = w2c(prevX, prevY), e = w2c(x, y);
+          ctx.moveTo(s.x, s.y); ctx.lineTo(e.x, e.y);
+          ctx.stroke();
+        }
       }
-      if (move.x !== undefined) prevX = move.x;
-      if (move.y !== undefined) prevY = move.y;
+      // Always advance position so skipped moves don't corrupt subsequent start points.
+      if (move.x !== undefined) prevX = x;
+      if (move.y !== undefined) prevY = y;
     }
   }
 
@@ -286,7 +346,7 @@ export default function CAMCanvas() {
     ctx.fillText(`X: ${world.x.toFixed(3)}  Y: ${world.y.toFixed(3)}`, 14, ctx.canvas.height - 14);
   }
 
-  useEffect(() => { draw(); }, [entities, layers, operations, viewport, selectedEntityIds, hoveredEntityId, showToolpaths, showRapids, mousePos, stockConfig]);
+  useEffect(() => { draw(); }, [entities, layers, operations, viewport, selectedEntityIds, hoveredEntityId, showToolpaths, showRapids, mousePos, stockConfig, zSliderPos, zLevels]);
 
   // Mouse events
   const onMouseDown = useCallback((e) => {
@@ -432,6 +492,28 @@ export default function CAMCanvas() {
         <CanvasButton title="Zoom In" onClick={() => dispatch({ type: 'SET_VIEWPORT', payload: { zoom: viewport.zoom * 1.4 } })}>+</CanvasButton>
         <CanvasButton title="Zoom Out" onClick={() => dispatch({ type: 'SET_VIEWPORT', payload: { zoom: viewport.zoom / 1.4 } })}>−</CanvasButton>
       </div>
+      {showToolpaths && zLevels.length > 0 && (
+        <div style={{ position: 'absolute', bottom: 32, left: '50%', transform: 'translateX(-50%)', background: 'rgba(10,10,30,0.88)', border: '1px solid #2a2a50', borderRadius: 6, padding: '5px 10px', display: 'flex', alignItems: 'center', gap: 8, pointerEvents: 'all', userSelect: 'none' }}>
+          <button
+            onClick={togglePlay}
+            title={isAnimating ? 'Stop' : 'Play through passes'}
+            style={{ width: 22, height: 22, background: '#111128', border: '1px solid #4444aa', color: '#aaaacc', borderRadius: 3, cursor: 'pointer', fontSize: 11, display: 'flex', alignItems: 'center', justifyContent: 'center', flexShrink: 0, padding: 0 }}
+          >
+            {isAnimating ? '⏹' : '▶'}
+          </button>
+          <input
+            type="range" min={0} max={zLevels.length} value={Math.min(zSliderPos, zLevels.length)}
+            style={{ width: 160, cursor: 'pointer', accentColor: filterZIndex !== null ? passColor(filterZIndex, zLevels.length) : '#5566ff' }}
+            onChange={e => { setIsAnimating(false); setZSliderPos(Number(e.target.value)); }}
+          />
+          {zSliderPos === 0
+            ? <span style={{ color: '#666688', fontSize: 11, fontFamily: 'monospace', minWidth: 112 }}>all passes</span>
+            : <div style={{ fontSize: 11, fontFamily: 'monospace', color: '#ccccee', minWidth: 112, display: 'flex', alignItems: 'center', gap: 5 }}>
+                <div style={{ width: 9, height: 9, borderRadius: 2, background: passColor(filterZIndex, zLevels.length), flexShrink: 0 }} />
+                {`Z${(zLevels[filterZIndex] ?? 0).toFixed(2)}  ${zSliderPos}/${zLevels.length}`}
+              </div>}
+        </div>
+      )}
       {statusMsg && (
         <div style={{ position: 'absolute', bottom: 40, left: '50%', transform: 'translateX(-50%)', background: 'rgba(0,0,0,0.75)', color: '#ffcc44', padding: '5px 14px', borderRadius: 4, fontSize: 12, pointerEvents: 'none', whiteSpace: 'nowrap', border: '1px solid rgba(255,204,68,0.3)' }}>
           {statusMsg}
@@ -446,6 +528,12 @@ export default function CAMCanvas() {
       )}
     </div>
   );
+}
+
+// Maps a pass index to a distinct hue: red (shallow) → blue (deep).
+function passColor(index, total) {
+  const hue = Math.round((index / Math.max(total - 1, 1)) * 270);
+  return `hsl(${hue}, 85%, 55%)`;
 }
 
 // Returns the two connectable endpoint positions for line/arc/polyline.
