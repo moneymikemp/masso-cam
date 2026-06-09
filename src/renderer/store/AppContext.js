@@ -285,7 +285,7 @@ export function getDefaultParams(type) {
     case 'chamfer':  return { toolDiameter: 6.35, chamferAngle: 45, chamferWidth: 1.0, topZ: 0, safeZ: 25, feedRate: 800, plungeRate: 300, spindleRpm: 18000, stockToLeave: 0 };
     case 'thread':        return { safeZ: 25, topZ: 0, feedRate: 400, plungeRate: 200, totalDepth: 15, toolDiameter: 6.35, pitch: 1.25, internal: true, direction: 'right', spindleRpm: 1000 };
     case 'taperedpocket': return {
-      topZ: 0, safeZ: 10, pocketDepth: 5,
+      topZ: 0, safeZ: 10, pocketDepth: 5, mirrorX: false,
       passes: {
         taperContour:  { enabled: true, toolId: null, tipDia: 0.5,    angle: 10, rpm: 24000, feed: 1000, plunge: 300 },
         taperCleanup:  { enabled: true, toolId: null, tipDia: 0.5,    angle: 10, rpm: 24000, feed: 1000, plunge: 300, wallStock: 0.254 },
@@ -294,7 +294,7 @@ export function getDefaultParams(type) {
       },
     };
     case 'taperedplug': return {
-      topZ: 0, safeZ: 10, pocketDepth: 5,
+      topZ: 0, safeZ: 10, pocketDepth: 5, mirrorX: false,
       fitTolerance: 0.127,
       passes: {
         taperContour:  { enabled: true, toolId: null, tipDia: 0.5,    angle: 10, rpm: 24000, feed: 1000, plunge: 300 },

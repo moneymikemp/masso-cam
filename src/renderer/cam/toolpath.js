@@ -592,6 +592,29 @@ function generateThread(op, entities) {
 // Outside: profile outset by (toolR + wallLeave) becomes the exclusion island;
 //          stock bounding box is the outer clearing boundary.
 
+// Mirror entities across the X axis (reflect Y around the centroid Y of all profiles).
+// Used to generate a plug toolpath that is a mirror image of the pocket so the plug
+// fits when physically flipped over and glued in.
+// Chains LINE/ARC segments first (same as buildPocketProfiles) so the centroid is
+// computed from the closed profile, not individual segment midpoints.
+function mirrorEntitiesX(entities) {
+  const profiles = buildPocketProfiles(entities);
+  if (!profiles.length) return entities;
+
+  const allPts = profiles.flat();
+  const cy = allPts.reduce((sum, pt) => sum + pt.y, 0) / allPts.length;
+
+  return profiles.map((pts, i) => {
+    const clean = stripClose([...pts]);
+    return {
+      id: `__mirror_${i}`,
+      type: 'polyline',
+      vertices: clean.map(pt => ({ x: pt.x, y: 2 * cy - pt.y })),
+      closed: true,
+    };
+  });
+}
+
 function generateTaperedPocket(op, entities) {
   const p = op.params;
   const warnings = [];
@@ -600,8 +623,9 @@ function generateTaperedPocket(op, entities) {
   if (!op.selectedIds?.length) {
     return { moves: [], subToolpaths: [], warnings: ['Select specific entities before calculating Tapered Pocket'] };
   }
-  const selected = getSelectedEntities(entities, op.selectedIds);
+  let selected = getSelectedEntities(entities, op.selectedIds);
   if (!selected.length) return { moves: [], subToolpaths: [], warnings: ['No entities found for selected IDs'] };
+  if (p.mirrorX) selected = mirrorEntitiesX(selected);
 
   const topZ   = p.topZ ?? 0;
   const depth  = Math.abs(p.pocketDepth || 5);
@@ -615,8 +639,9 @@ function generateTaperedPlug(op, entities) {
   if (!op.selectedIds?.length) {
     return { moves: [], subToolpaths: [], warnings: ['Select specific entities before calculating Tapered Plug'] };
   }
-  const selected = getSelectedEntities(entities, op.selectedIds);
+  let selected = getSelectedEntities(entities, op.selectedIds);
   if (!selected.length) return { moves: [], subToolpaths: [], warnings: ['No entities found for selected IDs'] };
+  if (p.mirrorX) selected = mirrorEntitiesX(selected);
 
   const depth   = Math.abs(p.pocketDepth || 5);
   const safeZ   = p.safeZ ?? 10;

@@ -514,6 +514,7 @@ export default function OperationParams({ op, tools, onChange }) {
               options={[['inside', 'Inside (Pocket)'], ['outside', 'Outside (Plug)']]}
             />
           </Field>
+          <CheckField label="Mirror X" value={!!p.mirrorX} onChange={v => set('mirrorX', v)} />
 
           <div style={S.section}>Depth</div>
           <Field label="Pocket Depth" unit={distUnit}><NumInput value={toDisp(p.pocketDepth ?? 5)} onChange={v => set('pocketDepth', toMM(v))} min={isInch ? 0.01 : 0.25} step={dStep} /></Field>
