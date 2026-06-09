@@ -254,6 +254,18 @@ ipcMain.handle('dialog-save-gcode', async (_, defaultName) => {
   return result.canceled ? null : result.filePath;
 });
 
+ipcMain.handle('dialog-save-gcode-inlay', async (_, defaultName) => {
+  const result = await dialog.showSaveDialog(mainWindow, {
+    title: 'Export Inlay G-code — choose base filename (saves _pocket.nc and _plug.nc)',
+    defaultPath: defaultName || 'inlay.nc',
+    filters: [
+      { name: 'G-code', extensions: ['nc', 'gcode', 'tap', 'cnc'] },
+      { name: 'All Files', extensions: ['*'] }
+    ]
+  });
+  return result.canceled ? null : result.filePath;
+});
+
 ipcMain.handle('write-file', async (_, filePath, content) => {
   fs.writeFileSync(filePath, content, 'utf-8');
   return true;

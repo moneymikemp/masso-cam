@@ -264,19 +264,54 @@ export default function App() {
       dispatch({ type: 'SET_PANEL_TAB', payload: 'gcode' });
       return;
     }
-    const gcode = generateGcode(enabled, {
+    const gcfg = {
       ...state.postConfig,
       wcs: state.stockConfig.wcs,
       stockOriginX: state.stockConfig.stockOriginX ?? 0,
       stockOriginY: state.stockConfig.stockOriginY ?? 0,
-    });
+    };
+
+    const pocketOps = enabled.filter(op => op.type === 'taperedpocket');
+    const plugOps   = enabled.filter(op => op.type === 'taperedplug');
+    const isInlay   = pocketOps.length > 0 && plugOps.length > 0;
+
+    if (isInlay) {
+      const pocketGcode = generateGcode(pocketOps, gcfg);
+      const plugGcode   = generateGcode(plugOps,   gcfg);
+      dispatch({ type: 'SET_PANEL_TAB', payload: 'gcode' });
+      if (window.electron) {
+        const chosenPath = await window.electron.saveGcodeInlay('inlay.nc');
+        if (!chosenPath) return;
+        const base       = chosenPath.replace(/\.[^.\\/]+$/, '');
+        const pocketPath = base + '_pocket.nc';
+        const plugPath   = base + '_plug.nc';
+        await window.electron.writeFile(pocketPath, pocketGcode);
+        await window.electron.writeFile(plugPath,   plugGcode);
+        const pocketName = pocketPath.split(/[\\/]/).pop();
+        const plugName   = plugPath.split(/[\\/]/).pop();
+        dispatch({ type: 'SET_STATUS', payload: `Inlay exported: ${pocketName} + ${plugName}` });
+      } else {
+        for (const [content, name] of [[pocketGcode, 'inlay_pocket.nc'], [plugGcode, 'inlay_plug.nc']]) {
+          const blob = new Blob([content], { type: 'text/plain' });
+          const a = document.createElement('a');
+          a.href = URL.createObjectURL(blob);
+          a.download = name;
+          a.click();
+          URL.revokeObjectURL(a.href);
+        }
+        dispatch({ type: 'SET_STATUS', payload: 'Inlay exported: inlay_pocket.nc + inlay_plug.nc' });
+      }
+      return;
+    }
+
+    const gcode = generateGcode(enabled, gcfg);
     dispatch({ type: 'SET_GCODE', payload: gcode });
     dispatch({ type: 'SET_PANEL_TAB', payload: 'gcode' });
     if (window.electron) {
       const path = await window.electron.saveGcode('toolpath.nc');
       if (path) { await window.electron.writeFile(path, gcode); dispatch({ type: 'SET_STATUS', payload: `Exported: ${path}` }); }
     }
-  }, [operations, state.postConfig, dispatch]);
+  }, [operations, state.postConfig, state.stockConfig, dispatch]);
 
   const newProject = useCallback(() => {
     if (state.dirty && !window.confirm('Discard unsaved changes?')) return;

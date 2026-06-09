@@ -4,6 +4,7 @@ contextBridge.exposeInMainWorld('electron', {
   // File dialogs
   openDxf: () => ipcRenderer.invoke('dialog-open-dxf'),
   saveGcode: (name) => ipcRenderer.invoke('dialog-save-gcode', name),
+  saveGcodeInlay: (name) => ipcRenderer.invoke('dialog-save-gcode-inlay', name),
   writeFile: (path, content) => ipcRenderer.invoke('write-file', path, content),
   openProject: () => ipcRenderer.invoke('dialog-open-project'),
   saveProject: (path) => ipcRenderer.invoke('dialog-save-project', path),

@@ -41,8 +41,52 @@ export default function GcodePanel() {
     dispatch({ type: 'SET_GCODE', payload: gcode });
   }
 
+  function downloadBlob(content, filename) {
+    const blob = new Blob([content], { type: 'text/plain' });
+    const a = document.createElement('a');
+    a.href = URL.createObjectURL(blob);
+    a.download = filename;
+    a.click();
+    URL.revokeObjectURL(a.href);
+  }
+
   async function exportGcode() {
     if (!gcodeOutput) { generate(); return; }
+
+    const enabledOps = operations.filter(op => op.enabled && op.toolpath?.moves?.length > 0);
+    const gcfg = {
+      ...postConfig,
+      wcs: stockConfig.wcs,
+      stockOriginX: stockConfig.stockOriginX ?? 0,
+      stockOriginY: stockConfig.stockOriginY ?? 0,
+    };
+
+    const pocketOps = enabledOps.filter(op => op.type === 'taperedpocket');
+    const plugOps   = enabledOps.filter(op => op.type === 'taperedplug');
+    const isInlay   = pocketOps.length > 0 && plugOps.length > 0;
+
+    if (isInlay) {
+      const pocketGcode = generateGcode(pocketOps, gcfg);
+      const plugGcode   = generateGcode(plugOps,   gcfg);
+      if (window.electron) {
+        const chosenPath = await window.electron.saveGcodeInlay('inlay.nc');
+        if (!chosenPath) return;
+        const base       = chosenPath.replace(/\.[^.\\/]+$/, '');
+        const pocketPath = base + '_pocket.nc';
+        const plugPath   = base + '_plug.nc';
+        await window.electron.writeFile(pocketPath, pocketGcode);
+        await window.electron.writeFile(plugPath,   plugGcode);
+        const pocketName = pocketPath.split(/[\\/]/).pop();
+        const plugName   = plugPath.split(/[\\/]/).pop();
+        dispatch({ type: 'SET_STATUS', payload: `Inlay exported: ${pocketName} + ${plugName}` });
+      } else {
+        downloadBlob(pocketGcode, 'inlay_pocket.nc');
+        downloadBlob(plugGcode,   'inlay_plug.nc');
+        dispatch({ type: 'SET_STATUS', payload: 'Inlay exported: inlay_pocket.nc + inlay_plug.nc' });
+      }
+      return;
+    }
+
     if (window.electron) {
       const path = await window.electron.saveGcode('toolpath.nc');
       if (path) {
@@ -50,11 +94,7 @@ export default function GcodePanel() {
         dispatch({ type: 'SET_STATUS', payload: `Exported: ${path}` });
       }
     } else {
-      const blob = new Blob([gcodeOutput], { type: 'text/plain' });
-      const a = document.createElement('a');
-      a.href = URL.createObjectURL(blob);
-      a.download = 'toolpath.nc';
-      a.click();
+      downloadBlob(gcodeOutput, 'toolpath.nc');
     }
   }
 
