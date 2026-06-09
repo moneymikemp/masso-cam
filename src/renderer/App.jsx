@@ -7,7 +7,7 @@ import LayersPanel from './components/panels/LayersPanel';
 import GcodePanel from './components/panels/GcodePanel';
 import StockPanel from './components/panels/StockPanel';
 import { parseDxf, getBounds } from './dxf/parser';
-import { generateGcode } from './gcode/postprocessor';
+import { generateGcode, generateGcodeByTool } from './gcode/postprocessor';
 
 // ── Modal styles ──────────────────────────────────────────────────────────────
 const MS = {
@@ -274,44 +274,67 @@ export default function App() {
     const pocketOps = enabled.filter(op => op.type === 'taperedpocket');
     const plugOps   = enabled.filter(op => op.type === 'taperedplug');
     const isInlay   = pocketOps.length > 0 && plugOps.length > 0;
+    const toolsList = state.tools || [];
 
+    // Build the complete list of {seg, suffix, gcode} to save.
+    // seg = '' | 'pocket' | 'plug';  suffix = '' | '_T1' | '_T2' ...
+    let fileList;
     if (isInlay) {
-      const pocketGcode = generateGcode(pocketOps, gcfg);
-      const plugGcode   = generateGcode(plugOps,   gcfg);
-      dispatch({ type: 'SET_PANEL_TAB', payload: 'gcode' });
+      const pocketGroups = generateGcodeByTool(pocketOps, toolsList, gcfg);
+      const plugGroups   = generateGcodeByTool(plugOps,   toolsList, gcfg);
+      fileList = [
+        ...pocketGroups.map(g => ({ seg: 'pocket', suffix: g.suffix, gcode: g.gcode })),
+        ...plugGroups.map(g =>   ({ seg: 'plug',   suffix: g.suffix, gcode: g.gcode })),
+      ];
+    } else {
+      const groups = generateGcodeByTool(enabled, toolsList, gcfg);
+      fileList = groups.map(g => ({ seg: '', suffix: g.suffix, gcode: g.gcode }));
+    }
+
+    const isMulti = fileList.length > 1 || isInlay;
+    dispatch({ type: 'SET_PANEL_TAB', payload: 'gcode' });
+
+    if (!isMulti) {
+      // Single file — update panel preview, then save directly.
+      dispatch({ type: 'SET_GCODE', payload: fileList[0].gcode });
       if (window.electron) {
-        const chosenPath = await window.electron.saveGcodeInlay('inlay.nc');
-        if (!chosenPath) return;
-        const base       = chosenPath.replace(/\.[^.\\/]+$/, '');
-        const pocketPath = base + '_pocket.nc';
-        const plugPath   = base + '_plug.nc';
-        await window.electron.writeFile(pocketPath, pocketGcode);
-        await window.electron.writeFile(plugPath,   plugGcode);
-        const pocketName = pocketPath.split(/[\\/]/).pop();
-        const plugName   = plugPath.split(/[\\/]/).pop();
-        dispatch({ type: 'SET_STATUS', payload: `Inlay exported: ${pocketName} + ${plugName}` });
-      } else {
-        for (const [content, name] of [[pocketGcode, 'inlay_pocket.nc'], [plugGcode, 'inlay_plug.nc']]) {
-          const blob = new Blob([content], { type: 'text/plain' });
-          const a = document.createElement('a');
-          a.href = URL.createObjectURL(blob);
-          a.download = name;
-          a.click();
-          URL.revokeObjectURL(a.href);
+        const path = await window.electron.saveGcode('toolpath.nc');
+        if (path) {
+          await window.electron.writeFile(path, fileList[0].gcode);
+          dispatch({ type: 'SET_STATUS', payload: `Exported: ${path.split(/[\\/]/).pop()}` });
         }
-        dispatch({ type: 'SET_STATUS', payload: 'Inlay exported: inlay_pocket.nc + inlay_plug.nc' });
       }
       return;
     }
 
-    const gcode = generateGcode(enabled, gcfg);
-    dispatch({ type: 'SET_GCODE', payload: gcode });
-    dispatch({ type: 'SET_PANEL_TAB', payload: 'gcode' });
+    // Multi-file — ask for base filename once, derive all paths from it.
+    let base;
     if (window.electron) {
-      const path = await window.electron.saveGcode('toolpath.nc');
-      if (path) { await window.electron.writeFile(path, gcode); dispatch({ type: 'SET_STATUS', payload: `Exported: ${path}` }); }
+      const chosenPath = await window.electron.saveGcodeInlay(isInlay ? 'inlay.nc' : 'toolpath.nc');
+      if (!chosenPath) return;
+      base = chosenPath.replace(/\.[^.\\/]+$/, '');
+    } else {
+      base = isInlay ? 'inlay' : 'toolpath';
     }
-  }, [operations, state.postConfig, state.stockConfig, dispatch]);
+
+    const saved = [];
+    for (const { seg, suffix, gcode } of fileList) {
+      const segPart  = seg ? `_${seg}` : '';
+      const filename = `${base}${segPart}${suffix}.nc`;
+      if (window.electron) {
+        await window.electron.writeFile(filename, gcode);
+      } else {
+        const blob = new Blob([gcode], { type: 'text/plain' });
+        const a = document.createElement('a');
+        a.href = URL.createObjectURL(blob);
+        a.download = `${base.split(/[\\/]/).pop()}${segPart}${suffix}.nc`;
+        a.click();
+        URL.revokeObjectURL(a.href);
+      }
+      saved.push(filename.split(/[\\/]/).pop());
+    }
+    dispatch({ type: 'SET_STATUS', payload: `Exported: ${saved.join(', ')}` });
+  }, [operations, state.postConfig, state.stockConfig, state.tools, dispatch]);
 
   const newProject = useCallback(() => {
     if (state.dirty && !window.confirm('Discard unsaved changes?')) return;

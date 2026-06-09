@@ -1,6 +1,6 @@
 import React, { useState } from 'react';
 import { useApp } from '../../store/AppContext';
-import { generateGcode, estimateCycleTime, formatTime } from '../../gcode/postprocessor';
+import { generateGcode, generateGcodeByTool, estimateCycleTime, formatTime } from '../../gcode/postprocessor';
 
 const S = {
   panel: { height: '100%', display: 'flex', flexDirection: 'column', background: '#0d0d1a', color: '#ccc' },
@@ -23,7 +23,7 @@ const S = {
 
 export default function GcodePanel() {
   const { state, dispatch } = useApp();
-  const { operations, postConfig, stockConfig, gcodeOutput } = state;
+  const { operations, tools, postConfig, stockConfig, gcodeOutput } = state;
   const [showPost, setShowPost] = useState(false);
 
   function generate() {
@@ -65,37 +65,58 @@ export default function GcodePanel() {
     const plugOps   = enabledOps.filter(op => op.type === 'taperedplug');
     const isInlay   = pocketOps.length > 0 && plugOps.length > 0;
 
+    // Build the complete list of {seg, suffix, gcode} to save.
+    // seg = '' | 'pocket' | 'plug';  suffix = '' | '_T1' | '_T2' ...
+    let fileList;
     if (isInlay) {
-      const pocketGcode = generateGcode(pocketOps, gcfg);
-      const plugGcode   = generateGcode(plugOps,   gcfg);
+      const pocketGroups = generateGcodeByTool(pocketOps, tools || [], gcfg);
+      const plugGroups   = generateGcodeByTool(plugOps,   tools || [], gcfg);
+      fileList = [
+        ...pocketGroups.map(g => ({ seg: 'pocket', suffix: g.suffix, gcode: g.gcode })),
+        ...plugGroups.map(g =>   ({ seg: 'plug',   suffix: g.suffix, gcode: g.gcode })),
+      ];
+    } else {
+      const groups = generateGcodeByTool(enabledOps, tools || [], gcfg);
+      fileList = groups.map(g => ({ seg: '', suffix: g.suffix, gcode: g.gcode }));
+    }
+
+    const isMulti = fileList.length > 1 || isInlay;
+
+    if (!isMulti) {
+      // Single file — save directly to the user-chosen path.
       if (window.electron) {
-        const chosenPath = await window.electron.saveGcodeInlay('inlay.nc');
-        if (!chosenPath) return;
-        const base       = chosenPath.replace(/\.[^.\\/]+$/, '');
-        const pocketPath = base + '_pocket.nc';
-        const plugPath   = base + '_plug.nc';
-        await window.electron.writeFile(pocketPath, pocketGcode);
-        await window.electron.writeFile(plugPath,   plugGcode);
-        const pocketName = pocketPath.split(/[\\/]/).pop();
-        const plugName   = plugPath.split(/[\\/]/).pop();
-        dispatch({ type: 'SET_STATUS', payload: `Inlay exported: ${pocketName} + ${plugName}` });
+        const path = await window.electron.saveGcode('toolpath.nc');
+        if (!path) return;
+        await window.electron.writeFile(path, fileList[0].gcode);
+        dispatch({ type: 'SET_STATUS', payload: `Exported: ${path.split(/[\\/]/).pop()}` });
       } else {
-        downloadBlob(pocketGcode, 'inlay_pocket.nc');
-        downloadBlob(plugGcode,   'inlay_plug.nc');
-        dispatch({ type: 'SET_STATUS', payload: 'Inlay exported: inlay_pocket.nc + inlay_plug.nc' });
+        downloadBlob(fileList[0].gcode, 'toolpath.nc');
       }
       return;
     }
 
+    // Multi-file — ask for base filename once, derive all paths from it.
+    let base;
     if (window.electron) {
-      const path = await window.electron.saveGcode('toolpath.nc');
-      if (path) {
-        await window.electron.writeFile(path, gcodeOutput);
-        dispatch({ type: 'SET_STATUS', payload: `Exported: ${path}` });
-      }
+      const chosenPath = await window.electron.saveGcodeInlay(isInlay ? 'inlay.nc' : 'toolpath.nc');
+      if (!chosenPath) return;
+      base = chosenPath.replace(/\.[^.\\/]+$/, '');
     } else {
-      downloadBlob(gcodeOutput, 'toolpath.nc');
+      base = isInlay ? 'inlay' : 'toolpath';
     }
+
+    const saved = [];
+    for (const { seg, suffix, gcode } of fileList) {
+      const segPart  = seg ? `_${seg}` : '';
+      const filename = `${base}${segPart}${suffix}.nc`;
+      if (window.electron) {
+        await window.electron.writeFile(filename, gcode);
+      } else {
+        downloadBlob(gcode, `${base.split(/[\\/]/).pop()}${segPart}${suffix}.nc`);
+      }
+      saved.push(filename.split(/[\\/]/).pop());
+    }
+    dispatch({ type: 'SET_STATUS', payload: `Exported: ${saved.join(', ')}` });
   }
 
   function updatePost(key, val) {

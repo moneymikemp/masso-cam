@@ -256,7 +256,7 @@ ipcMain.handle('dialog-save-gcode', async (_, defaultName) => {
 
 ipcMain.handle('dialog-save-gcode-inlay', async (_, defaultName) => {
   const result = await dialog.showSaveDialog(mainWindow, {
-    title: 'Export Inlay G-code — choose base filename (saves _pocket.nc and _plug.nc)',
+    title: 'Export G-code — choose base filename (multiple files will be saved)',
     defaultPath: defaultName || 'inlay.nc',
     filters: [
       { name: 'G-code', extensions: ['nc', 'gcode', 'tap', 'cnc'] },
