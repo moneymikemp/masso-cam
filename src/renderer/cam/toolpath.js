@@ -601,18 +601,33 @@ function mirrorEntitiesX(entities) {
   const profiles = buildPocketProfiles(entities);
   if (!profiles.length) return entities;
 
-  const allPts = profiles.flat();
-  const cy = allPts.reduce((sum, pt) => sum + pt.y, 0) / allPts.length;
+  // Strip closing points before centroid computation — polylineToPoints adds
+  // a duplicate closing vertex for closed polylines, biasing the vertex average
+  // toward the first vertex and shifting the mirrored geometry off-center.
+  const cleanProfiles = profiles.map(p => stripClose([...p]));
+  const allPts = cleanProfiles.flat();
+  if (!allPts.length) return entities;
 
-  return profiles.map((pts, i) => {
-    const clean = stripClose([...pts]);
-    return {
-      id: `__mirror_${i}`,
-      type: 'polyline',
-      vertices: clean.map(pt => ({ x: pt.x, y: 2 * cy - pt.y })),
-      closed: true,
-    };
-  });
+  const origCx = allPts.reduce((s, p) => s + p.x, 0) / allPts.length;
+  const origCy = allPts.reduce((s, p) => s + p.y, 0) / allPts.length;
+
+  const mirrored = cleanProfiles.map(pts =>
+    pts.map(pt => ({ x: pt.x, y: 2 * origCy - pt.y }))
+  );
+
+  // Explicitly restore centroid after mirror to guard against any residual drift.
+  const mirPts = mirrored.flat();
+  const mirCx  = mirPts.reduce((s, p) => s + p.x, 0) / mirPts.length;
+  const mirCy  = mirPts.reduce((s, p) => s + p.y, 0) / mirPts.length;
+  const dx = origCx - mirCx;
+  const dy = origCy - mirCy;
+
+  return mirrored.map((pts, i) => ({
+    id: `__mirror_${i}`,
+    type: 'polyline',
+    vertices: pts.map(pt => ({ x: pt.x + dx, y: pt.y + dy })),
+    closed: true,
+  }));
 }
 
 function generateTaperedPocket(op, entities, context = {}) {
