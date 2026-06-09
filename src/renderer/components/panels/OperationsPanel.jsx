@@ -96,7 +96,8 @@ export default function OperationsPanel() {
       : entities;
     const toolpath = generateToolpath(
       { ...op, params: { ...op.params, toolDiameter } },
-      entitiesToUse
+      entitiesToUse,
+      { stockConfig: state.stockConfig, allEntities: entities }
     );
     dispatch({ type: 'SET_OPERATION_TOOLPATH', payload: { id: op.id, toolpath } });
     dispatch({ type: 'SET_STATUS', payload: `Calculated: ${toolpath.moves.length} moves` });

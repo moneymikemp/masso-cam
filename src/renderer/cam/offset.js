@@ -18,12 +18,31 @@ function fromClipper(path) {
   return path.map(p => ({ x: p.X / SCALE, y: p.Y / SCALE }));
 }
 
-function stripClose(pts) {
+export function stripClose(pts) {
   if (pts.length > 1 &&
       Math.hypot(pts[pts.length - 1].x - pts[0].x, pts[pts.length - 1].y - pts[0].y) < 1e-6) {
     return pts.slice(0, -1);
   }
   return pts;
+}
+
+// Clip a polygon to a boundary region using Clipper boolean intersection.
+// Returns the portion of ringPts that lies inside boundaryPts.
+// Both inputs may have or omit a closing point — stripClose is applied internally.
+// Returns an array of polygons (WITHOUT closing point, CCW-normalised).
+export function clipPolygonToRegion(ringPts, boundaryPts) {
+  const ring  = stripClose([...ringPts]);
+  const bound = stripClose([...boundaryPts]);
+  if (ring.length < 3 || bound.length < 3) return [];
+  const c = new ClipperLib.Clipper();
+  c.AddPath(toClipper(ring),  ClipperLib.PolyType.ptSubject, true);
+  c.AddPath(toClipper(bound), ClipperLib.PolyType.ptClip,    true);
+  const solution = new ClipperLib.Paths();
+  c.Execute(ClipperLib.ClipType.ctIntersection, solution);
+  return solution
+    .map(fromClipper)
+    .filter(p => p.length >= 3)
+    .map(p => isClockwise(p) ? [...p].reverse() : p);
 }
 
 // Offset a closed polygon.

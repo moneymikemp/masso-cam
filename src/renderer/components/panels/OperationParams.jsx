@@ -71,7 +71,7 @@ function CheckField({ label, value, onChange }) {
 const MM_PER_INCH = 25.4;
 
 export default function OperationParams({ op, tools, onChange }) {
-  const { state } = useApp();
+  const { state, dispatch } = useApp();
   const isInch = state.postConfig?.units === 'inch';
   const p = op.params || {};
 
@@ -116,6 +116,32 @@ export default function OperationParams({ op, tools, onChange }) {
            options={[['climb','Climb'],['conventional','Conventional']]} />
     </Field>
   );
+
+  const hasBoundary = !!(p.boundaryIds?.length);
+  const nSel = state.selectedEntityIds?.length ?? 0;
+  const boundarySection = p.cutSide === 'outside' ? (
+    <>
+      <div style={S.section}>Boundary</div>
+      <Field label="Clip to">
+        <span style={{ ...S.input, color: hasBoundary ? '#88ff88' : '#888888', fontSize: 10, display: 'flex', alignItems: 'center' }}>
+          {hasBoundary ? `${p.boundaryIds.length} entit${p.boundaryIds.length === 1 ? 'y' : 'ies'}` : 'Stock rectangle'}
+        </span>
+      </Field>
+      <Field label="">
+        {nSel > 0
+          ? <button style={{ ...S.input, cursor: 'pointer', textAlign: 'center' }}
+                    onClick={() => set('boundaryIds', [...state.selectedEntityIds])}>
+              Use {nSel} selected
+            </button>
+          : <button style={{ ...S.input, cursor: 'pointer', textAlign: 'center', color: hasBoundary ? '#ff8888' : '#555577' }}
+                    onClick={() => set('boundaryIds', null)}
+                    disabled={!hasBoundary}>
+              {hasBoundary ? 'Clear (use stock)' : 'Select entities first'}
+            </button>
+        }
+      </Field>
+    </>
+  ) : null;
 
   const toolSelect = (
     <>
@@ -176,6 +202,7 @@ export default function OperationParams({ op, tools, onChange }) {
         <Field label="Cut Side">
           <Sel value={p.cutSide || 'inside'} onChange={v => set('cutSide', v)} options={[['inside','Inside (pocket)'],['outside','Outside (boss)']]} />
         </Field>
+        {boundarySection}
         <Field label="Stepover %"><NumInput value={Math.round((p.stepover || 0.45) * 100)} onChange={v => set('stepover', v / 100)} step={5} min={5} max={95} /></Field>
         <CheckField label="Start from Center" value={p.startFromCenter} onChange={v => set('startFromCenter', v)} />
         <div style={S.section}>Rest Machining</div>
@@ -196,6 +223,7 @@ export default function OperationParams({ op, tools, onChange }) {
         <Field label="Cut Side">
           <Sel value={p.cutSide || 'inside'} onChange={v => set('cutSide', v)} options={[['inside','Inside (pocket)'],['outside','Outside (boss)']]} />
         </Field>
+        {boundarySection}
         <Field label="Stepover %"><NumInput value={Math.round((p.stepover || 0.35) * 100)} onChange={v => set('stepover', v / 100)} step={5} min={5} max={60} /></Field>
         <Field label="Optimal Load %"><NumInput value={Math.round((p.optimalLoad || 0.3) * 100)} onChange={v => set('optimalLoad', v / 100)} step={5} min={5} max={50} /></Field>
         <div style={S.section}>Rest Machining</div>

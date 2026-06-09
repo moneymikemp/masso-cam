@@ -1,16 +1,16 @@
 // CAM Toolpath Engine - all 2.5D operations
 
-import { offsetPolyline, generatePocketOffsets, generateRestMachiningPasses, generateRasterPasses, polygonArea, isClockwise } from './offset.js';
+import { offsetPolyline, generatePocketOffsets, generateRestMachiningPasses, generateRasterPasses, polygonArea, isClockwise, clipPolygonToRegion, stripClose } from './offset.js';
 import { circleToPoints, arcToPoints, polylineToPoints } from '../dxf/parser.js';
 
 // ── Entry point ───────────────────────────────────────────────────────────────
 
-export function generateToolpath(operation, entities) {
+export function generateToolpath(operation, entities, context = {}) {
   const { type } = operation;
   switch (type) {
     case 'contour':   return generateContour(operation, entities);
-    case 'pocket':    return generatePocket(operation, entities);
-    case 'adaptive':  return generateAdaptive(operation, entities);
+    case 'pocket':    return generatePocket(operation, entities, context);
+    case 'adaptive':  return generateAdaptive(operation, entities, context);
     case 'face':      return generateFace(operation, entities);
     case 'drill':     return generateDrill(operation, entities);
     case 'bore':      return generateBore(operation, entities);
@@ -81,7 +81,7 @@ function generateContour(op, entities) {
 
 // ── Pocket ────────────────────────────────────────────────────────────────────
 
-function generatePocket(op, entities) {
+function generatePocket(op, entities, context = {}) {
   const moves = [], warnings = [];
   const p = op.params;
   const toolDia = p.toolDiameter || 6.35;
@@ -131,18 +131,23 @@ function generatePocket(op, entities) {
     let clearPasses;
 
     if (p.cutSide === 'outside') {
-      // Outside (boss) mode: expand outward from the profile itself
-      // Each ring is computed directly from the original profile at increasing distance,
-      // so the reference geometry is always the selected shape, not a bounding box.
+      // Outside (boss) mode: expand outward from the profile, clipped to boundary
       clearPasses = [];
       const step = toolR * 2 * stepover;
+      const clipBound = getStockBoundary(context, op, context.allEntities);
+
       for (let i = 0, dist = toolR; i < 200; i++, dist += step) {
-        const rings = offsetPolyline(outerProfile, -dist, true); // negative = expand outward
+        const rawRings = offsetPolyline(outerProfile, -dist, true); // negative = expand outward
         let any = false;
-        for (const ring of rings) {
-          if (!ring || ring.length < 3 || polygonArea(ring) < step * step * 0.5) continue;
-          clearPasses.push(ring);
-          any = true;
+        for (const rawRing of rawRings) {
+          if (!rawRing || rawRing.length < 3 || polygonArea(rawRing) < step * step * 0.5) continue;
+          const ringPts = stripClose([...rawRing]);
+          const clippedRings = clipBound ? clipPolygonToRegion(ringPts, clipBound) : [ringPts];
+          for (const clipped of clippedRings) {
+            if (!clipped || clipped.length < 3) continue;
+            clearPasses.push([...clipped, clipped[0]]);
+            any = true;
+          }
         }
         if (!any) break;
       }
@@ -201,7 +206,7 @@ function generatePocket(op, entities) {
 
 // ── Adaptive ──────────────────────────────────────────────────────────────────
 
-function generateAdaptive(op, entities) {
+function generateAdaptive(op, entities, context = {}) {
   const moves = [], warnings = [];
   const p = op.params;
   const toolR = (p.toolDiameter || 6.35) / 2;
@@ -224,17 +229,25 @@ function generateAdaptive(op, entities) {
     for (const z of passes) {
       let clearPasses;
       if (p.cutSide === 'outside') {
-        const islandRaw = offsetPolyline(profile, -toolR, true)[0];
-        const island = (islandRaw && islandRaw.length >= 3) ? islandRaw : profile;
-        const b = getEntityBounds([entity]);
-        const margin = Math.max(toolR * 4, 20);
-        const outerBound = [
-          { x: b.minX - margin, y: b.minY - margin },
-          { x: b.maxX + margin, y: b.minY - margin },
-          { x: b.maxX + margin, y: b.maxY + margin },
-          { x: b.minX - margin, y: b.maxY + margin },
-        ];
-        clearPasses = generatePocketOffsets(outerBound, toolR, stepover * 0.8, [island]);
+        // Expand outward from profile, clipped to boundary (same logic as pocket outside)
+        clearPasses = [];
+        const step = toolR * 2 * stepover * 0.8;
+        const clipBound = getStockBoundary(context, op, context.allEntities);
+        for (let i = 0, dist = toolR; i < 200; i++, dist += step) {
+          const rawRings = offsetPolyline(profile, -dist, true);
+          let any = false;
+          for (const rawRing of rawRings) {
+            if (!rawRing || rawRing.length < 3 || polygonArea(rawRing) < step * step * 0.5) continue;
+            const ringPts = stripClose([...rawRing]);
+            const clippedRings = clipBound ? clipPolygonToRegion(ringPts, clipBound) : [ringPts];
+            for (const clipped of clippedRings) {
+              if (!clipped || clipped.length < 3) continue;
+              clearPasses.push([...clipped, clipped[0]]);
+              any = true;
+            }
+          }
+          if (!any) break;
+        }
       } else {
         clearPasses = p.restMachining && (p.previousToolDiameter || 0) > 0
           ? generateRestMachiningPasses(profile, toolR, p.previousToolDiameter / 2, stepover * 0.8)
@@ -942,9 +955,6 @@ function chainSegments(entities) {
     .map(e => ({ pts: entityToProfile(e), used: false }))
     .filter(s => s.pts && s.pts.length >= 2);
 
-  const inputTypes = entities.filter(e => e.type === 'line' || e.type === 'arc').map(e => `${e.type}(${entityToProfile(e)?.length ?? 0}pts)`);
-  console.log('[chainSegments] segments in:', segs.length, inputTypes);
-
   if (!segs.length) return null;
 
   const chain = [...segs[0].pts];
@@ -972,7 +982,6 @@ function chainSegments(entities) {
   // Drop duplicate closing point if chain loops back to start
   const closeDist = chain.length > 1 ? ptDist(chain[0], chain[chain.length - 1]) : Infinity;
   const isClosed = closeDist <= SNAP;
-  console.log('[chainSegments] points out:', chain.length, '| closed:', isClosed, `(first-last dist: ${closeDist.toFixed(4)}mm)`);
   if (isClosed) chain.pop();
   return chain.length >= 3 ? chain : null;
 }
@@ -981,16 +990,12 @@ function chainSegments(entities) {
 // LINE/ARC segments (not a closed polyline), chains them into a single closed
 // polygon first. Falls back to per-entity conversion for polylines and circles.
 function buildPocketProfiles(entities) {
-  console.log('[buildPocketProfiles] entity types:', entities.map(e => e.type));
-
   const segEnts   = entities.filter(e => e.type === 'line' || e.type === 'arc');
   const otherEnts = entities.filter(e => e.type !== 'line' && e.type !== 'arc');
 
   const profiles = otherEnts
     .map(e => entityToProfile(e))
     .filter(p => p && p.length >= 3);
-
-  console.log('[buildPocketProfiles] non-segment profiles:', profiles.map(p => p.length + 'pts'));
 
   if (segEnts.length >= 2) {
     const chained = chainSegments(segEnts);
@@ -1000,8 +1005,35 @@ function buildPocketProfiles(entities) {
     if (pts && pts.length >= 3) profiles.push(pts);
   }
 
-  console.log('[buildPocketProfiles] final profiles:', profiles.map(p => p.length + 'pts'));
   return profiles;
+}
+
+// Returns a CCW polygon (no closing point) representing the clipping boundary:
+// uses op.boundaryIds entities when set, otherwise the stock rectangle from context.stockConfig.
+function getStockBoundary(context, op, allEntities) {
+  if (op.boundaryIds?.length && allEntities?.length) {
+    const boundEnts = allEntities.filter(e => op.boundaryIds.includes(e.id));
+    if (boundEnts.length) {
+      const profiles = buildPocketProfiles(boundEnts);
+      if (profiles.length) {
+        const p = profiles[0];
+        return isClockwise(p) ? [...p].reverse() : p;
+      }
+    }
+  }
+  const sc = context?.stockConfig;
+  if (!sc || !(sc.width > 0) || !(sc.length > 0)) return null;
+  const ox   = sc.stockOriginX ?? 0;
+  const oy   = sc.stockOriginY ?? 0;
+  const xOff = (sc.datum?.[1] === 'l' ? 0 : sc.datum?.[1] === 'c' ? 0.5 : 1) * sc.width;
+  const yOff = (sc.datum?.[0] === 'b' ? 0 : sc.datum?.[0] === 'm' ? 0.5 : 1) * sc.length;
+  const minX = ox - xOff,  maxX = minX + sc.width;
+  const minY = oy - yOff,  maxY = minY + sc.length;
+  // CCW rectangle (Y-up convention)
+  return [
+    { x: minX, y: minY }, { x: maxX, y: minY },
+    { x: maxX, y: maxY }, { x: minX, y: maxY },
+  ];
 }
 
 function getEntityBounds(entities) {
