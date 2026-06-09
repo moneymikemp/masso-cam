@@ -833,9 +833,11 @@ function buildPocketClearing(entities, topZ, depth, safeZ, toolR, depthPerPass, 
 }
 
 // Concentric clearing for outside cuts (tapered plug).
-// The profile is expanded outward by (toolR + wallLeave) to create an exclusion
-// island. Passes are generated inside a stock bounding box and filtered to skip
-// anything that enters the exclusion, effectively clearing around the plug.
+// Expands rings outward from the plug profile and clips each to the stock boundary,
+// matching the 2D Pocket outside-boss approach. generatePocketOffsets is NOT used
+// here because its island exclusion relies on a vertex-in-polygon check that fails
+// when a large rectangular ring surrounds a central exclusion zone — the ring corners
+// stay outside the zone even when the ring sides pass through it.
 //
 // Same parameter signature as buildPocketClearing so buildTaperedPasses can
 // dispatch between the two with a single function reference.
@@ -843,6 +845,7 @@ function buildPlugClearing(entities, topZ, depth, safeZ, toolR, depthPerPass, wa
   const moves     = [];
   const wallLeave = depth * Math.tan(taperRad) + wallStock;
   const outset    = toolR + wallLeave;
+  const step      = toolR * 2 * 0.45;
   const zPasses   = buildZPasses(topZ, depth, depthPerPass);
 
   const profiles = buildPocketProfiles(entities);
@@ -851,39 +854,46 @@ function buildPlugClearing(entities, topZ, depth, safeZ, toolR, depthPerPass, wa
   profiles.sort((a, b) => polygonArea(b) - polygonArea(a));
   const outerProfile = isClockwise(profiles[0]) ? [...profiles[0]].reverse() : profiles[0];
 
-  // Exclusion island: profile expanded outward by (toolR + wallLeave).
-  // Negative distance = outward expansion for a CCW polygon.
-  const exclusionRaw = offsetPolyline(outerProfile, -outset, true)[0];
-  const exclusion = (exclusionRaw && exclusionRaw.length >= 3) ? exclusionRaw : outerProfile;
-  const exclusionCCW = isClockwise(exclusion) ? [...exclusion].reverse() : exclusion;
-
-  // Outer clearing boundary: rest machining stops at the previous tool's reach limit;
-  // full clearing is bounded by the stock rectangle (inset by toolR so the tool
-  // centre stays within stock). Falls back to entity bounds when no stock is configured.
-  let outerBoundary;
-  if (prevToolR > 0) {
-    const prevOutset = prevToolR + wallLeave;
-    const prevBoundaryRaw = offsetPolyline(outerProfile, -prevOutset, true)[0];
-    if (prevBoundaryRaw && prevBoundaryRaw.length >= 3) outerBoundary = prevBoundaryRaw;
+  // Clip boundary: stock rect (preferred) or entity bounds + margin (fallback when
+  // no stock is configured). The stock boundary is used as-is for clipping — the
+  // tool-centre-to-edge offset is already baked into `outset` on the inner side.
+  let clipBound = stockBound;
+  if (!clipBound) {
+    const b = getEntityBounds(entities);
+    const margin = Math.max(toolR * 3, outset + toolR * 2);
+    clipBound = [
+      { x: b.minX - margin, y: b.minY - margin },
+      { x: b.maxX + margin, y: b.minY - margin },
+      { x: b.maxX + margin, y: b.maxY + margin },
+      { x: b.minX - margin, y: b.maxY + margin },
+    ];
   }
-  if (!outerBoundary) {
-    if (stockBound) {
-      // Shrink the stock boundary by toolR so the tool centre stays inside stock.
-      const insetStock = offsetPolyline(stockBound, toolR, true)[0];
-      outerBoundary = (insetStock && insetStock.length >= 3) ? insetStock : stockBound;
-    } else {
-      const bounds = getEntityBounds(entities);
-      const stockMargin = Math.max(toolR * 3, outset + toolR * 2);
-      outerBoundary = [
-        { x: bounds.minX - stockMargin, y: bounds.minY - stockMargin },
-        { x: bounds.maxX + stockMargin, y: bounds.minY - stockMargin },
-        { x: bounds.maxX + stockMargin, y: bounds.maxY + stockMargin },
-        { x: bounds.minX - stockMargin, y: bounds.maxY + stockMargin },
-      ];
+
+  // Rest-machining: only clear the strip between outset and prevOutset (the band the
+  // previous larger tool could not reach because it was too close to the plug wall).
+  const prevOutset = prevToolR > 0 ? prevToolR + wallLeave : null;
+
+  // Expand rings outward from the profile, clip each ring to clipBound.
+  // This matches the 2D Pocket outside-boss loop exactly.
+  const clearPasses = [];
+  for (let i = 0, dist = outset; i < 200; i++, dist += step) {
+    if (prevOutset !== null && dist >= prevOutset) break;
+
+    const rawRings = offsetPolyline(outerProfile, -dist, true); // negative = expand outward
+    let any = false;
+    for (const rawRing of rawRings) {
+      if (!rawRing || rawRing.length < 3 || polygonArea(rawRing) < step * step * 0.5) continue;
+      const ringPts = stripClose([...rawRing]);
+      const clipped = clipPolygonToRegion(ringPts, clipBound);
+      for (const c of clipped) {
+        if (!c || c.length < 3) continue;
+        clearPasses.push([...c, c[0]]);
+        any = true;
+      }
     }
+    if (!any) break; // expansion has moved entirely outside clipBound
   }
 
-  const clearPasses = generatePocketOffsets(outerBoundary, toolR, 0.45, [exclusionCCW]);
   if (!clearPasses.length) {
     warnings.push(`${passLabel}: no outside clearing passes generated`);
     return moves;
