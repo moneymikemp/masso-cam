@@ -24,6 +24,14 @@ export default function CAMCanvas() {
   const [isPanning, setIsPanning] = useState(false);
   const [panStart, setPanStart] = useState({ x: 0, y: 0 });
   const [mousePos, setMousePos] = useState({ x: 0, y: 0 });
+  const [statusMsg, setStatusMsg] = useState('');
+  const statusTimerRef = useRef(null);
+
+  function showStatus(msg) {
+    setStatusMsg(msg);
+    if (statusTimerRef.current) clearTimeout(statusTimerRef.current);
+    statusTimerRef.current = setTimeout(() => setStatusMsg(''), 2000);
+  }
 
   const { viewport, entities, layers, operations, selectedEntityIds, hoveredEntityId, showToolpaths, showRapids, bounds, stockConfig } = state;
 
@@ -323,6 +331,20 @@ export default function CAMCanvas() {
 
   const onMouseUp = useCallback(() => setIsPanning(false), []);
 
+  const onDoubleClick = useCallback((e) => {
+    const canvas = canvasRef.current;
+    const rect = canvas.getBoundingClientRect();
+    const world = c2w(e.clientX - rect.left, e.clientY - rect.top);
+    const hit = findEntityAt(world, 10 / viewport.zoom);
+    if (!hit || !['line', 'arc', 'polyline'].includes(hit.type)) return;
+
+    const connectedIds = findConnectedEntities(hit, entities, layers);
+    dispatch({ type: 'SELECT_ENTITIES', payload: connectedIds });
+    if (connectedIds.length > 1) {
+      showStatus(`Selected ${connectedIds.length} connected entities`);
+    }
+  }, [viewport, c2w, entities, layers, dispatch]);
+
   const onWheel = useCallback((e) => {
     e.preventDefault();
     const canvas = canvasRef.current;
@@ -401,6 +423,7 @@ export default function CAMCanvas() {
         onMouseMove={onMouseMove}
         onMouseUp={onMouseUp}
         onMouseLeave={onMouseUp}
+        onDoubleClick={onDoubleClick}
         onWheel={onWheel}
       />
       {/* Toolbar overlays */}
@@ -409,6 +432,11 @@ export default function CAMCanvas() {
         <CanvasButton title="Zoom In" onClick={() => dispatch({ type: 'SET_VIEWPORT', payload: { zoom: viewport.zoom * 1.4 } })}>+</CanvasButton>
         <CanvasButton title="Zoom Out" onClick={() => dispatch({ type: 'SET_VIEWPORT', payload: { zoom: viewport.zoom / 1.4 } })}>−</CanvasButton>
       </div>
+      {statusMsg && (
+        <div style={{ position: 'absolute', bottom: 40, left: '50%', transform: 'translateX(-50%)', background: 'rgba(0,0,0,0.75)', color: '#ffcc44', padding: '5px 14px', borderRadius: 4, fontSize: 12, pointerEvents: 'none', whiteSpace: 'nowrap', border: '1px solid rgba(255,204,68,0.3)' }}>
+          {statusMsg}
+        </div>
+      )}
       {entities.length === 0 && (
         <div style={{ position: 'absolute', top: '50%', left: '50%', transform: 'translate(-50%,-50%)', color: '#555577', textAlign: 'center', pointerEvents: 'none' }}>
           <div style={{ fontSize: 48, marginBottom: 12 }}>📐</div>
@@ -418,6 +446,71 @@ export default function CAMCanvas() {
       )}
     </div>
   );
+}
+
+// Returns the two connectable endpoint positions for line/arc/polyline.
+// Circles have no endpoints and return [].
+function getEndpoints(entity) {
+  switch (entity.type) {
+    case 'line':
+      return [entity.start, entity.end];
+    case 'arc': {
+      const { center, radius, startAngle, endAngle } = entity;
+      return [
+        { x: center.x + radius * Math.cos(startAngle), y: center.y + radius * Math.sin(startAngle) },
+        { x: center.x + radius * Math.cos(endAngle),   y: center.y + radius * Math.sin(endAngle)   },
+      ];
+    }
+    case 'polyline': {
+      if (!entity.vertices?.length) return [];
+      const first = entity.vertices[0];
+      const last  = entity.vertices[entity.vertices.length - 1];
+      return [{ x: first.x, y: first.y }, { x: last.x, y: last.y }];
+    }
+    default:
+      return [];
+  }
+}
+
+// BFS walk: starting from startEntity, follow endpoint connections (within 0.01 mm)
+// through all visible line/arc/polyline entities and return the complete set of IDs.
+function findConnectedEntities(startEntity, allEntities, allLayers) {
+  const SNAP = 0.01;
+  function ptDist(a, b) { return Math.hypot(a.x - b.x, a.y - b.y); }
+
+  // Pre-compute endpoints for every chainable, visible entity.
+  const candidates = allEntities
+    .filter(e => {
+      if (!['line', 'arc', 'polyline'].includes(e.type)) return false;
+      const layer = allLayers[e.layer];
+      return !(layer && !layer.visible);
+    })
+    .map(e => ({ id: e.id, pts: getEndpoints(e) }))
+    .filter(c => c.pts.length > 0);
+
+  const selected = new Set([startEntity.id]);
+  // The frontier is the set of open endpoints we still need to match against.
+  let searchPts = getEndpoints(startEntity);
+
+  while (searchPts.length > 0) {
+    const nextPts = [];
+    for (const sp of searchPts) {
+      for (const cand of candidates) {
+        if (selected.has(cand.id)) continue;
+        for (const cp of cand.pts) {
+          if (ptDist(sp, cp) <= SNAP) {
+            selected.add(cand.id);
+            // The other endpoint(s) of the newly added segment become new search points.
+            nextPts.push(...cand.pts.filter(p => ptDist(p, sp) > SNAP));
+            break;
+          }
+        }
+      }
+    }
+    searchPts = nextPts;
+  }
+
+  return [...selected];
 }
 
 function CanvasButton({ title, onClick, children }) {
