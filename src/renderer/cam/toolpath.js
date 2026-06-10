@@ -957,12 +957,18 @@ function buildTaperTrace(entities, topZ, depth, safeZ, feedRate, plungeRate, tcR
     if (tanAlpha > 1e-6) {
       const widths = computeContourLocalWidths(rawPts);
 
-      // Sample up to 8 evenly-spaced points for the log.
-      const step = Math.max(1, Math.floor(rawPts.length / 8));
-      const sample = [];
-      for (let i = 0; i < rawPts.length; i += step)
-        sample.push(`[${i}] r=${widths[i].toFixed(3)}`);
-      console.log('[buildTaperTrace] inscribed radii sample:', sample.join('  '));
+      // Full per-point log: every vertex with its X,Y and inscribed radius.
+      // Format: [i] x,y r=<radius> — use this to identify false-positive tight spots
+      // vs genuine sharp inside corners.  Each line holds up to 6 entries.
+      console.log('[buildTaperTrace] --- FULL inscribed-radius dump ---');
+      for (let i = 0; i < rawPts.length; i += 6) {
+        const entries = [];
+        for (let k = i; k < Math.min(i + 6, rawPts.length); k++) {
+          const r = widths[k];
+          entries.push(`[${k}](${rawPts[k].x.toFixed(3)},${rawPts[k].y.toFixed(3)}) r=${isFinite(r) ? r.toFixed(4) : 'Inf'}`);
+        }
+        console.log(entries.join('  '));
+      }
       console.log('[buildTaperTrace] radius stats — min:', Math.min(...widths.filter(isFinite)).toFixed(4),
         '| max:', Math.max(...widths.filter(isFinite)).toFixed(4),
         '| infinities:', widths.filter(v => !isFinite(v)).length);
@@ -975,10 +981,14 @@ function buildTaperTrace(entities, topZ, depth, safeZ, feedRate, plungeRate, tcR
         return Math.min(depth, (r - tipRadius) / tanAlpha);
       });
 
-      const rawSample = [];
-      for (let i = 0; i < raw.length; i += step)
-        rawSample.push(`[${i}] d=${raw[i].toFixed(3)}`);
-      console.log('[buildTaperTrace] maxDepths (before smooth) sample:', rawSample.join('  '));
+      // Full per-point depth dump alongside computed Z.
+      console.log('[buildTaperTrace] --- FULL maxDepth dump (before smooth) ---');
+      for (let i = 0; i < raw.length; i += 6) {
+        const entries = [];
+        for (let k = i; k < Math.min(i + 6, raw.length); k++)
+          entries.push(`[${k}] d=${raw[k].toFixed(4)} z=${(topZ - raw[k]).toFixed(4)}`);
+        console.log(entries.join('  '));
+      }
       console.log('[buildTaperTrace] maxDepth stats — min:', Math.min(...raw).toFixed(4),
         '| max:', Math.max(...raw).toFixed(4),
         '| equal-to-targetDepth count:', raw.filter(d => Math.abs(d - depth) < 1e-4).length,
