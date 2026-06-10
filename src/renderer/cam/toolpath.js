@@ -830,11 +830,22 @@ function computeContourLocalWidths(rawPts) {
 
       // Apollonius constraint: r = lp / (1 − n_P · n_j).
       // denom → 0 when walls are nearly co-directional (dense tessellation neighbours) — skip.
+      // Guard: also verify the inscribed-circle tangent point falls within the actual
+      // segment (not just on its infinite line extension).  A segment whose LINE passes
+      // close to P but whose extents are far away (e.g. a handle wall above a pan body
+      // point) would otherwise produce a falsely tiny r.
       const dot   = nPx * njx + nPy * njy;
       const denom = 1 - dot;
       if (denom > 1e-6) {
         const r = lp / denom;
-        if (r > 0 && r < rMin) rMin = r;
+        if (r > 0 && r < rMin) {
+          // Inscribed circle centre Q = P + r·n_P; tangent point T = Q − r·n_j.
+          const qx = curr.x + r * nPx, qy = curr.y + r * nPy;
+          const tx = qx - r * njx,     ty = qy - r * njy;
+          // Parameterise T along segment j: s ∈ [0,1] means T is within the segment.
+          const s = ((tx - ax) * ex + (ty - ay) * ey) / (el * el);
+          if (s >= 0 && s <= 1) rMin = r;
+        }
       }
 
       // Endpoint constraints: prevent the inscribed-circle centre from flying past
