@@ -895,21 +895,55 @@ function buildTaperTrace(entities, topZ, depth, safeZ, feedRate, plungeRate, tcR
   const tanAlpha   = Math.tan(tcRad);
   const traceOffset = cutSide === 'outside' ? -(depth * tanAlpha) : 0;
 
-  for (const rawProfile of buildPocketProfiles(entities)) {
+  console.log('[buildTaperTrace] ENTRY — topZ:', topZ.toFixed(4), '| depth (targetDepth):', depth.toFixed(4),
+    '| tcRad:', tcRad.toFixed(6), '| tanAlpha:', tanAlpha.toFixed(6),
+    '| cutSide:', cutSide, '| tipRadius:', tipRadius.toFixed(4), '| traceOffset:', traceOffset.toFixed(4));
+
+  const profiles = buildPocketProfiles(entities);
+  console.log('[buildTaperTrace] profiles count:', profiles.length);
+
+  for (const rawProfile of profiles) {
     const rawPts = stripClose([...rawProfile]);
-    if (rawPts.length < 3) continue;
+    console.log('[buildTaperTrace] rawPts.length (after stripClose):', rawPts.length,
+      '| rawProfile.length:', rawProfile.length);
+    if (rawPts.length < 3) { console.log('[buildTaperTrace] SKIP — fewer than 3 pts'); continue; }
 
     // ── Per-point adaptive depth via corner-relief formula ────────────────────
     let adaptDepths;
     if (tanAlpha > 1e-6) {
       const widths = computeContourLocalWidths(rawPts);
-      const raw    = widths.map(lw => {
+
+      // Sample up to 8 evenly-spaced points for the log.
+      const step = Math.max(1, Math.floor(rawPts.length / 8));
+      const sample = [];
+      for (let i = 0; i < rawPts.length; i += step)
+        sample.push(`[${i}] lw=${widths[i].toFixed(3)}`);
+      console.log('[buildTaperTrace] localWidths sample:', sample.join('  '));
+      console.log('[buildTaperTrace] width stats — min:', Math.min(...widths.filter(isFinite)).toFixed(4),
+        '| max:', Math.max(...widths.filter(isFinite)).toFixed(4),
+        '| infinities:', widths.filter(v => !isFinite(v)).length);
+
+      const raw = widths.map(lw => {
         const halfW = lw / 2;
         if (!isFinite(halfW) || halfW <= tipRadius) return halfW <= tipRadius ? 0 : depth;
         return Math.min(depth, (halfW - tipRadius) / tanAlpha);
       });
+
+      const rawSample = [];
+      for (let i = 0; i < raw.length; i += step)
+        rawSample.push(`[${i}] d=${raw[i].toFixed(3)}`);
+      console.log('[buildTaperTrace] maxDepths (before smooth) sample:', rawSample.join('  '));
+      console.log('[buildTaperTrace] maxDepth stats — min:', Math.min(...raw).toFixed(4),
+        '| max:', Math.max(...raw).toFixed(4),
+        '| equal-to-targetDepth count:', raw.filter(d => Math.abs(d - depth) < 1e-4).length,
+        '/ total:', raw.length);
+
       adaptDepths = smoothDepthProfile(raw);
+
+      console.log('[buildTaperTrace] smoothed stats — min:', Math.min(...adaptDepths).toFixed(4),
+        '| max:', Math.max(...adaptDepths).toFixed(4));
     } else {
+      console.log('[buildTaperTrace] tanAlpha <= 1e-6 — skipping corner relief, using flat depth');
       adaptDepths = new Array(rawPts.length).fill(depth);
     }
 
@@ -917,7 +951,7 @@ function buildTaperTrace(entities, topZ, depth, safeZ, feedRate, plungeRate, tcR
     const traceRaw = traceOffset !== 0
       ? (offsetPolyline(rawProfile, traceOffset, true)[0] ?? rawProfile)
       : rawProfile;
-    if (!traceRaw || traceRaw.length < 2) continue;
+    if (!traceRaw || traceRaw.length < 2) { console.log('[buildTaperTrace] SKIP — traceRaw empty'); continue; }
     const tracePts = stripClose([...traceRaw]);
 
     // Map adaptive depths from raw profile to trace profile positions.
@@ -931,6 +965,12 @@ function buildTaperTrace(entities, topZ, depth, safeZ, feedRate, plungeRate, tcR
       const normDep = isClockwise(rawPts) ? [...adaptDepths].reverse() : adaptDepths;
       traceDepths   = arcLengthRemap(normDep, normRaw, tracePts);
     }
+
+    const zValues = traceDepths.map(d => topZ - d);
+    console.log('[buildTaperTrace] OUTPUT Z stats — min:', Math.min(...zValues).toFixed(4),
+      '| max:', Math.max(...zValues).toFixed(4),
+      '| all-same:', (Math.max(...zValues) - Math.min(...zValues)) < 1e-4,
+      '| tracePts.length:', tracePts.length);
 
     // ── Generate moves with adaptive Z ────────────────────────────────────────
     moves.push({ type: 'rapid', x: tracePts[0].x, y: tracePts[0].y, z: safeZ });
