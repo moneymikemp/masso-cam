@@ -714,7 +714,7 @@ function buildTaperedPasses(selected, topZ, depth, safeZ, p, warnings, stockBoun
       toolKey:  tc.toolId ?? 'taper',
       toolDesc: `Taper bit — tip ⌀${tc.tipDia || 0.5}mm  ${tc.angle || 10}° half-angle`,
       rpm: tc.rpm || 24000,
-      moves: buildTaperTrace(selected, topZ, depth, safeZ, tc.feed || 1000, tc.plunge || 300, tcRad, cutSide),
+      moves: buildTaperTrace(selected, topZ, depth, safeZ, tc.feed || 1000, tc.plunge || 300, tcRad, cutSide, (tc.tipDia || 0) / 2),
     });
   }
 
@@ -767,31 +767,178 @@ function buildTaperedPasses(selected, topZ, depth, safeZ, p, warnings, stockBoun
   return { moves, subToolpaths, warnings };
 }
 
-// Trace selected contours with the taper bit at full depth.
-// The V-bit axis follows the contour line directly — the taper geometry
-// automatically creates the angled pocket/plug walls.
-//
-// cutSide 'outside': the tip is offset outward by depth × tan(halfAngle) so
-// the taper wall intersects the profile edge exactly at the top surface.
-function buildTaperTrace(entities, topZ, depth, safeZ, feedRate, plungeRate, tcRad, cutSide) {
-  const moves = [];
-  const z = topZ - depth;
-  // Negative distance = outward expansion of a CCW polygon.
-  const traceOffset = cutSide === 'outside' ? -(depth * Math.tan(tcRad)) : 0;
+// ── Corner-relief helpers ─────────────────────────────────────────────────────
 
-  const profiles = buildPocketProfiles(entities);
-  for (const rawProfile of profiles) {
-    const profile = traceOffset !== 0
+// Cumulative arc lengths for a closed polygon (no closing point assumed).
+function cumArcLen(pts) {
+  const c = [0];
+  for (let i = 1; i < pts.length; i++)
+    c.push(c[i - 1] + Math.hypot(pts[i].x - pts[i - 1].x, pts[i].y - pts[i - 1].y));
+  return c;
+}
+
+// For each contour point, compute localWidth = distance to the nearest point on
+// the opposite wall via an inward-normal ray cast.  Used by the formula
+//   maxDepth = (localWidth/2 - tipR) / tan(halfAngle)
+// Normalises the polygon to CCW before casting so normals always point inward.
+function computeContourLocalWidths(rawPts) {
+  const cw  = isClockwise(rawPts);
+  const pts = cw ? [...rawPts].reverse() : rawPts;
+  const n   = pts.length;
+  const out = new Array(n).fill(Infinity);
+
+  for (let i = 0; i < n; i++) {
+    const prev = pts[(i - 1 + n) % n];
+    const curr = pts[i];
+    const next = pts[(i + 1) % n];
+
+    // Average tangent over the two adjacent edges, then 90° CCW → inward normal.
+    const t1x = curr.x - prev.x, t1y = curr.y - prev.y;
+    const t2x = next.x - curr.x, t2y = next.y - curr.y;
+    const l1  = Math.hypot(t1x, t1y) || 1, l2 = Math.hypot(t2x, t2y) || 1;
+    const tx  = t1x / l1 + t2x / l2,   ty  = t1y / l1 + t2y / l2;
+    const tl  = Math.hypot(tx, ty) || 1;
+    const nx  = -ty / tl, ny = tx / tl;   // inward normal for CCW polygon
+
+    // Nudge origin just inside the contour to avoid immediate self-intersection.
+    const ox = curr.x + nx * 0.001, oy = curr.y + ny * 0.001;
+
+    let minT = Infinity;
+    for (let j = 0; j < n; j++) {
+      if (j === ((i - 1 + n) % n) || j === i) continue;  // skip attached edges
+      const j2  = (j + 1) % n;
+      const ax  = pts[j].x,  ay = pts[j].y;
+      const bx  = pts[j2].x, by = pts[j2].y;
+      const den = nx * (by - ay) - ny * (bx - ax);
+      if (Math.abs(den) < 1e-10) continue;
+      const s = (nx * (oy - ay) - ny * (ox - ax)) / den;
+      if (s < 0 || s > 1) continue;
+      const t = ((ax - ox) * (by - ay) - (ay - oy) * (bx - ax)) / den;
+      if (t > 0 && t < minT) minT = t;
+    }
+    out[i] = minT;   // = localWidth (full width from this wall to opposite wall)
+  }
+
+  return cw ? out.reverse() : out;
+}
+
+// Smooth a circular depth array in two passes:
+//   1. min-filter — never exceed the tightest local constraint.
+//   2. box-average — soften abrupt transitions.
+function smoothDepthProfile(depths, winHalf = 4) {
+  const n   = depths.length;
+  const idx = k => ((k % n) + n) % n;
+
+  const mn = depths.map((_, i) => {
+    let m = depths[i];
+    for (let k = 1; k <= winHalf; k++)
+      m = Math.min(m, depths[idx(i - k)], depths[idx(i + k)]);
+    return m;
+  });
+
+  return mn.map((_, i) => {
+    let s = 0;
+    for (let k = -winHalf; k <= winHalf; k++) s += mn[idx(i + k)];
+    return s / (2 * winHalf + 1);
+  });
+}
+
+// Remap a depth array from one polygon to another via arc-length fraction.
+// Aligns starting vertices (Clipper may reorder the result polygon).
+function arcLengthRemap(depths, fromPts, toPts) {
+  const fromCum  = cumArcLen(fromPts);
+  const fromLast = fromPts[fromPts.length - 1];
+  const fromPerim = fromCum[fromCum.length - 1] +
+    Math.hypot(fromPts[0].x - fromLast.x, fromPts[0].y - fromLast.y);
+
+  const toCum  = cumArcLen(toPts);
+  const toLast = toPts[toPts.length - 1];
+  const toPerim = toCum[toCum.length - 1] +
+    Math.hypot(toPts[0].x - toLast.x, toPts[0].y - toLast.y);
+
+  const nf = depths.length, nt = toPts.length;
+
+  // Find the toPts vertex closest to fromPts[0] to correct for Clipper reordering.
+  let offset = 0, bestD = Infinity;
+  for (let i = 0; i < nt; i++) {
+    const d = Math.hypot(toPts[i].x - fromPts[0].x, toPts[i].y - fromPts[0].y);
+    if (d < bestD) { bestD = d; offset = i; }
+  }
+
+  return toPts.map((_, ti) => {
+    const ai  = (ti + offset) % nt;
+    const frac = toPerim > 0 ? toCum[ai] / toPerim : 0;
+    const target = frac * fromPerim;
+
+    let lo = 0, hi = nf - 1;
+    while (hi - lo > 1) {
+      const mid = (lo + hi) >> 1;
+      if (fromCum[mid] <= target) lo = mid; else hi = mid;
+    }
+    if (fromCum[hi] <= fromCum[lo]) return depths[lo];
+    const t = (target - fromCum[lo]) / (fromCum[hi] - fromCum[lo]);
+    return depths[lo] + t * (depths[hi] - depths[lo]);
+  });
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+
+// Trace selected contours with the taper bit, applying adaptive Z (corner relief)
+// so the bit lifts in narrow features where the taper body would otherwise gouge
+// the opposite wall.  Formula: maxDepth = (localWidth/2 - tipRadius) / tan(halfAngle)
+//
+// cutSide 'outside': tip is offset outward by depth × tan(halfAngle) so the taper
+// wall intersects the profile edge exactly at the top surface.
+// tipRadius: tip radius from operation params (0 for a pointed bit).
+function buildTaperTrace(entities, topZ, depth, safeZ, feedRate, plungeRate, tcRad, cutSide, tipRadius = 0) {
+  const moves      = [];
+  const tanAlpha   = Math.tan(tcRad);
+  const traceOffset = cutSide === 'outside' ? -(depth * tanAlpha) : 0;
+
+  for (const rawProfile of buildPocketProfiles(entities)) {
+    const rawPts = stripClose([...rawProfile]);
+    if (rawPts.length < 3) continue;
+
+    // ── Per-point adaptive depth via corner-relief formula ────────────────────
+    let adaptDepths;
+    if (tanAlpha > 1e-6) {
+      const widths = computeContourLocalWidths(rawPts);
+      const raw    = widths.map(lw => {
+        const halfW = lw / 2;
+        if (!isFinite(halfW) || halfW <= tipRadius) return halfW <= tipRadius ? 0 : depth;
+        return Math.min(depth, (halfW - tipRadius) / tanAlpha);
+      });
+      adaptDepths = smoothDepthProfile(raw);
+    } else {
+      adaptDepths = new Array(rawPts.length).fill(depth);
+    }
+
+    // ── Build trace profile (offset outward for plug outside cut) ─────────────
+    const traceRaw = traceOffset !== 0
       ? (offsetPolyline(rawProfile, traceOffset, true)[0] ?? rawProfile)
       : rawProfile;
-    if (!profile || profile.length < 2) continue;
-    moves.push({ type: 'rapid', x: profile[0].x, y: profile[0].y, z: safeZ });
-    moves.push({ type: 'feed',  x: profile[0].x, y: profile[0].y, z, f: plungeRate });
-    for (let i = 1; i < profile.length; i++) {
-      moves.push({ type: 'feed', x: profile[i].x, y: profile[i].y, z, f: feedRate });
+    if (!traceRaw || traceRaw.length < 2) continue;
+    const tracePts = stripClose([...traceRaw]);
+
+    // Map adaptive depths from raw profile to trace profile positions.
+    // Normalize CW raw profiles to CCW before remapping so arc-length
+    // direction matches the CCW-normalised trace profile from offsetPolyline.
+    let traceDepths;
+    if (traceOffset === 0) {
+      traceDepths = adaptDepths;           // raw === trace, no remap needed
+    } else {
+      const normRaw = isClockwise(rawPts) ? [...rawPts].reverse() : rawPts;
+      const normDep = isClockwise(rawPts) ? [...adaptDepths].reverse() : adaptDepths;
+      traceDepths   = arcLengthRemap(normDep, normRaw, tracePts);
     }
-    moves.push({ type: 'feed', x: profile[0].x, y: profile[0].y, z, f: feedRate });
-    moves.push({ type: 'rapid', x: profile[0].x, y: profile[0].y, z: safeZ });
+
+    // ── Generate moves with adaptive Z ────────────────────────────────────────
+    moves.push({ type: 'rapid', x: tracePts[0].x, y: tracePts[0].y, z: safeZ });
+    moves.push({ type: 'feed',  x: tracePts[0].x, y: tracePts[0].y, z: topZ - traceDepths[0], f: plungeRate });
+    for (let i = 1; i < tracePts.length; i++)
+      moves.push({ type: 'feed', x: tracePts[i].x, y: tracePts[i].y, z: topZ - traceDepths[i], f: feedRate });
+    moves.push({ type: 'feed',  x: tracePts[0].x, y: tracePts[0].y, z: topZ - traceDepths[0], f: feedRate });
+    moves.push({ type: 'rapid', x: tracePts[0].x, y: tracePts[0].y, z: safeZ });
   }
   return moves;
 }
