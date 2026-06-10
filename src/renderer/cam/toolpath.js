@@ -608,23 +608,38 @@ function mirrorEntitiesX(entities) {
   const allPts = cleanProfiles.flat();
   if (!allPts.length) return entities;
 
-  const origCx = allPts.reduce((s, p) => s + p.x, 0) / allPts.length;
-  const origCy = allPts.reduce((s, p) => s + p.y, 0) / allPts.length;
-  console.log('[mirrorEntitiesX] profiles:', cleanProfiles.length, 'total pts:', allPts.length,
-    '| orig centroid:', origCx.toFixed(4), origCy.toFixed(4));
+  // Use bounding box center as the mirror axis, NOT the vertex average.
+  // Arc tessellation (circleToPoints / polylineToPoints bulge expansion) creates
+  // many densely-packed points along curves and only 2 points per straight segment.
+  // The vertex average drifts toward arc-heavy regions; the bounding box center
+  // is stable and matches what the user sees as the shape's position on canvas.
+  // Mirroring around bbox-center-Y also preserves minY/maxY exactly, so the
+  // plug profile's Y extents are identical to the pocket's.
+  const minX = Math.min(...allPts.map(p => p.x));
+  const maxX = Math.max(...allPts.map(p => p.x));
+  const minY = Math.min(...allPts.map(p => p.y));
+  const maxY = Math.max(...allPts.map(p => p.y));
+  const origCx = (minX + maxX) / 2;
+  const origCy = (minY + maxY) / 2;
+  console.log('[mirrorEntitiesX] bbox:', minX.toFixed(4), minY.toFixed(4), 'to', maxX.toFixed(4), maxY.toFixed(4),
+    '| bbox center (mirror axis):', origCx.toFixed(4), origCy.toFixed(4));
 
   const mirrored = cleanProfiles.map(pts =>
     pts.map(pt => ({ x: pt.x, y: 2 * origCy - pt.y }))
   );
 
-  // Explicitly restore centroid after mirror to guard against any residual drift.
+  // Verify: bbox center of mirrored profiles should equal origCy exactly.
   const mirPts = mirrored.flat();
-  const mirCx  = mirPts.reduce((s, p) => s + p.x, 0) / mirPts.length;
-  const mirCy  = mirPts.reduce((s, p) => s + p.y, 0) / mirPts.length;
-  const dx = origCx - mirCx;
-  const dy = origCy - mirCy;
-  console.log('[mirrorEntitiesX] post-mirror centroid:', mirCx.toFixed(4), mirCy.toFixed(4),
-    '| translation dx:', dx.toFixed(6), 'dy:', dy.toFixed(6));
+  const mirMinY = Math.min(...mirPts.map(p => p.y));
+  const mirMaxY = Math.max(...mirPts.map(p => p.y));
+  const mirCy   = (mirMinY + mirMaxY) / 2;
+  const dy = origCy - mirCy;  // should be ~0
+  const mirMinX = Math.min(...mirPts.map(p => p.x));
+  const mirMaxX = Math.max(...mirPts.map(p => p.x));
+  const mirCx   = (mirMinX + mirMaxX) / 2;
+  const dx = origCx - mirCx;  // should be ~0
+  console.log('[mirrorEntitiesX] post-mirror bbox center:', mirCx.toFixed(4), mirCy.toFixed(4),
+    '| correction dx:', dx.toFixed(6), 'dy:', dy.toFixed(6));
 
   return mirrored.map((pts, i) => ({
     id: `__mirror_${i}`,
