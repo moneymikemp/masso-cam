@@ -777,10 +777,18 @@ function cumArcLen(pts) {
   return c;
 }
 
-// For each contour point, compute localWidth = distance to the nearest point on
-// the opposite wall via an inward-normal ray cast.  Used by the formula
-//   maxDepth = (localWidth/2 - tipR) / tan(halfAngle)
-// Normalises the polygon to CCW before casting so normals always point inward.
+// For each contour point, compute the inscribed circle radius: the largest circle
+// centred at (P + r·n_P) — where n_P is the inward normal at P — that fits inside
+// the polygon without crossing any non-adjacent boundary segment.
+//
+// Apollonius formula for segment j with inward normal n_j:
+//   r = L_P / (1 − n_P · n_j)
+// where L_P = n_j · (P − A) is the signed distance from P to the line of segment j.
+// When n_P · n_j ≈ 1 (nearly parallel, same direction — dense tessellation neighbours),
+// the denominator collapses to ≈ 0 and the constraint is skipped automatically.
+// Endpoint constraints handle cases where the circle centre projects past a segment end.
+//
+// Used by:  maxDepth = (r_inscribed − tipRadius) / tan(halfAngle)
 function computeContourLocalWidths(rawPts) {
   const cw  = isClockwise(rawPts);
   const pts = cw ? [...rawPts].reverse() : rawPts;
@@ -792,31 +800,56 @@ function computeContourLocalWidths(rawPts) {
     const curr = pts[i];
     const next = pts[(i + 1) % n];
 
-    // Average tangent over the two adjacent edges, then 90° CCW → inward normal.
+    // Inward normal at vertex i: average adjacent-edge tangents, rotate 90° CCW.
     const t1x = curr.x - prev.x, t1y = curr.y - prev.y;
     const t2x = next.x - curr.x, t2y = next.y - curr.y;
     const l1  = Math.hypot(t1x, t1y) || 1, l2 = Math.hypot(t2x, t2y) || 1;
     const tx  = t1x / l1 + t2x / l2,   ty  = t1y / l1 + t2y / l2;
     const tl  = Math.hypot(tx, ty) || 1;
-    const nx  = -ty / tl, ny = tx / tl;   // inward normal for CCW polygon
+    const nPx = -ty / tl, nPy = tx / tl;  // inward normal for CCW polygon
 
-    // Nudge origin just inside the contour to avoid immediate self-intersection.
-    const ox = curr.x + nx * 0.001, oy = curr.y + ny * 0.001;
+    let rMin = Infinity;
 
-    let minT = Infinity;
     for (let j = 0; j < n; j++) {
-      if (j === ((i - 1 + n) % n) || j === i) continue;  // skip attached edges
-      const j2  = (j + 1) % n;
-      const ax  = pts[j].x,  ay = pts[j].y;
-      const bx  = pts[j2].x, by = pts[j2].y;
-      const den = nx * (by - ay) - ny * (bx - ax);
-      if (Math.abs(den) < 1e-10) continue;
-      const s = (nx * (oy - ay) - ny * (ox - ax)) / den;
-      if (s < 0 || s > 1) continue;
-      const t = ((ax - ox) * (by - ay) - (ay - oy) * (bx - ax)) / den;
-      if (t > 0 && t < minT) minT = t;
+      // Skip the two segments directly attached to vertex i.
+      if (j === i || j === ((i - 1 + n) % n)) continue;
+
+      const j2 = (j + 1) % n;
+      const ax = pts[j].x,  ay = pts[j].y;
+      const bx = pts[j2].x, by = pts[j2].y;
+
+      // Inward normal of segment j (CCW polygon: rotate edge vector 90° CCW).
+      const ex = bx - ax, ey = by - ay;
+      const el = Math.hypot(ex, ey);
+      if (el < 1e-10) continue;
+      const njx = -ey / el, njy = ex / el;
+
+      // Signed distance from curr to the line of segment j (positive = inside polygon).
+      const lp = njx * (curr.x - ax) + njy * (curr.y - ay);
+      if (lp <= 0) continue;  // curr outside this half-plane — non-convex artefact, skip
+
+      // Apollonius constraint: r = lp / (1 − n_P · n_j).
+      // denom → 0 when walls are nearly co-directional (dense tessellation neighbours) — skip.
+      const dot   = nPx * njx + nPy * njy;
+      const denom = 1 - dot;
+      if (denom > 1e-6) {
+        const r = lp / denom;
+        if (r > 0 && r < rMin) rMin = r;
+      }
+
+      // Endpoint constraints: prevent the inscribed-circle centre from flying past
+      // an endpoint vertex into open space.  For vertex V: dist(centre, V) ≥ r
+      // simplifies to r ≤ |P−V|² / (2·|(P−V)·n_P|) when (P−V)·n_P < 0.
+      for (const [vx, vy] of [[curr.x - ax, curr.y - ay], [curr.x - bx, curr.y - by]]) {
+        const dotV = vx * nPx + vy * nPy;
+        if (dotV < -1e-10) {
+          const r = (vx * vx + vy * vy) / (-2 * dotV);
+          if (r > 0 && r < rMin) rMin = r;
+        }
+      }
     }
-    out[i] = minT;   // = localWidth (full width from this wall to opposite wall)
+
+    out[i] = rMin;  // inscribed circle radius at this contour point
   }
 
   return cw ? out.reverse() : out;
@@ -885,7 +918,7 @@ function arcLengthRemap(depths, fromPts, toPts) {
 
 // Trace selected contours with the taper bit, applying adaptive Z (corner relief)
 // so the bit lifts in narrow features where the taper body would otherwise gouge
-// the opposite wall.  Formula: maxDepth = (localWidth/2 - tipRadius) / tan(halfAngle)
+// the opposite wall.  Formula: maxDepth = (r_inscribed - tipRadius) / tan(halfAngle)
 //
 // cutSide 'outside': tip is offset outward by depth × tan(halfAngle) so the taper
 // wall intersects the profile edge exactly at the top surface.
@@ -917,16 +950,18 @@ function buildTaperTrace(entities, topZ, depth, safeZ, feedRate, plungeRate, tcR
       const step = Math.max(1, Math.floor(rawPts.length / 8));
       const sample = [];
       for (let i = 0; i < rawPts.length; i += step)
-        sample.push(`[${i}] lw=${widths[i].toFixed(3)}`);
-      console.log('[buildTaperTrace] localWidths sample:', sample.join('  '));
-      console.log('[buildTaperTrace] width stats — min:', Math.min(...widths.filter(isFinite)).toFixed(4),
+        sample.push(`[${i}] r=${widths[i].toFixed(3)}`);
+      console.log('[buildTaperTrace] inscribed radii sample:', sample.join('  '));
+      console.log('[buildTaperTrace] radius stats — min:', Math.min(...widths.filter(isFinite)).toFixed(4),
         '| max:', Math.max(...widths.filter(isFinite)).toFixed(4),
         '| infinities:', widths.filter(v => !isFinite(v)).length);
 
-      const raw = widths.map(lw => {
-        const halfW = lw / 2;
-        if (!isFinite(halfW) || halfW <= tipRadius) return halfW <= tipRadius ? 0 : depth;
-        return Math.min(depth, (halfW - tipRadius) / tanAlpha);
+      // r is the inscribed circle radius — the largest circle that fits inside the
+      // polygon at this contour point.  Direct input to the corner-relief formula:
+      //   maxDepth = (r - tipRadius) / tan(halfAngle)
+      const raw = widths.map(r => {
+        if (!isFinite(r) || r <= tipRadius) return r <= tipRadius ? 0 : depth;
+        return Math.min(depth, (r - tipRadius) / tanAlpha);
       });
 
       const rawSample = [];
