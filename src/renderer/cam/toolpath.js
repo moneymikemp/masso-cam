@@ -957,20 +957,12 @@ function buildTaperTrace(entities, topZ, depth, safeZ, feedRate, plungeRate, tcR
     if (tanAlpha > 1e-6) {
       const widths = computeContourLocalWidths(rawPts);
 
-      // Full per-point log: every vertex with its X,Y and inscribed radius.
-      // Format: [i] x,y r=<radius> — use this to identify false-positive tight spots
-      // vs genuine sharp inside corners.  Each line holds up to 6 entries.
-      console.log('[buildTaperTrace] --- FULL inscribed-radius dump ---');
-      for (let i = 0; i < rawPts.length; i += 6) {
-        const entries = [];
-        for (let k = i; k < Math.min(i + 6, rawPts.length); k++) {
-          const r = widths[k];
-          entries.push(`[${k}](${rawPts[k].x.toFixed(3)},${rawPts[k].y.toFixed(3)}) r=${isFinite(r) ? r.toFixed(4) : 'Inf'}`);
-        }
-        console.log(entries.join('  '));
-      }
-      console.log('[buildTaperTrace] radius stats — min:', Math.min(...widths.filter(isFinite)).toFixed(4),
-        '| max:', Math.max(...widths.filter(isFinite)).toFixed(4),
+      // Log the exact formula parameters so they can be verified.
+      const cornerThreshold = tipRadius + depth * tanAlpha;
+      console.log('[buildTaperTrace] formula params — tipRadius:', tipRadius.toFixed(6),
+        '| tanAlpha:', tanAlpha.toFixed(6), '| depth:', depth.toFixed(6),
+        '| threshold (tipR+depth*tanA):', cornerThreshold.toFixed(6));
+      console.log('[buildTaperTrace] points below threshold:', widths.filter(r => isFinite(r) && r < cornerThreshold).length,
         '| infinities:', widths.filter(v => !isFinite(v)).length);
 
       // r is the inscribed circle radius — the largest circle that fits inside the
@@ -981,14 +973,33 @@ function buildTaperTrace(entities, topZ, depth, safeZ, feedRate, plungeRate, tcR
         return Math.min(depth, (r - tipRadius) / tanAlpha);
       });
 
-      // Full per-point depth dump alongside computed Z.
-      console.log('[buildTaperTrace] --- FULL maxDepth dump (before smooth) ---');
-      for (let i = 0; i < raw.length; i += 6) {
+      // Combined r→d dump: r and d on the same line — eliminates any cross-profile confusion.
+      console.log('[buildTaperTrace] --- COMBINED r→d dump (before smooth) ---');
+      for (let i = 0; i < rawPts.length; i += 4) {
         const entries = [];
-        for (let k = i; k < Math.min(i + 6, raw.length); k++)
-          entries.push(`[${k}] d=${raw[k].toFixed(4)} z=${(topZ - raw[k]).toFixed(4)}`);
+        for (let k = i; k < Math.min(i + 4, rawPts.length); k++) {
+          const r = widths[k], d = raw[k];
+          entries.push(`[${k}](${rawPts[k].x.toFixed(2)},${rawPts[k].y.toFixed(2)}) r=${isFinite(r) ? r.toFixed(3) : 'Inf'} d=${d.toFixed(3)}`);
+        }
         console.log(entries.join('  '));
       }
+
+      // Mismatch check: every r < threshold must map to d < depth.
+      // If not, something is wrong with the formula or the parameters.
+      let _mismatches = 0;
+      for (let k = 0; k < widths.length; k++) {
+        const r = widths[k];
+        if (isFinite(r) && r < cornerThreshold && Math.abs(raw[k] - depth) < 1e-6) {
+          if (_mismatches < 30)
+            console.log(`[buildTaperTrace] MISMATCH [${k}]: r=${r.toFixed(6)} < threshold=${cornerThreshold.toFixed(6)} but d=${raw[k].toFixed(6)} (formula gives ${((r - tipRadius) / tanAlpha).toFixed(6)}, tipR=${tipRadius.toFixed(6)}, tanA=${tanAlpha.toFixed(6)})`);
+          _mismatches++;
+        }
+      }
+      if (_mismatches > 0)
+        console.log(`[buildTaperTrace] TOTAL MISMATCHES: ${_mismatches}`);
+      else
+        console.log('[buildTaperTrace] no mismatches — every r < threshold correctly maps to d < depth');
+
       console.log('[buildTaperTrace] maxDepth stats — min:', Math.min(...raw).toFixed(4),
         '| max:', Math.max(...raw).toFixed(4),
         '| equal-to-targetDepth count:', raw.filter(d => Math.abs(d - depth) < 1e-4).length,
