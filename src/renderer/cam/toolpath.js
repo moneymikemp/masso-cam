@@ -967,6 +967,7 @@ function arcLengthRemap(depths, fromPts, toPts) {
 //   trigger the bisector ramp.  180° = all convex corners (Fusion default);
 //   lower values (e.g. 170°) suppress ramps at near-straight tessellation joints.
 function buildTaperTrace(entities, topZ, depth, safeZ, feedRate, plungeRate, tcRad, cutSide, tipRadius = 0, sharpCornerAngle = 180) {
+  console.log('[buildTaperTrace] cutSide:', cutSide, '| isOutside:', cutSide === 'outside');
   const moves     = [];
   const tanAlpha  = Math.tan(tcRad);
   const floorZ    = topZ - depth;
