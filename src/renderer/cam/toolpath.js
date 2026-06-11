@@ -977,6 +977,7 @@ function buildTaperTrace(entities, topZ, depth, safeZ, feedRate, plungeRate, tcR
   // e.g. sharpCornerAngle=170° → only turns >10° trigger a ramp.
   const MIN_CORNER_TURN = Math.max(0, (180 - sharpCornerAngle) * Math.PI / 180);
 
+  const isOutside = cutSide === 'outside';
   const profiles = buildPocketProfiles(entities);
 
   for (const rawProfile of profiles) {
@@ -1000,25 +1001,26 @@ function buildTaperTrace(entities, topZ, depth, safeZ, feedRate, plungeRate, tcR
     const pts = isClockwise(ptsRaw) ? [...ptsRaw].reverse() : ptsRaw;
     const n   = pts.length;
 
-    // Pre-compute per-vertex Z.  Concave vertices (cross < 0) whose circumradius
-    // R < bitRadius get lifted: Z = topZ − (R − tipRadius) / tanAlpha.
-    // Circumradius of (Pprv,P,Pnxt) equals the arc radius for uniformly-
-    // tessellated arcs and is large for near-collinear triples (straight
-    // edges / widely-spaced polygon vertices), so large smooth curves do not
-    // trigger lifting even though their cross product is also slightly negative.
+    // Pre-compute per-vertex Z.  Tight arc vertices whose circumradius R < bitRadius
+    // get lifted: Z = topZ − (R − tipRadius) / tanAlpha.
+    // For pocket (inside cut) we lift at concave vertices (cross < 0).
+    // For plug  (outside cut) we lift at convex vertices (cross > 0) because the
+    // bit is on the outside and those arcs bulge toward it.
+    // arcCross > 0 means "needs the lift check"; we compute R = la*lb*lac/(2*arcCross).
     const zAtPt = pts.map((P, i) => {
       if (tanAlpha < 1e-10) return floorZ;
       const Pprv = pts[(i - 1 + n) % n];
       const Pnxt = pts[(i + 1) % n];
       const ax = P.x - Pprv.x, ay = P.y - Pprv.y;
       const bx = Pnxt.x - P.x, by = Pnxt.y - P.y;
-      const cross = ax * by - ay * bx;       // raw (un-normalised) cross product
-      if (cross >= 0) return floorZ;         // convex or straight: full depth
+      const cross    = ax * by - ay * bx;
+      const arcCross = isOutside ? cross : -cross;   // positive = candidate for lift
+      if (arcCross <= 0) return floorZ;
       const la  = Math.hypot(ax, ay);
       const lb  = Math.hypot(bx, by);
       if (la < 1e-10 || lb < 1e-10) return floorZ;
       const lac = Math.hypot(ax + bx, ay + by);
-      const R   = (la * lb * lac) / (-2 * cross);   // cross < 0 so -cross > 0
+      const R   = (la * lb * lac) / (2 * arcCross);
       if (!isFinite(R) || R >= bitRadius) return floorZ;
       const liftDepth = Math.max(0, (R - tipRadius) / tanAlpha);
       return topZ - liftDepth;
@@ -1040,19 +1042,24 @@ function buildTaperTrace(entities, topZ, depth, safeZ, feedRate, plungeRate, tcR
       if (la > 1e-10 && lb > 1e-10 && tanAlpha > 1e-10) {
         const ux1 = ax / la, uy1 = ay / la;
         const ux2 = bx / lb, uy2 = by / lb;
-        const cross = ux1 * uy2 - uy1 * ux2;   // normalised; >0 = convex (CCW)
+        const cross       = ux1 * uy2 - uy1 * ux2;   // normalised; >0 = convex (CCW)
+        // Pocket (inside):  ramp at convex corners  (cross > 0, bit crowds outside the turn)
+        // Plug   (outside): ramp at concave corners (cross < 0, bit crowds inside the turn)
+        const cornerCross = isOutside ? -cross : cross;
 
-        if (cross > 1e-6) {
-          const turnAngle = Math.atan2(cross, ux1 * ux2 + uy1 * uy2);
+        if (cornerCross > 1e-6) {
+          const turnAngle = Math.atan2(cornerCross, ux1 * ux2 + uy1 * uy2);
           // Guard: only ramp at genuine polygon corners, not arc tessellation steps.
           if (turnAngle > MIN_CORNER_TURN) {
             const alpha    = (Math.PI - turnAngle) / 2;
             const sinAlpha = Math.sin(alpha);
             if (sinAlpha > 1e-6) {
               const rampDist = (depth * tanAlpha) / sinAlpha;
-              // Outward bisector = normalise( rightNormal(d1) + rightNormal(d2) )
-              // rightNormal(ux,uy) = (uy, -ux)  [90° CW — outward from CCW polygon]
-              const rx = uy1 + uy2,  ry = -ux1 - ux2;
+              // Pocket: outward bisector (rightNormal) pushes ramp away from CCW interior.
+              // Plug:   inward bisector (leftNormal = negate rightNormal) pushes into stock.
+              const s  = isOutside ? -1 : 1;
+              const rx = s * (uy1 + uy2);
+              const ry = s * (-ux1 - ux2);
               const rl = Math.hypot(rx, ry);
               if (rl > 1e-10) {
                 const rampX = P.x + (rx / rl) * rampDist;
