@@ -1029,6 +1029,14 @@ function buildTaperTrace(entities, topZ, depth, safeZ, feedRate, plungeRate, tcR
         const ux2 = bx / lb, uy2 = by / lb;
         const cross = ux1 * uy2 - uy1 * ux2;   // normalised; >0 = convex (CCW)
 
+        // DIAGNOSTIC — remove before shipping
+        {
+          const _turn = Math.atan2(cross, ux1 * ux2 + uy1 * uy2) * 180 / Math.PI;
+          const _int  = (180 - _turn).toFixed(2);
+          const _fires = cross > 1e-6 && _turn > MIN_CORNER_TURN * 180 / Math.PI;
+          console.log(`[TaperTrace] i=${String(i).padStart(3)}  xy=(${P.x.toFixed(3)}, ${P.y.toFixed(3)})  intAngle=${String(_int).padStart(8)}°  cross=${cross.toFixed(5)}  ramp=${_fires}`);
+        }
+
         if (cross > 1e-6) {
           const turnAngle = Math.atan2(cross, ux1 * ux2 + uy1 * uy2);
           // Guard: only ramp at genuine polygon corners, not arc tessellation steps.
