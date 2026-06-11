@@ -980,12 +980,23 @@ function buildTaperTrace(entities, topZ, depth, safeZ, feedRate, plungeRate, tcR
   const profiles = buildPocketProfiles(entities);
 
   for (const rawProfile of profiles) {
+    // Normalise winding to CCW before offsetting.  mirrorEntitiesX Y-flips the
+    // polygon, reversing its winding to CW.  Clipper's ClipperOffset treats CW
+    // paths as holes and applies the delta in the opposite direction, so a CW
+    // input to offsetPolyline contracts where it should expand (and vice-versa),
+    // placing the trace path on the wrong side of the profile.  Normalising
+    // first ensures Clipper always sees a CCW outer boundary.
+    const rawStripped = stripClose([...rawProfile]);
+    if (rawStripped.length < 3) continue;
+    const rawCCW = isClockwise(rawStripped) ? [...rawStripped].reverse() : rawStripped;
+
     const traceRaw = traceOffset !== 0
-      ? (offsetPolyline(rawProfile, traceOffset, true)[0] ?? rawProfile)
-      : rawProfile;
+      ? (offsetPolyline(rawCCW, traceOffset, true)[0] ?? rawCCW)
+      : rawCCW;
     if (!traceRaw || traceRaw.length < 2) continue;
     const ptsRaw = stripClose([...traceRaw]);
     if (ptsRaw.length < 3) continue;
+    // offsetPolyline always returns CCW; the isClockwise guard is a safety net.
     const pts = isClockwise(ptsRaw) ? [...ptsRaw].reverse() : ptsRaw;
     const n   = pts.length;
 
