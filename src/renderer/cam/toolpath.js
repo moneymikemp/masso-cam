@@ -971,8 +971,9 @@ function buildTaperTrace(entities, topZ, depth, safeZ, feedRate, plungeRate, tcR
   const traceOffset = cutSide === 'outside' ? -(depth * tanAlpha) : 0;
 
   // arcToPoints uses 36 segs/arc → ≤5° per step for arcs ≤180°.
-  // 8° sits above that, so arc tessellation steps never trigger the ramp.
-  const MIN_CORNER_TURN = 8 * Math.PI / 180;
+  // 10° (interior angle < 170°) sits comfortably above tessellation noise at
+  // arc/line junctions while still catching all practically-sharp corners.
+  const MIN_CORNER_TURN = 10 * Math.PI / 180;
 
   const profiles = buildPocketProfiles(entities);
 
