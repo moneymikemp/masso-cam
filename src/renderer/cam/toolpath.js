@@ -714,7 +714,7 @@ function buildTaperedPasses(selected, topZ, depth, safeZ, p, warnings, stockBoun
       toolKey:  tc.toolId ?? 'taper',
       toolDesc: `Taper bit — tip ⌀${tc.tipDia || 0.5}mm  ${tc.angle || 10}° half-angle`,
       rpm: tc.rpm || 24000,
-      moves: buildTaperTrace(selected, topZ, depth, safeZ, tc.feed || 1000, tc.plunge || 300, tcRad, cutSide, (tc.tipDia || 0) / 2),
+      moves: buildTaperTrace(selected, topZ, depth, safeZ, tc.feed || 1000, tc.plunge || 300, tcRad, cutSide, (tc.tipDia || 0) / 2, p.sharpCornerAngle ?? 180),
     });
   }
 
@@ -963,17 +963,19 @@ function arcLengthRemap(depths, fromPts, toPts) {
 // boundary — identical ramp geometry then produces mating walls.
 //
 // tipRadius: tip flat radius (0 for a pointed V-bit).
-function buildTaperTrace(entities, topZ, depth, safeZ, feedRate, plungeRate, tcRad, cutSide, tipRadius = 0) {
+// sharpCornerAngle: only interior angles strictly below this value (degrees)
+//   trigger the bisector ramp.  180° = all convex corners (Fusion default);
+//   lower values (e.g. 170°) suppress ramps at near-straight tessellation joints.
+function buildTaperTrace(entities, topZ, depth, safeZ, feedRate, plungeRate, tcRad, cutSide, tipRadius = 0, sharpCornerAngle = 180) {
   const moves     = [];
   const tanAlpha  = Math.tan(tcRad);
   const floorZ    = topZ - depth;
   const bitRadius = tipRadius + depth * tanAlpha;
   const traceOffset = cutSide === 'outside' ? -(depth * tanAlpha) : 0;
 
-  // arcToPoints uses 36 segs/arc → ≤5° per step for arcs ≤180°.
-  // 10° (interior angle < 170°) sits comfortably above tessellation noise at
-  // arc/line junctions while still catching all practically-sharp corners.
-  const MIN_CORNER_TURN = 10 * Math.PI / 180;
+  // Convert the user-facing interior-angle threshold to a minimum exterior turn.
+  // e.g. sharpCornerAngle=170° → only turns >10° trigger a ramp.
+  const MIN_CORNER_TURN = Math.max(0, (180 - sharpCornerAngle) * Math.PI / 180);
 
   const profiles = buildPocketProfiles(entities);
 
@@ -1028,14 +1030,6 @@ function buildTaperTrace(entities, topZ, depth, safeZ, feedRate, plungeRate, tcR
         const ux1 = ax / la, uy1 = ay / la;
         const ux2 = bx / lb, uy2 = by / lb;
         const cross = ux1 * uy2 - uy1 * ux2;   // normalised; >0 = convex (CCW)
-
-        // DIAGNOSTIC — remove before shipping
-        {
-          const _turn = Math.atan2(cross, ux1 * ux2 + uy1 * uy2) * 180 / Math.PI;
-          const _int  = (180 - _turn).toFixed(2);
-          const _fires = cross > 1e-6 && _turn > MIN_CORNER_TURN * 180 / Math.PI;
-          console.log(`[TaperTrace] i=${String(i).padStart(3)}  xy=(${P.x.toFixed(3)}, ${P.y.toFixed(3)})  intAngle=${String(_int).padStart(8)}°  cross=${cross.toFixed(5)}  ramp=${_fires}`);
-        }
 
         if (cross > 1e-6) {
           const turnAngle = Math.atan2(cross, ux1 * ux2 + uy1 * uy2);

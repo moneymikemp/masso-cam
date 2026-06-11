@@ -521,6 +521,11 @@ export default function OperationParams({ op, tools, onChange }) {
           <Field label="Top of Stock" unit={distUnit}><NumInput value={toDisp(p.topZ ?? 0)} onChange={v => set('topZ', toMM(v))} step={isInch ? 0.02 : 0.5} /></Field>
           <Field label="Safe Z" unit={distUnit}><NumInput value={toDisp(p.safeZ ?? 10)} onChange={v => set('safeZ', toMM(v))} step={isInch ? 0.05 : 1} /></Field>
 
+          <div style={S.section}>Corner Relief</div>
+          <Field label="Sharp Corner Angle" unit="°">
+            <NumInput value={p.sharpCornerAngle ?? 180} onChange={v => set('sharpCornerAngle', v)} min={90} max={180} step={1} />
+          </Field>
+
           {isPlug && (() => {
             const engDepthIn = zRaise / MM_PER_INCH;
             const fitQuality = engDepthIn < 0.030 ? 'tight' : engDepthIn > 0.080 ? 'loose' : 'ideal';
