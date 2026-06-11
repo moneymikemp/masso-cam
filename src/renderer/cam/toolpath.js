@@ -933,119 +933,97 @@ function arcLengthRemap(depths, fromPts, toPts) {
 //
 // cutSide 'outside': tip is offset outward by depth × tan(halfAngle) so the taper
 // wall intersects the profile edge exactly at the top surface.
-// tipRadius: tip radius from operation params (0 for a pointed bit).
+// Corner-relief taper contour pass.
+//
+// At every convex vertex (interior angle < 180°) the bit ramps out along the
+// outward angle bisector while rising from floor to surface, then retraces
+// back to full depth.  This creates the correct taper-wall geometry at inside
+// corners so a pocket and plug cut from the same profile mate precisely.
+//
+// Formula:  tan(φ) = sin(α) / tan(θ)
+//   φ = ramp angle from horizontal
+//   α = half the interior corner angle
+//   θ = bit half-angle (tcRad)
+//   ramp distance = depth * tan(θ) / sin(α)
+//
+// For an outside (plug) cut the trace path is pre-offset inward by
+// depth*tan(θ) so the taper body at the surface aligns with the profile
+// boundary — identical ramp geometry then produces mating walls.
+//
+// tipRadius: tip flat radius (0 for a pointed V-bit).
 function buildTaperTrace(entities, topZ, depth, safeZ, feedRate, plungeRate, tcRad, cutSide, tipRadius = 0) {
-  const moves      = [];
-  const tanAlpha   = Math.tan(tcRad);
+  const moves    = [];
+  const tanAlpha = Math.tan(tcRad);
+  const floorZ   = topZ - depth;
+  // Plug: offset trace path inward so the taper surface at z=topZ sits on the profile boundary.
   const traceOffset = cutSide === 'outside' ? -(depth * tanAlpha) : 0;
 
-  console.log('[buildTaperTrace] ENTRY — topZ:', topZ.toFixed(4), '| depth (targetDepth):', depth.toFixed(4),
-    '| tcRad:', tcRad.toFixed(6), '| tanAlpha:', tanAlpha.toFixed(6),
-    '| cutSide:', cutSide, '| tipRadius:', tipRadius.toFixed(4), '| traceOffset:', traceOffset.toFixed(4));
-
   const profiles = buildPocketProfiles(entities);
-  console.log('[buildTaperTrace] profiles count:', profiles.length);
 
   for (const rawProfile of profiles) {
-    const rawPts = stripClose([...rawProfile]);
-    console.log('[buildTaperTrace] rawPts.length (after stripClose):', rawPts.length,
-      '| rawProfile.length:', rawProfile.length);
-    if (rawPts.length < 3) { console.log('[buildTaperTrace] SKIP — fewer than 3 pts'); continue; }
-
-    // ── Per-point adaptive depth via corner-relief formula ────────────────────
-    let adaptDepths;
-    if (tanAlpha > 1e-6) {
-      const widths = computeContourLocalWidths(rawPts);
-
-      // Log the exact formula parameters so they can be verified.
-      const cornerThreshold = tipRadius + depth * tanAlpha;
-      console.log('[buildTaperTrace] formula params — tipRadius:', tipRadius.toFixed(6),
-        '| tanAlpha:', tanAlpha.toFixed(6), '| depth:', depth.toFixed(6),
-        '| threshold (tipR+depth*tanA):', cornerThreshold.toFixed(6));
-      console.log('[buildTaperTrace] points below threshold:', widths.filter(r => isFinite(r) && r < cornerThreshold).length,
-        '| infinities:', widths.filter(v => !isFinite(v)).length);
-
-      // r is the inscribed circle radius — the largest circle that fits inside the
-      // polygon at this contour point.  Direct input to the corner-relief formula:
-      //   maxDepth = (r - tipRadius) / tan(halfAngle)
-      const raw = widths.map(r => {
-        if (!isFinite(r) || r <= tipRadius) return r <= tipRadius ? 0 : depth;
-        return Math.min(depth, (r - tipRadius) / tanAlpha);
-      });
-
-      // Combined r→d dump: r and d on the same line — eliminates any cross-profile confusion.
-      console.log('[buildTaperTrace] --- COMBINED r→d dump (before smooth) ---');
-      for (let i = 0; i < rawPts.length; i += 4) {
-        const entries = [];
-        for (let k = i; k < Math.min(i + 4, rawPts.length); k++) {
-          const r = widths[k], d = raw[k];
-          entries.push(`[${k}](${rawPts[k].x.toFixed(2)},${rawPts[k].y.toFixed(2)}) r=${isFinite(r) ? r.toFixed(3) : 'Inf'} d=${d.toFixed(3)}`);
-        }
-        console.log(entries.join('  '));
-      }
-
-      // Mismatch check: every r < threshold must map to d < depth.
-      // If not, something is wrong with the formula or the parameters.
-      let _mismatches = 0;
-      for (let k = 0; k < widths.length; k++) {
-        const r = widths[k];
-        if (isFinite(r) && r < cornerThreshold && Math.abs(raw[k] - depth) < 1e-6) {
-          if (_mismatches < 30)
-            console.log(`[buildTaperTrace] MISMATCH [${k}]: r=${r.toFixed(6)} < threshold=${cornerThreshold.toFixed(6)} but d=${raw[k].toFixed(6)} (formula gives ${((r - tipRadius) / tanAlpha).toFixed(6)}, tipR=${tipRadius.toFixed(6)}, tanA=${tanAlpha.toFixed(6)})`);
-          _mismatches++;
-        }
-      }
-      if (_mismatches > 0)
-        console.log(`[buildTaperTrace] TOTAL MISMATCHES: ${_mismatches}`);
-      else
-        console.log('[buildTaperTrace] no mismatches — every r < threshold correctly maps to d < depth');
-
-      console.log('[buildTaperTrace] maxDepth stats — min:', Math.min(...raw).toFixed(4),
-        '| max:', Math.max(...raw).toFixed(4),
-        '| equal-to-targetDepth count:', raw.filter(d => Math.abs(d - depth) < 1e-4).length,
-        '/ total:', raw.length);
-
-      adaptDepths = smoothDepthProfile(raw);
-
-      console.log('[buildTaperTrace] smoothed stats — min:', Math.min(...adaptDepths).toFixed(4),
-        '| max:', Math.max(...adaptDepths).toFixed(4));
-    } else {
-      console.log('[buildTaperTrace] tanAlpha <= 1e-6 — skipping corner relief, using flat depth');
-      adaptDepths = new Array(rawPts.length).fill(depth);
-    }
-
-    // ── Build trace profile (offset outward for plug outside cut) ─────────────
+    // Build trace path and normalise to CCW so cross-product sign is consistent.
     const traceRaw = traceOffset !== 0
       ? (offsetPolyline(rawProfile, traceOffset, true)[0] ?? rawProfile)
       : rawProfile;
-    if (!traceRaw || traceRaw.length < 2) { console.log('[buildTaperTrace] SKIP — traceRaw empty'); continue; }
-    const tracePts = stripClose([...traceRaw]);
+    if (!traceRaw || traceRaw.length < 2) continue;
+    const ptsRaw = stripClose([...traceRaw]);
+    if (ptsRaw.length < 3) continue;
+    const pts = isClockwise(ptsRaw) ? [...ptsRaw].reverse() : ptsRaw;
+    const n   = pts.length;
 
-    // Map adaptive depths from raw profile to trace profile positions.
-    // Normalize CW raw profiles to CCW before remapping so arc-length
-    // direction matches the CCW-normalised trace profile from offsetPolyline.
-    let traceDepths;
-    if (traceOffset === 0) {
-      traceDepths = adaptDepths;           // raw === trace, no remap needed
-    } else {
-      const normRaw = isClockwise(rawPts) ? [...rawPts].reverse() : rawPts;
-      const normDep = isClockwise(rawPts) ? [...adaptDepths].reverse() : adaptDepths;
-      traceDepths   = arcLengthRemap(normDep, normRaw, tracePts);
+    // Approach: rapid overhead then plunge to full depth at the first vertex.
+    moves.push({ type: 'rapid', x: pts[0].x, y: pts[0].y, z: safeZ });
+    moves.push({ type: 'feed',  x: pts[0].x, y: pts[0].y, z: floorZ, f: plungeRate });
+
+    // Walk every vertex.  At convex corners insert the outward bisector ramp.
+    for (let i = 0; i < n; i++) {
+      const P    = pts[i];
+      const Pnxt = pts[(i + 1) % n];
+      const Pprv = pts[(i - 1 + n) % n];
+
+      // Incoming / outgoing edge vectors.
+      const ax = P.x - Pprv.x, ay = P.y - Pprv.y;
+      const bx = Pnxt.x - P.x, by = Pnxt.y - P.y;
+      const la = Math.hypot(ax, ay);
+      const lb = Math.hypot(bx, by);
+
+      if (la > 1e-10 && lb > 1e-10 && tanAlpha > 1e-10) {
+        const ux1 = ax / la, uy1 = ay / la;   // unit incoming
+        const ux2 = bx / lb, uy2 = by / lb;   // unit outgoing
+
+        // z-component of cross product: positive → left turn → convex for CCW polygon.
+        const cross = ux1 * uy2 - uy1 * ux2;
+
+        if (cross > 1e-6) {
+          // Exterior (turn) angle; interior angle = π − turnAngle; half = α.
+          const turnAngle = Math.atan2(cross, ux1 * ux2 + uy1 * uy2);
+          const alpha     = (Math.PI - turnAngle) / 2;
+          const sinAlpha  = Math.sin(alpha);
+
+          if (sinAlpha > 1e-6) {
+            const rampDist = (depth * tanAlpha) / sinAlpha;
+
+            // Outward bisector = normalise( rightNormal(d1) + rightNormal(d2) )
+            // rightNormal(ux,uy) = (uy, -ux)  [90° CW — outward from CCW polygon]
+            const rx = uy1 + uy2;
+            const ry = -ux1 - ux2;
+            const rl = Math.hypot(rx, ry);
+            if (rl > 1e-10) {
+              const rampX = P.x + (rx / rl) * rampDist;
+              const rampY = P.y + (ry / rl) * rampDist;
+              // Rise to surface along bisector, then retrace back to full depth.
+              moves.push({ type: 'feed', x: rampX, y: rampY, z: topZ,   f: feedRate });
+              moves.push({ type: 'feed', x: P.x,   y: P.y,   z: floorZ, f: feedRate });
+            }
+          }
+        }
+      }
+
+      // Advance to next vertex at full depth (closes the loop when i === n-1).
+      moves.push({ type: 'feed', x: Pnxt.x, y: Pnxt.y, z: floorZ, f: feedRate });
     }
 
-    const zValues = traceDepths.map(d => topZ - d);
-    console.log('[buildTaperTrace] OUTPUT Z stats — min:', Math.min(...zValues).toFixed(4),
-      '| max:', Math.max(...zValues).toFixed(4),
-      '| all-same:', (Math.max(...zValues) - Math.min(...zValues)) < 1e-4,
-      '| tracePts.length:', tracePts.length);
-
-    // ── Generate moves with adaptive Z ────────────────────────────────────────
-    moves.push({ type: 'rapid', x: tracePts[0].x, y: tracePts[0].y, z: safeZ });
-    moves.push({ type: 'feed',  x: tracePts[0].x, y: tracePts[0].y, z: topZ - traceDepths[0], f: plungeRate });
-    for (let i = 1; i < tracePts.length; i++)
-      moves.push({ type: 'feed', x: tracePts[i].x, y: tracePts[i].y, z: topZ - traceDepths[i], f: feedRate });
-    moves.push({ type: 'feed',  x: tracePts[0].x, y: tracePts[0].y, z: topZ - traceDepths[0], f: feedRate });
-    moves.push({ type: 'rapid', x: tracePts[0].x, y: tracePts[0].y, z: safeZ });
+    moves.push({ type: 'rapid', x: pts[0].x, y: pts[0].y, z: safeZ });
   }
   return moves;
 }
