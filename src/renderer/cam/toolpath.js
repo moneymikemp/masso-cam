@@ -935,10 +935,10 @@ function arcLengthRemap(depths, fromPts, toPts) {
 // wall intersects the profile edge exactly at the top surface.
 // Corner-relief taper contour pass.
 //
-// At every convex vertex (interior angle < 180°) the bit ramps out along the
-// outward angle bisector while rising from floor to surface, then retraces
-// back to full depth.  This creates the correct taper-wall geometry at inside
-// corners so a pocket and plug cut from the same profile mate precisely.
+// At every convex polygon corner (interior angle < 180°) the bit ramps out
+// along the outward angle bisector while rising from floor to surface, then
+// retraces back to full depth.  This creates the correct taper-wall geometry
+// at inside corners so a pocket and plug cut from the same profile mate.
 //
 // Formula:  tan(φ) = sin(α) / tan(θ)
 //   φ = ramp angle from horizontal
@@ -946,22 +946,37 @@ function arcLengthRemap(depths, fromPts, toPts) {
 //   θ = bit half-angle (tcRad)
 //   ramp distance = depth * tan(θ) / sin(α)
 //
+// Concave arc sections whose radius is smaller than the bit's taper footprint
+// (bitRadius = tipRadius + depth×tanAlpha) are handled separately: Z is lifted
+// so the bit's contact radius at the surface matches the arc radius:
+//   Z = topZ − (arcRadius − tipRadius) / tanAlpha
+// The local arc radius is estimated from the circumradius of consecutive
+// tessellated triplets; large smooth curves have circumradius >> bitRadius and
+// are left at full depth unchanged.
+//
+// MIN_CORNER_TURN guards the bisector ramp so it fires only at genuine polygon
+// corners (single vertex with a large turn) and not at the fine steps of a
+// tessellated smooth arc.
+//
 // For an outside (plug) cut the trace path is pre-offset inward by
 // depth*tan(θ) so the taper body at the surface aligns with the profile
 // boundary — identical ramp geometry then produces mating walls.
 //
 // tipRadius: tip flat radius (0 for a pointed V-bit).
 function buildTaperTrace(entities, topZ, depth, safeZ, feedRate, plungeRate, tcRad, cutSide, tipRadius = 0) {
-  const moves    = [];
-  const tanAlpha = Math.tan(tcRad);
-  const floorZ   = topZ - depth;
-  // Plug: offset trace path inward so the taper surface at z=topZ sits on the profile boundary.
+  const moves     = [];
+  const tanAlpha  = Math.tan(tcRad);
+  const floorZ    = topZ - depth;
+  const bitRadius = tipRadius + depth * tanAlpha;
   const traceOffset = cutSide === 'outside' ? -(depth * tanAlpha) : 0;
+
+  // arcToPoints uses 36 segs/arc → ≤5° per step for arcs ≤180°.
+  // 8° sits above that, so arc tessellation steps never trigger the ramp.
+  const MIN_CORNER_TURN = 8 * Math.PI / 180;
 
   const profiles = buildPocketProfiles(entities);
 
   for (const rawProfile of profiles) {
-    // Build trace path and normalise to CCW so cross-product sign is consistent.
     const traceRaw = traceOffset !== 0
       ? (offsetPolyline(rawProfile, traceOffset, true)[0] ?? rawProfile)
       : rawProfile;
@@ -971,56 +986,73 @@ function buildTaperTrace(entities, topZ, depth, safeZ, feedRate, plungeRate, tcR
     const pts = isClockwise(ptsRaw) ? [...ptsRaw].reverse() : ptsRaw;
     const n   = pts.length;
 
-    // Approach: rapid overhead then plunge to full depth at the first vertex.
-    moves.push({ type: 'rapid', x: pts[0].x, y: pts[0].y, z: safeZ });
-    moves.push({ type: 'feed',  x: pts[0].x, y: pts[0].y, z: floorZ, f: plungeRate });
+    // Pre-compute per-vertex Z.  Concave vertices (cross < 0) whose circumradius
+    // R < bitRadius get lifted: Z = topZ − (R − tipRadius) / tanAlpha.
+    // Circumradius of (Pprv,P,Pnxt) equals the arc radius for uniformly-
+    // tessellated arcs and is large for near-collinear triples (straight
+    // edges / widely-spaced polygon vertices), so large smooth curves do not
+    // trigger lifting even though their cross product is also slightly negative.
+    const zAtPt = pts.map((P, i) => {
+      if (tanAlpha < 1e-10) return floorZ;
+      const Pprv = pts[(i - 1 + n) % n];
+      const Pnxt = pts[(i + 1) % n];
+      const ax = P.x - Pprv.x, ay = P.y - Pprv.y;
+      const bx = Pnxt.x - P.x, by = Pnxt.y - P.y;
+      const cross = ax * by - ay * bx;       // raw (un-normalised) cross product
+      if (cross >= 0) return floorZ;         // convex or straight: full depth
+      const la  = Math.hypot(ax, ay);
+      const lb  = Math.hypot(bx, by);
+      if (la < 1e-10 || lb < 1e-10) return floorZ;
+      const lac = Math.hypot(ax + bx, ay + by);
+      const R   = (la * lb * lac) / (-2 * cross);   // cross < 0 so -cross > 0
+      if (!isFinite(R) || R >= bitRadius) return floorZ;
+      const liftDepth = Math.max(0, (R - tipRadius) / tanAlpha);
+      return topZ - liftDepth;
+    });
 
-    // Walk every vertex.  At convex corners insert the outward bisector ramp.
+    moves.push({ type: 'rapid', x: pts[0].x, y: pts[0].y, z: safeZ });
+    moves.push({ type: 'feed',  x: pts[0].x, y: pts[0].y, z: zAtPt[0], f: plungeRate });
+
     for (let i = 0; i < n; i++) {
       const P    = pts[i];
       const Pnxt = pts[(i + 1) % n];
       const Pprv = pts[(i - 1 + n) % n];
 
-      // Incoming / outgoing edge vectors.
       const ax = P.x - Pprv.x, ay = P.y - Pprv.y;
       const bx = Pnxt.x - P.x, by = Pnxt.y - P.y;
       const la = Math.hypot(ax, ay);
       const lb = Math.hypot(bx, by);
 
       if (la > 1e-10 && lb > 1e-10 && tanAlpha > 1e-10) {
-        const ux1 = ax / la, uy1 = ay / la;   // unit incoming
-        const ux2 = bx / lb, uy2 = by / lb;   // unit outgoing
-
-        // z-component of cross product: positive → left turn → convex for CCW polygon.
-        const cross = ux1 * uy2 - uy1 * ux2;
+        const ux1 = ax / la, uy1 = ay / la;
+        const ux2 = bx / lb, uy2 = by / lb;
+        const cross = ux1 * uy2 - uy1 * ux2;   // normalised; >0 = convex (CCW)
 
         if (cross > 1e-6) {
-          // Exterior (turn) angle; interior angle = π − turnAngle; half = α.
           const turnAngle = Math.atan2(cross, ux1 * ux2 + uy1 * uy2);
-          const alpha     = (Math.PI - turnAngle) / 2;
-          const sinAlpha  = Math.sin(alpha);
-
-          if (sinAlpha > 1e-6) {
-            const rampDist = (depth * tanAlpha) / sinAlpha;
-
-            // Outward bisector = normalise( rightNormal(d1) + rightNormal(d2) )
-            // rightNormal(ux,uy) = (uy, -ux)  [90° CW — outward from CCW polygon]
-            const rx = uy1 + uy2;
-            const ry = -ux1 - ux2;
-            const rl = Math.hypot(rx, ry);
-            if (rl > 1e-10) {
-              const rampX = P.x + (rx / rl) * rampDist;
-              const rampY = P.y + (ry / rl) * rampDist;
-              // Rise to surface along bisector, then retrace back to full depth.
-              moves.push({ type: 'feed', x: rampX, y: rampY, z: topZ,   f: feedRate });
-              moves.push({ type: 'feed', x: P.x,   y: P.y,   z: floorZ, f: feedRate });
+          // Guard: only ramp at genuine polygon corners, not arc tessellation steps.
+          if (turnAngle > MIN_CORNER_TURN) {
+            const alpha    = (Math.PI - turnAngle) / 2;
+            const sinAlpha = Math.sin(alpha);
+            if (sinAlpha > 1e-6) {
+              const rampDist = (depth * tanAlpha) / sinAlpha;
+              // Outward bisector = normalise( rightNormal(d1) + rightNormal(d2) )
+              // rightNormal(ux,uy) = (uy, -ux)  [90° CW — outward from CCW polygon]
+              const rx = uy1 + uy2,  ry = -ux1 - ux2;
+              const rl = Math.hypot(rx, ry);
+              if (rl > 1e-10) {
+                const rampX = P.x + (rx / rl) * rampDist;
+                const rampY = P.y + (ry / rl) * rampDist;
+                moves.push({ type: 'feed', x: rampX, y: rampY, z: topZ,   f: feedRate });
+                moves.push({ type: 'feed', x: P.x,   y: P.y,   z: floorZ, f: feedRate });
+              }
             }
           }
         }
       }
 
-      // Advance to next vertex at full depth (closes the loop when i === n-1).
-      moves.push({ type: 'feed', x: Pnxt.x, y: Pnxt.y, z: floorZ, f: feedRate });
+      // Advance to next vertex; use pre-computed Z (lifted for tight concave arcs).
+      moves.push({ type: 'feed', x: Pnxt.x, y: Pnxt.y, z: zAtPt[(i + 1) % n], f: feedRate });
     }
 
     moves.push({ type: 'rapid', x: pts[0].x, y: pts[0].y, z: safeZ });
