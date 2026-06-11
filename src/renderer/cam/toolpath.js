@@ -686,7 +686,11 @@ function generateTaperedPlug(op, entities, context = {}) {
   // leaving a fitTolerance gap uniformly around the perimeter.
   const plugTopZ = (p.topZ ?? 0) + (p.fitTolerance || 0.127) / Math.tan(wallRad);
   const stockBound = getStockBoundary(context, op, context.allEntities);
-  return buildTaperedPasses(selected, plugTopZ, depth, safeZ, p, warnings, stockBound);
+  // Default cutSide for plug is 'outside'; the UI displays this default but only
+  // writes p.cutSide when the user explicitly changes the dropdown, so p.cutSide
+  // may be undefined on operations created before the field existed.
+  const plugParams = p.cutSide != null ? p : { ...p, cutSide: 'outside' };
+  return buildTaperedPasses(selected, plugTopZ, depth, safeZ, plugParams, warnings, stockBound);
 }
 
 // Shared 4-pass builder used by both Pocket and Plug.
