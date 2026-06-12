@@ -874,6 +874,7 @@ function buildTaperedPasses(selected, topZ, depth, safeZ, p, warnings, stockBoun
 
   if (de.enabled !== false) {
     const deR = (de.diameter || 1.5875) / 2;
+    const deDepthPerPass = de.depthPerPass || de.diameter || 1.5875;
     const dePrevR = de.restMachining && (de.prevDiameter || 0) > 0 ? de.prevDiameter / 2 : 0;
     subToolpaths.push({
       name: 'Detail Endmill', color: '#44ff88',
@@ -881,13 +882,14 @@ function buildTaperedPasses(selected, topZ, depth, safeZ, p, warnings, stockBoun
       toolDesc: `Endmill ⌀${de.diameter || 1.5875}mm`,
       rpm: de.rpm || 18000,
       moves: clearFn(selected, topZ, depth, safeZ,
-        deR, de.diameter || 1.5875, de.wallStock || 0.254, de.feed || 800, de.plunge || 300,
+        deR, deDepthPerPass, de.wallStock || 0.254, de.feed || 800, de.plunge || 300,
         wallRad, 'Detail Endmill', warnings, dePrevR, effectiveClipBound, de.leadInStyle || 'plunge', de.leadInArcRadius || 0, partProfiles),
     });
   }
 
   if (be.enabled !== false) {
     const beR = (be.diameter || 6.35) / 2;
+    const beDepthPerPass = be.depthPerPass || be.diameter || 6.35;
     const bePrevR = be.restMachining && (be.prevDiameter || 0) > 0 ? be.prevDiameter / 2 : 0;
     subToolpaths.push({
       name: 'Bulk Endmill', color: '#4499ff',
@@ -895,7 +897,7 @@ function buildTaperedPasses(selected, topZ, depth, safeZ, p, warnings, stockBoun
       toolDesc: `Endmill ⌀${be.diameter || 6.35}mm`,
       rpm: be.rpm || 18000,
       moves: clearFn(selected, topZ, depth, safeZ,
-        beR, be.diameter || 6.35, be.wallStock || 0.254, be.feed || 1500, be.plunge || 500,
+        beR, beDepthPerPass, be.wallStock || 0.254, be.feed || 1500, be.plunge || 500,
         wallRad, 'Bulk Endmill', warnings, bePrevR, effectiveClipBound, be.leadInStyle || 'plunge', be.leadInArcRadius || 0, partProfiles),
     });
   }
