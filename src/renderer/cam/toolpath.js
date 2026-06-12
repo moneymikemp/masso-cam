@@ -123,6 +123,9 @@ function generateContour(op, entities) {
   const cutSide = p.cutSide || 'outside';
   const sign    = cutSide === 'inside' ? 1 : cutSide === 'center' ? 0 : -1;
   const offset  = sign * (toolR + (p.stockToLeave || 0));
+  const effectiveLeadIn = p.leadInStyle ?? (p.rampEntry ? 'ramp' : 'plunge');
+  const leadInArcR = p.leadInArcRadius || toolR;
+  const safeZ = p.safeZ || 25;
 
   const selected = getSelectedEntities(entities, op.selectedIds);
   if (!selected.length) return { moves: [], warnings: ['No entities selected'], contours: [] };
@@ -157,13 +160,9 @@ function generateContour(op, entities) {
     const passes = buildZPasses(p.topZ ?? 0, p.totalDepth || 10, p.depthPerPass || 3);
 
     for (const z of passes) {
-      moves.push({ type: 'rapid', x: contourPts[0].x, y: contourPts[0].y, z: p.safeZ || 25 });
-
-      if (p.rampEntry && closed && contourPts.length > 2) {
-        moves.push(...buildRampEntry(contourPts, p.topZ ?? 0, z, p.rampAngle || 3, p.feedRate || 1500, p.plungeRate || 500));
-      } else {
-        moves.push({ type: 'feed', x: contourPts[0].x, y: contourPts[0].y, z, f: p.plungeRate || 500 });
-      }
+      const canArc = closed && contourPts.length > 2;
+      const resolvedLeadIn = (effectiveLeadIn === 'arc' && !canArc) ? 'plunge' : effectiveLeadIn;
+      moves.push(...buildLeadIn(contourPts, p.topZ ?? 0, z, safeZ, resolvedLeadIn, p.rampAngle || 3, leadInArcR, p.feedRate || 1500, p.plungeRate || 500, cutSide));
 
       const useTabsThisPass = tabsEnabled && closed && tabTValues.length > 0 && z < tabTopZ - 1e-6;
 
@@ -195,6 +194,8 @@ function generatePocket(op, entities, context = {}) {
   const topZ = p.topZ ?? 0;
   const feedRate = p.feedRate || 1500;
   const plungeRate = p.plungeRate || 500;
+  const leadInStyle = p.leadInStyle || 'plunge';
+  const leadInArcR  = p.leadInArcRadius || toolR;
 
   const selected = getSelectedEntities(entities, op.selectedIds);
   if (!selected.length) return { moves: [], warnings: ['No entities selected'] };
@@ -275,9 +276,8 @@ function generatePocket(op, entities, context = {}) {
     const directedPasses = p.climb === false ? sortedPasses.map(pass => [...pass].reverse()) : sortedPasses;
 
     if (directedPasses.length > 0) {
-      const startPt = directedPasses[0][0];
-      moves.push({ type: 'rapid', x: startPt.x, y: startPt.y, z: safeZ });
-      moves.push({ type: 'feed', x: startPt.x, y: startPt.y, z, f: plungeRate });
+      const pocketCutSide = p.cutSide === 'outside' ? 'outside' : 'inside';
+      moves.push(...buildLeadIn(directedPasses[0], topZ, z, safeZ, leadInStyle, p.rampAngle || 3, leadInArcR, feedRate, plungeRate, pocketCutSide));
 
       for (const pass of directedPasses) {
         if (!pass || pass.length < 2) continue;
@@ -316,6 +316,8 @@ function generateAdaptive(op, entities, context = {}) {
   const toolR = (p.toolDiameter || 6.35) / 2;
   const stepover = p.stepover || 0.35;
   const safeZ = p.safeZ || 25;
+  const leadInStyle = p.leadInStyle || 'ramp';
+  const leadInArcR  = p.leadInArcRadius || toolR;
 
   warnings.push('Adaptive: trochoidal approximation');
 
@@ -359,8 +361,9 @@ function generateAdaptive(op, entities, context = {}) {
       }
       if (!clearPasses.length) continue;
 
-      moves.push({ type: 'rapid', x: profile[0].x, y: profile[0].y, z: safeZ });
-      moves.push(...buildRampEntry(clearPasses[clearPasses.length - 1] || profile, p.topZ ?? 0, z, p.rampAngle || 2, p.feedRate || 2000, p.plungeRate || 500));
+      const adaptRampProfile = clearPasses[clearPasses.length - 1] || profile;
+      const adaptCutSide = p.cutSide === 'outside' ? 'outside' : 'inside';
+      moves.push(...buildLeadIn(adaptRampProfile, p.topZ ?? 0, z, safeZ, leadInStyle, p.rampAngle || 2, leadInArcR, p.feedRate || 2000, p.plungeRate || 500, adaptCutSide));
 
       const arcDir = p.climb === false ? -1 : 1;
       const passOrder = p.climb === false ? clearPasses : [...clearPasses].reverse();
@@ -388,6 +391,9 @@ function generateFace(op, entities) {
   const moves = [];
   const p = op.params;
   const toolR = (p.toolDiameter || 25.4) / 2;
+  const safeZ = p.safeZ || 25;
+  const leadInStyle = p.leadInStyle || 'plunge';
+  const leadInArcR  = p.leadInArcRadius || toolR;
   const selected = getSelectedEntities(entities, op.selectedIds);
   const bounds = selected.length ? getEntityBounds(selected) : { minX: 0, minY: 0, maxX: 100, maxY: 100 };
   const expanded = { minX: bounds.minX - (p.stockLeft || 2), minY: bounds.minY - (p.stockFront || 2), maxX: bounds.maxX + (p.stockRight || 2), maxY: bounds.maxY + (p.stockBack || 2) };
@@ -396,8 +402,7 @@ function generateFace(op, entities) {
   for (const z of passes) {
     const rasterPasses = generateRasterPasses(expanded, p.angle || 0, p.stepover || 0.75, toolR);
     if (!rasterPasses.length) continue;
-    moves.push({ type: 'rapid', x: rasterPasses[0][0].x, y: rasterPasses[0][0].y, z: p.safeZ || 25 });
-    moves.push({ type: 'feed', x: rasterPasses[0][0].x, y: rasterPasses[0][0].y, z, f: p.plungeRate || 800 });
+    moves.push(...buildLeadIn(rasterPasses[0], p.topZ ?? 0, z, safeZ, leadInStyle, p.rampAngle || 3, leadInArcR, p.feedRate || 3000, p.plungeRate || 800, 'outside'));
     for (const pass of rasterPasses) {
       moves.push({ type: 'rapid', x: pass[0].x, y: pass[0].y, z: z + 0.2 });
       moves.push({ type: 'feed', x: pass[0].x, y: pass[0].y, z, f: (p.feedRate || 3000) * 0.5 });
@@ -512,9 +517,15 @@ function generateCircular(op, entities) {
       const step = toolR * 2 * stepover;
       const restR = p.restMachining && (p.previousToolDiameter || 0) > 0
         ? Math.max(toolR, radius - p.previousToolDiameter / 2) : toolR;
+      // leadInStyle controls entry: 'plunge' = straight down, anything else = helical.
+      // Falls back to legacy helicalEntry boolean when leadInStyle is not set.
+      const circLeadIn = p.leadInStyle ?? (p.helicalEntry !== false ? 'ramp' : 'plunge');
       if (restR > toolR) {
         moves.push({ type: 'rapid', x: center.x + restR, y: center.y, z: p.safeZ || 25 });
         moves.push({ type: 'feed',  x: center.x + restR, y: center.y, z, f: p.plungeRate || 400 });
+      } else if (circLeadIn === 'plunge') {
+        moves.push({ type: 'rapid', x: center.x, y: center.y, z: p.safeZ || 25 });
+        moves.push({ type: 'feed',  x: center.x, y: center.y, z, f: p.plungeRate || 400 });
       } else {
         moves.push({ type: 'rapid', x: center.x, y: center.y, z: p.safeZ || 25 });
         moves.push(...buildHelicalEntry(center, toolR * 0.5, p.topZ ?? 0, z, p.plungeRate || 400));
@@ -822,7 +833,7 @@ function buildTaperedPasses(selected, topZ, depth, safeZ, p, warnings, stockBoun
       toolKey:  tc.toolId ?? 'taper',
       toolDesc: `Taper bit — tip ⌀${tc.tipDia || 0.5}mm  ${tc.angle || 10}° half-angle`,
       rpm: tc.rpm || 24000,
-      moves: buildTaperTrace(selected, topZ, depth, safeZ, tc.feed || 1000, tc.plunge || 300, tcRad, cutSide, (tc.tipDia || 0) / 2, p.sharpCornerAngle ?? 180),
+      moves: buildTaperTrace(selected, topZ, depth, safeZ, tc.feed || 1000, tc.plunge || 300, tcRad, cutSide, (tc.tipDia || 0) / 2, p.sharpCornerAngle ?? 180, tc.leadInStyle || 'plunge', tc.leadInRampAngle || 3, tc.leadInArcRadius || 0),
     });
   }
 
@@ -1074,8 +1085,7 @@ function arcLengthRemap(depths, fromPts, toPts) {
 // sharpCornerAngle: only interior angles strictly below this value (degrees)
 //   trigger the bisector ramp.  180° = all convex corners (Fusion default);
 //   lower values (e.g. 170°) suppress ramps at near-straight tessellation joints.
-function buildTaperTrace(entities, topZ, depth, safeZ, feedRate, plungeRate, tcRad, cutSide, tipRadius = 0, sharpCornerAngle = 180) {
-  console.log('[buildTaperTrace] cutSide:', cutSide, '| isOutside:', cutSide === 'outside');
+function buildTaperTrace(entities, topZ, depth, safeZ, feedRate, plungeRate, tcRad, cutSide, tipRadius = 0, sharpCornerAngle = 180, leadInStyle = 'plunge', leadInRampAngle = 3, leadInArcRadius = 0) {
   const moves     = [];
   const tanAlpha  = Math.tan(tcRad);
   const floorZ    = topZ - depth;
@@ -1135,8 +1145,8 @@ function buildTaperTrace(entities, topZ, depth, safeZ, feedRate, plungeRate, tcR
       return topZ - liftDepth;
     });
 
-    moves.push({ type: 'rapid', x: pts[0].x, y: pts[0].y, z: safeZ });
-    moves.push({ type: 'feed',  x: pts[0].x, y: pts[0].y, z: zAtPt[0], f: plungeRate });
+    const arcR = leadInArcRadius || Math.max(0.5, tipRadius || 1);
+    moves.push(...buildLeadIn(pts, topZ, zAtPt[0], safeZ, leadInStyle, leadInRampAngle, arcR, feedRate, plungeRate, cutSide));
 
     for (let i = 0; i < n; i++) {
       const P    = pts[i];
@@ -1375,6 +1385,61 @@ function buildRampEntry(profile, topZ, targetZ, rampAngleDeg, feedRate, plungeRa
     z = newZ;
   }
   return moves;
+}
+
+// Quarter-circle tangential arc lead-in.  The tool approaches pts[0] along a 90° arc
+// that is tangent to the contour entry direction at pts[0].
+// cutSide 'inside' : arc center is to the left of T  (CCW sweep, approach from interior)
+// cutSide 'outside': arc center is to the right of T (CW  sweep, approach from exterior)
+function buildArcLeadIn(pts, targetZ, arcRadius, feedRate, safeZ, cutSide = 'outside') {
+  if (!pts || pts.length < 2) return [];
+  const P = pts[0], Q = pts[1];
+  const dx = Q.x - P.x, dy = Q.y - P.y;
+  const len = Math.hypot(dx, dy);
+  if (len < 1e-9) return [];
+  const tx = dx / len, ty = dy / len;
+  const R = Math.max(0.1, arcRadius);
+
+  // Arc center: right of T for outside, left for inside
+  const s = cutSide === 'inside' ? -1 : 1;
+  const cx = P.x + s * ty * R;
+  const cy = P.y - s * tx * R;
+
+  // Arc start A = center - R*T (90° before P in travel direction).
+  // Verified: at i=SEGS the tessellation lands exactly on P for both cut sides.
+  const ax = cx - tx * R;
+  const ay = cy - ty * R;
+
+  const startAngle = Math.atan2(ay - cy, ax - cx);
+  const sweepDir   = cutSide === 'inside' ? 1 : -1;  // +1 = CCW, -1 = CW
+  const SEGS = 12;
+
+  const moves = [];
+  moves.push({ type: 'rapid', x: ax, y: ay, z: safeZ });
+  moves.push({ type: 'feed',  x: ax, y: ay, z: targetZ, f: feedRate });
+  for (let i = 1; i <= SEGS; i++) {
+    const a = startAngle + sweepDir * (i / SEGS) * (Math.PI / 2);
+    moves.push({ type: 'feed', x: cx + R * Math.cos(a), y: cy + R * Math.sin(a), z: targetZ, f: feedRate });
+  }
+  return moves;
+}
+
+// Unified lead-in dispatcher.  Includes the approach rapid so callers do not need
+// a separate rapid before calling.  For 'ramp', buildRampEntry supplies its own
+// rapid to topZ+0.5; for 'arc' and 'plunge' a rapid to safeZ is emitted here.
+function buildLeadIn(pts, topZ, targetZ, safeZ, leadInStyle, rampAngle, arcRadius, feedRate, plungeRate, cutSide) {
+  if (!pts || pts.length < 1) return [];
+  if (pts.length < 2 || leadInStyle !== 'ramp' && leadInStyle !== 'arc') {
+    return [
+      { type: 'rapid', x: pts[0].x, y: pts[0].y, z: safeZ },
+      { type: 'feed',  x: pts[0].x, y: pts[0].y, z: targetZ, f: plungeRate },
+    ];
+  }
+  if (leadInStyle === 'ramp') {
+    return buildRampEntry(pts, topZ, targetZ, rampAngle || 3, feedRate, plungeRate);
+  }
+  // arc
+  return buildArcLeadIn(pts, targetZ, arcRadius || 3.175, feedRate, safeZ, cutSide || 'outside');
 }
 
 function buildHelicalEntry(center, radius, topZ, targetZ, plungeRate) {

@@ -289,13 +289,13 @@ export function useApp() {
 export function getDefaultParams(type) {
   const base = { safeZ: 25, topZ: 0, feedRate: 1500, plungeRate: 500, spindleRpm: 18000, totalDepth: 10, depthPerPass: 3 };
   switch (type) {
-    case 'contour':  return { ...base, toolDiameter: 6.35, cutSide: 'outside', stockToLeave: 0, rampEntry: true, rampAngle: 3, tabs: false, tabMode: 'auto', tabHeight: 1.5, tabWidth: 6, tabCount: 4, tabPositions: [], finishPass: false, finishStockToLeave: 0 };
-    case 'pocket':   return { ...base, toolDiameter: 6.35, stepover: 0.45, finishPass: true, finishAllowance: 0.2, startFromCenter: false };
-    case 'adaptive': return { ...base, toolDiameter: 6.35, stepover: 0.35, optimalLoad: 0.3, rampAngle: 2, depthPerPass: 5 };
-    case 'face':     return { ...base, toolDiameter: 25.4, stepover: 0.75, depthPerPass: 1, totalDepth: 3, feedRate: 3000, plungeRate: 800, angle: 0, stockLeft: 2, stockRight: 2, stockFront: 2, stockBack: 2 };
+    case 'contour':  return { ...base, toolDiameter: 6.35, cutSide: 'outside', stockToLeave: 0, leadInStyle: 'ramp', rampAngle: 3, leadInArcRadius: null, rampEntry: true, tabs: false, tabMode: 'auto', tabHeight: 1.5, tabWidth: 6, tabCount: 4, tabPositions: [], finishPass: false, finishStockToLeave: 0 };
+    case 'pocket':   return { ...base, toolDiameter: 6.35, stepover: 0.45, leadInStyle: 'plunge', rampAngle: 3, finishPass: true, finishAllowance: 0.2, startFromCenter: false };
+    case 'adaptive': return { ...base, toolDiameter: 6.35, stepover: 0.35, optimalLoad: 0.3, leadInStyle: 'ramp', rampAngle: 2, depthPerPass: 5 };
+    case 'face':     return { ...base, toolDiameter: 25.4, stepover: 0.75, depthPerPass: 1, totalDepth: 3, feedRate: 3000, plungeRate: 800, angle: 0, leadInStyle: 'plunge', rampAngle: 3, stockLeft: 2, stockRight: 2, stockFront: 2, stockBack: 2 };
     case 'drill':    return { safeZ: 25, topZ: 0, feedRate: 300, spindleRpm: 3000, totalDepth: 20, peckDepth: 0, dwellTime: 0, retractHeight: 2, chipBreak: false };
     case 'bore':     return { safeZ: 25, topZ: 0, feedRate: 600, plungeRate: 200, totalDepth: 20, toolDiameter: 6.35, helicalPitch: 1.5, direction: 'climb' };
-    case 'circular': return { ...base, toolDiameter: 6.35, stepover: 0.4, helicalEntry: true };
+    case 'circular': return { ...base, toolDiameter: 6.35, stepover: 0.4, leadInStyle: 'ramp', helicalEntry: true };
     case 'engrave':  return { safeZ: 25, topZ: 0, feedRate: 800, plungeRate: 300, depth: 1.5 };
     case 'trace':    return { safeZ: 25, topZ: 0, feedRate: 800, plungeRate: 300, depth: 0.5 };
     case 'slot':     return { ...base, toolDiameter: 6.35, rampEntry: true, rampAngle: 3 };

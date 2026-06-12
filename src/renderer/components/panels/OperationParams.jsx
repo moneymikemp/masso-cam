@@ -180,9 +180,16 @@ export default function OperationParams({ op, tools, onChange }) {
         <Field label="Stock to Leave" unit={distUnit}><NumInput value={toDisp(p.stockToLeave ?? 0)} onChange={v => set('stockToLeave', toMM(v))} step={isInch ? 0.002 : 0.05} /></Field>
         {commonDirection}
         {commonDepth}
-        <div style={S.section}>Entry</div>
-        <CheckField label="Ramp Entry" value={p.rampEntry} onChange={v => set('rampEntry', v)} />
-        {p.rampEntry && <Field label="Ramp Angle" unit="°"><NumInput value={p.rampAngle || 3} onChange={v => set('rampAngle', v)} min={0.5} max={30} /></Field>}
+        <div style={S.section}>Lead-in</div>
+        <Field label="Style">
+          <Sel value={p.leadInStyle ?? (p.rampEntry ? 'ramp' : 'plunge')} onChange={v => set('leadInStyle', v)} options={[['plunge','Plunge'],['ramp','Ramp'],['arc','Tangential Arc']]} />
+        </Field>
+        {(p.leadInStyle ?? (p.rampEntry ? 'ramp' : 'plunge')) === 'ramp' && (
+          <Field label="Ramp Angle" unit="°"><NumInput value={p.rampAngle || 3} onChange={v => set('rampAngle', v)} min={0.5} max={30} /></Field>
+        )}
+        {(p.leadInStyle ?? (p.rampEntry ? 'ramp' : 'plunge')) === 'arc' && (
+          <Field label="Arc Radius" unit={distUnit}><NumInput value={toDisp(p.leadInArcRadius ?? (p.toolDiameter || 6.35) / 2)} onChange={v => set('leadInArcRadius', toMM(v))} min={isInch ? 0.01 : 0.25} step={dStep} /></Field>
+        )}
         <div style={S.section}>Tabs</div>
         <CheckField label="Hold-down Tabs" value={p.tabs} onChange={v => set('tabs', v)} />
         {p.tabs && <>
@@ -250,6 +257,13 @@ export default function OperationParams({ op, tools, onChange }) {
         {p.restMachining && <Field label="Prev Tool Dia" unit={distUnit}><NumInput value={toDisp(p.previousToolDiameter ?? 12.7)} onChange={v => set('previousToolDiameter', toMM(v))} min={isInch ? 0.004 : 0.1} step={isInch ? 0.001 : 0.01} /></Field>}
         {commonDirection}
         {commonDepth}
+        <div style={S.section}>Lead-in</div>
+        <Field label="Style">
+          <Sel value={p.leadInStyle || 'plunge'} onChange={v => set('leadInStyle', v)} options={[['plunge','Plunge'],['ramp','Ramp']]} />
+        </Field>
+        {(p.leadInStyle || 'plunge') === 'ramp' && (
+          <Field label="Ramp Angle" unit="°"><NumInput value={p.rampAngle || 3} onChange={v => set('rampAngle', v)} min={0.5} max={30} /></Field>
+        )}
         <div style={S.section}>Finish</div>
         <CheckField label="Finish Pass" value={p.finishPass} onChange={v => set('finishPass', v)} />
         {p.finishPass && <Field label="Finish Allowance" unit={distUnit}><NumInput value={toDisp(p.finishAllowance ?? 0.2)} onChange={v => set('finishAllowance', toMM(v))} step={isInch ? 0.002 : 0.05} /></Field>}
@@ -271,8 +285,13 @@ export default function OperationParams({ op, tools, onChange }) {
         {p.restMachining && <Field label="Prev Tool Dia" unit={distUnit}><NumInput value={toDisp(p.previousToolDiameter ?? 12.7)} onChange={v => set('previousToolDiameter', toMM(v))} min={isInch ? 0.004 : 0.1} step={isInch ? 0.001 : 0.01} /></Field>}
         {commonDirection}
         {commonDepth}
-        <div style={S.section}>Entry</div>
-        <Field label="Ramp Angle" unit="°"><NumInput value={p.rampAngle || 2} onChange={v => set('rampAngle', v)} min={0.5} max={15} /></Field>
+        <div style={S.section}>Lead-in</div>
+        <Field label="Style">
+          <Sel value={p.leadInStyle || 'ramp'} onChange={v => set('leadInStyle', v)} options={[['plunge','Plunge'],['ramp','Ramp']]} />
+        </Field>
+        {(p.leadInStyle || 'ramp') === 'ramp' && (
+          <Field label="Ramp Angle" unit="°"><NumInput value={p.rampAngle || 2} onChange={v => set('rampAngle', v)} min={0.5} max={15} /></Field>
+        )}
         {commonSpeeds}
       </>}
 
@@ -288,6 +307,13 @@ export default function OperationParams({ op, tools, onChange }) {
         <div style={S.section}>Extension</div>
         <Field label="X+/-" unit={distUnit}><NumInput value={toDisp(p.stockLeft ?? 2)} onChange={v => set('stockLeft', toMM(v))} step={dStep} /></Field>
         <Field label="Y+/-" unit={distUnit}><NumInput value={toDisp(p.stockFront ?? 2)} onChange={v => set('stockFront', toMM(v))} step={dStep} /></Field>
+        <div style={S.section}>Lead-in</div>
+        <Field label="Style">
+          <Sel value={p.leadInStyle || 'plunge'} onChange={v => set('leadInStyle', v)} options={[['plunge','Plunge'],['ramp','Ramp']]} />
+        </Field>
+        {(p.leadInStyle || 'plunge') === 'ramp' && (
+          <Field label="Ramp Angle" unit="°"><NumInput value={p.rampAngle || 3} onChange={v => set('rampAngle', v)} min={0.5} max={30} /></Field>
+        )}
         {commonSpeeds}
       </>}
 
@@ -321,7 +347,9 @@ export default function OperationParams({ op, tools, onChange }) {
       {op.type === 'circular' && <>
         {toolSelect}
         <Field label="Stepover %"><NumInput value={Math.round((p.stepover || 0.4) * 100)} onChange={v => set('stepover', v / 100)} step={5} /></Field>
-        <CheckField label="Helical Entry" value={p.helicalEntry} onChange={v => set('helicalEntry', v)} />
+        <Field label="Lead-in">
+          <Sel value={p.leadInStyle ?? (p.helicalEntry !== false ? 'ramp' : 'plunge')} onChange={v => set('leadInStyle', v)} options={[['plunge','Plunge'],['ramp','Helical']]} />
+        </Field>
         {commonDirection}
         <div style={S.section}>Rest Machining</div>
         <CheckField label="Rest Machining" value={!!p.restMachining} onChange={v => set('restMachining', v)} />
@@ -481,6 +509,15 @@ export default function OperationParams({ op, tools, onChange }) {
             <Field label="Spindle RPM" unit="rpm"><NumInput value={tc.rpm || 24000} onChange={v => setPass('taperContour', 'rpm', v)} step={100} /></Field>
             <Field label="Feed Rate" unit={feedUnit}><NumInput value={toDisp(tc.feed ?? 1000)} onChange={v => setPass('taperContour', 'feed', toMM(v))} step={isInch ? 1 : 50} /></Field>
             <Field label="Plunge Rate" unit={feedUnit}><NumInput value={toDisp(tc.plunge ?? 300)} onChange={v => setPass('taperContour', 'plunge', toMM(v))} step={fStep} /></Field>
+            <Field label="Lead-in">
+              <Sel value={tc.leadInStyle || 'plunge'} onChange={v => setPass('taperContour', 'leadInStyle', v)} options={[['plunge','Plunge'],['ramp','Ramp'],['arc','Tangential Arc']]} />
+            </Field>
+            {tc.leadInStyle === 'ramp' && (
+              <Field label="Ramp Angle" unit="°"><NumInput value={tc.leadInRampAngle || 3} onChange={v => setPass('taperContour', 'leadInRampAngle', v)} min={0.5} max={30} /></Field>
+            )}
+            {tc.leadInStyle === 'arc' && (
+              <Field label="Arc Radius" unit={distUnit}><NumInput value={toDisp(tc.leadInArcRadius ?? Math.max(0.5, (tc.tipDia || 0.5)))} onChange={v => setPass('taperContour', 'leadInArcRadius', toMM(v))} min={isInch ? 0.01 : 0.25} step={dStep} /></Field>
+            )}
           </>}
 
           {/* ─ Pass 2: Taper Cleanup ─ */}
