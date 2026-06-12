@@ -26,6 +26,93 @@ export function generateToolpath(operation, entities, context = {}) {
   }
 }
 
+// ── Tab engine ────────────────────────────────────────────────────────────────
+
+// Returns evenly-spaced tab centre t-values [0,1) for automatic placement.
+export function computeAutoTabPositions(tabCount) {
+  return Array.from({ length: tabCount }, (_, i) => (i + 0.5) / tabCount);
+}
+
+// Insert hold-down tab Z-lifts into one Z-pass around a closed contour.
+//
+// Assumes the caller has already moved to pts[0] at cutZ (via plunge or ramp).
+// Returns feed moves covering pts[1]…pts[n-1]…close-to-pts[0], with vertical
+// lift/drop at each tab start/end position.
+//
+// tabTValues : t ∈ [0,1) — arc-fraction positions of tab centres
+// tabTopZ    : Z of tab top surface = floorZ + tabHeight  (must be > cutZ)
+function insertTabsIntoContour(contourPts, cutZ, tabTopZ, tabWidth, tabTValues, feedRate) {
+  const pts = stripClose([...contourPts]);
+  const n   = pts.length;
+
+  // Arc-length table: cumLen[i] = arc distance from pts[0] to pts[i % n]
+  const cumLen = [0];
+  for (let i = 0; i < n; i++) {
+    const a = pts[i], b = pts[(i + 1) % n];
+    cumLen.push(cumLen[i] + Math.hypot(b.x - a.x, b.y - a.y));
+  }
+  const totalLen = cumLen[n];
+
+  // Bail when tabs are not meaningful
+  if (totalLen < 1e-6 || !tabTValues.length || tabTopZ <= cutZ + 1e-6) {
+    const m = [];
+    for (let i = 1; i < n; i++) m.push({ type: 'feed', x: pts[i].x, y: pts[i].y, z: cutZ, f: feedRate });
+    m.push({ type: 'feed', x: pts[0].x, y: pts[0].y, z: cutZ, f: feedRate });
+    return m;
+  }
+
+  // Convert t-values → sorted entering/leaving arc-length events.
+  // Tabs that straddle the seam (s = 0 / totalLen) are nudged inward.
+  const tabBounds = [];
+  for (const t of tabTValues) {
+    const center = ((t % 1) + 1) % 1 * totalLen;
+    const s0     = Math.max(1e-9,            center - tabWidth / 2);
+    const s1     = Math.min(totalLen - 1e-9, center + tabWidth / 2);
+    if (s1 - s0 > 1e-6) {
+      tabBounds.push({ s: s0, entering: true  });
+      tabBounds.push({ s: s1, entering: false });
+    }
+  }
+  tabBounds.sort((a, b) => a.s - b.s);
+
+  // Interpolate XY at arc-length s
+  function ptAtS(s) {
+    if (s >= totalLen - 1e-9) return { ...pts[0] };
+    for (let i = 0; i < n; i++) {
+      if (s <= cumLen[i + 1] + 1e-9) {
+        const d = cumLen[i + 1] - cumLen[i];
+        const t = d > 1e-9 ? (s - cumLen[i]) / d : 0;
+        const a = pts[i], b = pts[(i + 1) % n];
+        return { x: a.x + t * (b.x - a.x), y: a.y + t * (b.y - a.y) };
+      }
+    }
+    return { ...pts[0] };
+  }
+
+  const moves = [];
+  let curZ  = cutZ;
+  let tbIdx = 0;
+
+  // Advance to arc-length s: first flush any tab events before s, then emit the point.
+  function walkTo(s) {
+    while (tbIdx < tabBounds.length && tabBounds[tbIdx].s <= s + 1e-9) {
+      const ev = tabBounds[tbIdx++];
+      const tp = ptAtS(ev.s);
+      moves.push({ type: 'feed', x: tp.x, y: tp.y, z: curZ,                    f: feedRate }); // arrive at transition XY
+      curZ = ev.entering ? tabTopZ : cutZ;
+      moves.push({ type: 'feed', x: tp.x, y: tp.y, z: curZ,                    f: feedRate }); // lift or drop
+    }
+    const pt = ptAtS(s);
+    moves.push({ type: 'feed', x: pt.x, y: pt.y, z: curZ, f: feedRate });
+  }
+
+  // Walk each segment endpoint from pts[1] to close (totalLen = pts[0])
+  for (let i = 1; i <= n; i++) {
+    walkTo(i < n ? cumLen[i] : totalLen);
+  }
+  return moves;
+}
+
 // ── Contour ───────────────────────────────────────────────────────────────────
 
 function generateContour(op, entities) {
@@ -34,11 +121,20 @@ function generateContour(op, entities) {
   const toolR = (p.toolDiameter || 6.35) / 2;
   // cutSide: 'outside' = expand outward (negative dist), 'inside' = shrink inward (positive dist)
   const cutSide = p.cutSide || 'outside';
-  const sign = cutSide === 'inside' ? 1 : cutSide === 'center' ? 0 : -1;
-  const offset = sign * (toolR + (p.stockToLeave || 0));
+  const sign    = cutSide === 'inside' ? 1 : cutSide === 'center' ? 0 : -1;
+  const offset  = sign * (toolR + (p.stockToLeave || 0));
 
   const selected = getSelectedEntities(entities, op.selectedIds);
-  if (!selected.length) return { moves: [], warnings: ['No entities selected'] };
+  if (!selected.length) return { moves: [], warnings: ['No entities selected'], contours: [] };
+
+  const tabsEnabled = !!(p.tabs && (p.tabWidth || 0) > 0 && (p.tabHeight || 0) > 0);
+  const floorZ      = (p.topZ ?? 0) - (p.totalDepth || 10);
+  const tabTopZ     = floorZ + (p.tabHeight || 1.5);        // height of material left at tab bottom
+  const tabTValues  = tabsEnabled
+    ? (p.tabMode === 'manual' ? (p.tabPositions || []) : computeAutoTabPositions(p.tabCount || 4))
+    : [];
+
+  const contours = []; // stored in toolpath result for canvas visualisation / manual snapping
 
   for (const entity of selected) {
     let profile = entityToProfile(entity);
@@ -56,6 +152,8 @@ function generateContour(op, entities) {
     }
     if (p.climb === false) contourPts = [...contourPts].reverse();
 
+    if (closed) contours.push(stripClose([...contourPts]));
+
     const passes = buildZPasses(p.topZ ?? 0, p.totalDepth || 10, p.depthPerPass || 3);
 
     for (const z of passes) {
@@ -67,16 +165,22 @@ function generateContour(op, entities) {
         moves.push({ type: 'feed', x: contourPts[0].x, y: contourPts[0].y, z, f: p.plungeRate || 500 });
       }
 
-      for (let i = 1; i < contourPts.length; i++) {
-        moves.push({ type: 'feed', x: contourPts[i].x, y: contourPts[i].y, z, f: p.feedRate || 1500 });
-      }
-      if (closed) {
-        moves.push({ type: 'feed', x: contourPts[0].x, y: contourPts[0].y, z, f: p.feedRate || 1500 });
+      const useTabsThisPass = tabsEnabled && closed && tabTValues.length > 0 && z < tabTopZ - 1e-6;
+
+      if (useTabsThisPass) {
+        moves.push(...insertTabsIntoContour(contourPts, z, tabTopZ, p.tabWidth || 6, tabTValues, p.feedRate || 1500));
+      } else {
+        for (let i = 1; i < contourPts.length; i++) {
+          moves.push({ type: 'feed', x: contourPts[i].x, y: contourPts[i].y, z, f: p.feedRate || 1500 });
+        }
+        if (closed) {
+          moves.push({ type: 'feed', x: contourPts[0].x, y: contourPts[0].y, z, f: p.feedRate || 1500 });
+        }
       }
     }
     moves.push({ type: 'rapid', x: contourPts[0].x, y: contourPts[0].y, z: p.safeZ || 25 });
   }
-  return { moves, warnings };
+  return { moves, warnings, contours, tabTValues };
 }
 
 // ── Pocket ────────────────────────────────────────────────────────────────────

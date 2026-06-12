@@ -1,6 +1,7 @@
 import React, { useRef, useEffect, useCallback, useState, useMemo } from 'react';
 import { useApp } from '../../store/AppContext';
 import { circleToPoints, arcToPoints, polylineToPoints } from '../../dxf/parser';
+import { computeAutoTabPositions } from '../../cam/toolpath';
 
 const COLORS = {
   background: '#1a1a2e',
@@ -33,10 +34,11 @@ export default function CAMCanvas() {
     statusTimerRef.current = setTimeout(() => setStatusMsg(''), 2000);
   }
 
-  const { viewport, entities, layers, operations, selectedEntityIds, hoveredEntityId, showToolpaths, showRapids, bounds, stockConfig } = state;
+  const { viewport, entities, layers, operations, selectedEntityIds, hoveredEntityId, showToolpaths, showRapids, bounds, stockConfig, tabPlacementActive, tabPlacementOpId } = state;
 
   const [zSliderPos, setZSliderPos] = useState(0); // 0 = all passes; 1..N = pass index
   const [isAnimating, setIsAnimating] = useState(false);
+  const draggingTabRef = useRef(null); // { opId, tabIdx } when dragging a manual tab marker
 
   // Unique Z levels where cutting happens, sorted shallowest → deepest.
   const zLevels = useMemo(() => {
@@ -334,7 +336,126 @@ export default function CAMCanvas() {
         const cutColor = op.type === 'drill' ? COLORS.toolpathPlunge : COLORS.toolpathCut;
         drawMoveList(ctx, op.toolpath.moves, cutColor);
       }
+      // Tab markers — drawn for ops that have tab params set, regardless of mode
+      if (op.params?.tabs && op.toolpath.contours?.length) {
+        drawTabMarkers(ctx, op);
+      }
     }
+    // When in manual placement mode, draw the active contour highlight even if
+    // no tab markers exist yet (so the user can see what they're snapping to).
+    if (tabPlacementActive && tabPlacementOpId) {
+      const op = operations.find(o => o.id === tabPlacementOpId);
+      if (op?.toolpath?.contours?.length) drawContourHighlight(ctx, op.toolpath.contours);
+    }
+  }
+
+  // Draws orange tab markers (span + end-caps + centre crossbar) for one operation.
+  function drawTabMarkers(ctx, op) {
+    const p = op.params;
+    const tValues = (p.tabMode === 'manual')
+      ? (p.tabPositions || [])
+      : computeAutoTabPositions(p.tabCount || 4);
+    if (!tValues.length) return;
+
+    for (const contour of op.toolpath.contours) {
+      if (!contour || contour.length < 2) continue;
+
+      // Arc-length table for this contour
+      const n = contour.length;
+      const cumLen = [0];
+      for (let i = 0; i < n; i++) {
+        const a = contour[i], b = contour[(i + 1) % n];
+        cumLen.push(cumLen[i] + Math.hypot(b.x - a.x, b.y - a.y));
+      }
+      const totalLen = cumLen[n];
+      if (totalLen < 1e-6) continue;
+
+      function ptAndTangentAtT(t) {
+        const s = ((t % 1) + 1) % 1 * totalLen;
+        for (let i = 0; i < n; i++) {
+          if (s <= cumLen[i + 1] + 1e-9) {
+            const d = cumLen[i + 1] - cumLen[i];
+            const frac = d > 1e-9 ? (s - cumLen[i]) / d : 0;
+            const a = contour[i], b = contour[(i + 1) % n];
+            return {
+              x: a.x + frac * (b.x - a.x),
+              y: a.y + frac * (b.y - a.y),
+              tx: d > 1e-9 ? (b.x - a.x) / d : 1,
+              ty: d > 1e-9 ? (b.y - a.y) / d : 0,
+            };
+          }
+        }
+        return { x: contour[0].x, y: contour[0].y, tx: 1, ty: 0 };
+      }
+
+      const tabWidth = p.tabWidth || 6;
+
+      for (const t of tValues) {
+        const { x, y, tx, ty } = ptAndTangentAtT(t);
+        const halfW = Math.min(tabWidth / 2, totalLen / 4);
+
+        // World-space tab span endpoints
+        const s0w = { x: x - tx * halfW, y: y - ty * halfW };
+        const s1w = { x: x + tx * halfW, y: y + ty * halfW };
+
+        const cs0 = w2c(s0w.x, s0w.y);
+        const cs1 = w2c(s1w.x, s1w.y);
+        const cc  = w2c(x, y);
+
+        // Screen-space normal (perpendicular to span, for end-caps and crossbar)
+        const sdx = cs1.x - cs0.x, sdy = cs1.y - cs0.y;
+        const slen = Math.hypot(sdx, sdy);
+        const snx = slen > 1e-9 ? -sdy / slen : 0;
+        const sny = slen > 1e-9 ?  sdx / slen : 1;
+
+        const CAP = 5, BAR = 6; // pixels
+
+        // Span line
+        ctx.strokeStyle = '#ff8844';
+        ctx.lineWidth = 3;
+        ctx.setLineDash([]);
+        ctx.beginPath();
+        ctx.moveTo(cs0.x, cs0.y);
+        ctx.lineTo(cs1.x, cs1.y);
+        ctx.stroke();
+
+        // End caps
+        ctx.strokeStyle = '#ffaa66';
+        ctx.lineWidth = 1.5;
+        for (const c of [cs0, cs1]) {
+          ctx.beginPath();
+          ctx.moveTo(c.x + snx * CAP, c.y + sny * CAP);
+          ctx.lineTo(c.x - snx * CAP, c.y - sny * CAP);
+          ctx.stroke();
+        }
+
+        // Centre crossbar
+        ctx.beginPath();
+        ctx.moveTo(cc.x + snx * BAR, cc.y + sny * BAR);
+        ctx.lineTo(cc.x - snx * BAR, cc.y - sny * BAR);
+        ctx.stroke();
+      }
+    }
+  }
+
+  // Draws a soft highlight around the contour(s) of the active placement operation.
+  function drawContourHighlight(ctx, contours) {
+    ctx.strokeStyle = 'rgba(153, 68, 255, 0.45)';
+    ctx.lineWidth = 3;
+    ctx.setLineDash([6, 4]);
+    for (const contour of contours) {
+      if (!contour.length) continue;
+      ctx.beginPath();
+      const first = w2c(contour[0].x, contour[0].y);
+      ctx.moveTo(first.x, first.y);
+      for (let i = 1; i < contour.length; i++) {
+        const p = w2c(contour[i].x, contour[i].y);
+        ctx.lineTo(p.x, p.y);
+      }
+      ctx.closePath();
+      ctx.stroke();
+    }
+    ctx.setLineDash([]);
   }
 
   function drawMouseCoords(ctx) {
@@ -346,20 +467,67 @@ export default function CAMCanvas() {
     ctx.fillText(`X: ${world.x.toFixed(3)}  Y: ${world.y.toFixed(3)}`, 14, ctx.canvas.height - 14);
   }
 
-  useEffect(() => { draw(); }, [entities, layers, operations, viewport, selectedEntityIds, hoveredEntityId, showToolpaths, showRapids, mousePos, stockConfig, zSliderPos, zLevels]);
+  useEffect(() => { draw(); }, [entities, layers, operations, viewport, selectedEntityIds, hoveredEntityId, showToolpaths, showRapids, mousePos, stockConfig, zSliderPos, zLevels, tabPlacementActive, tabPlacementOpId]);
 
   // Mouse events
   const onMouseDown = useCallback((e) => {
     if (e.button === 1 || (e.button === 0 && e.altKey)) {
       setIsPanning(true);
       setPanStart({ x: e.clientX - viewport.panX, y: e.clientY - viewport.panY });
-    } else if (e.button === 0) {
-      // Entity selection
-      const canvas = canvasRef.current;
-      const rect = canvas.getBoundingClientRect();
-      const cx = e.clientX - rect.left;
-      const cy = e.clientY - rect.top;
-      const world = c2w(cx, cy);
+      return;
+    }
+
+    const canvas = canvasRef.current;
+    const rect   = canvas.getBoundingClientRect();
+    const cx     = e.clientX - rect.left;
+    const cy     = e.clientY - rect.top;
+    const world  = c2w(cx, cy);
+
+    // ── Tab placement / drag mode ──────────────────────────────────────────
+    if (tabPlacementActive && tabPlacementOpId) {
+      const op = operations.find(o => o.id === tabPlacementOpId);
+      if (op?.toolpath?.contours?.length) {
+        const snapR = 20 / viewport.zoom; // world-space snap radius
+        const { t, x: sx, y: sy } = snapToContour(world, op.toolpath.contours);
+
+        if (e.button === 0) {
+          const existing = (op.params.tabPositions || []);
+          // Check if click is near an existing tab marker (for drag or remove)
+          let nearestIdx = -1, nearestDist = Infinity;
+          for (let i = 0; i < existing.length; i++) {
+            const ep = tabWorldPosForT(existing[i], op.toolpath.contours);
+            const d  = ep ? Math.hypot(ep.x - world.x, ep.y - world.y) : Infinity;
+            if (d < nearestDist) { nearestDist = d; nearestIdx = i; }
+          }
+          if (nearestIdx >= 0 && nearestDist < snapR) {
+            // Start dragging existing tab
+            draggingTabRef.current = { opId: tabPlacementOpId, tabIdx: nearestIdx };
+          } else {
+            // Place new tab
+            dispatch({ type: 'UPDATE_TAB_POSITIONS', payload: { opId: tabPlacementOpId, positions: [...existing, t] } });
+            showStatus(`Tab placed (${existing.length + 1} total)`);
+          }
+        } else if (e.button === 2) {
+          // Right-click: remove nearest tab
+          const existing = (op.params.tabPositions || []);
+          let nearestIdx = -1, nearestDist = Infinity;
+          for (let i = 0; i < existing.length; i++) {
+            const ep = tabWorldPosForT(existing[i], op.toolpath.contours);
+            const d  = ep ? Math.hypot(ep.x - world.x, ep.y - world.y) : Infinity;
+            if (d < nearestDist) { nearestDist = d; nearestIdx = i; }
+          }
+          if (nearestIdx >= 0 && nearestDist < snapR) {
+            const updated = existing.filter((_, i) => i !== nearestIdx);
+            dispatch({ type: 'UPDATE_TAB_POSITIONS', payload: { opId: tabPlacementOpId, positions: updated } });
+            showStatus(`Tab removed (${updated.length} remaining)`);
+          }
+        }
+        return; // don't fall through to entity selection
+      }
+    }
+
+    // ── Normal entity selection ────────────────────────────────────────────
+    if (e.button === 0) {
       const hit = findEntityAt(world, 10 / viewport.zoom);
       if (hit) {
         if (e.ctrlKey || e.shiftKey) {
@@ -371,25 +539,43 @@ export default function CAMCanvas() {
         dispatch({ type: 'SELECT_ENTITIES', payload: [] });
       }
     }
-  }, [viewport, c2w, dispatch]);
+  }, [viewport, c2w, dispatch, tabPlacementActive, tabPlacementOpId, operations]);
 
   const onMouseMove = useCallback((e) => {
     const canvas = canvasRef.current;
-    const rect = canvas.getBoundingClientRect();
-    const cx = e.clientX - rect.left;
-    const cy = e.clientY - rect.top;
+    const rect   = canvas.getBoundingClientRect();
+    const cx     = e.clientX - rect.left;
+    const cy     = e.clientY - rect.top;
     setMousePos({ x: cx, y: cy });
 
     if (isPanning) {
       dispatch({ type: 'SET_VIEWPORT', payload: { panX: e.clientX - panStart.x, panY: e.clientY - panStart.y } });
-    } else {
-      const world = c2w(cx, cy);
-      const hit = findEntityAt(world, 8 / viewport.zoom);
-      dispatch({ type: 'HOVER_ENTITY', payload: hit?.id || null });
+      return;
     }
-  }, [isPanning, panStart, viewport, c2w, dispatch]);
 
-  const onMouseUp = useCallback(() => setIsPanning(false), []);
+    // Drag an existing tab marker
+    if (draggingTabRef.current) {
+      const { opId, tabIdx } = draggingTabRef.current;
+      const op = operations.find(o => o.id === opId);
+      if (op?.toolpath?.contours?.length) {
+        const world = c2w(cx, cy);
+        const { t } = snapToContour(world, op.toolpath.contours);
+        const updated = [...(op.params.tabPositions || [])];
+        updated[tabIdx] = t;
+        dispatch({ type: 'UPDATE_TAB_POSITIONS', payload: { opId, positions: updated } });
+      }
+      return;
+    }
+
+    const world = c2w(cx, cy);
+    const hit = findEntityAt(world, 8 / viewport.zoom);
+    dispatch({ type: 'HOVER_ENTITY', payload: hit?.id || null });
+  }, [isPanning, panStart, viewport, c2w, dispatch, operations]);
+
+  const onMouseUp = useCallback(() => {
+    setIsPanning(false);
+    draggingTabRef.current = null;
+  }, []);
 
   const onDoubleClick = useCallback((e) => {
     const canvas = canvasRef.current;
@@ -488,12 +674,14 @@ export default function CAMCanvas() {
     <div style={{ position: 'relative', width: '100%', height: '100%', background: COLORS.background }}>
       <canvas
         ref={canvasRef}
-        style={{ width: '100%', height: '100%', display: 'block', cursor: isPanning ? 'grabbing' : 'crosshair' }}
+        style={{ width: '100%', height: '100%', display: 'block',
+          cursor: isPanning ? 'grabbing' : tabPlacementActive ? 'cell' : 'crosshair' }}
         onMouseDown={onMouseDown}
         onMouseMove={onMouseMove}
         onMouseUp={onMouseUp}
         onMouseLeave={onMouseUp}
         onDoubleClick={onDoubleClick}
+        onContextMenu={e => { if (tabPlacementActive) e.preventDefault(); }}
       />
       {/* Toolbar overlays */}
       <div style={{ position: 'absolute', top: 8, right: 8, display: 'flex', gap: 4 }}>
@@ -535,8 +723,70 @@ export default function CAMCanvas() {
           <div style={{ fontSize: 12, marginTop: 6, opacity: 0.6 }}>File → Import DXF  or  Ctrl+I</div>
         </div>
       )}
+      {tabPlacementActive && (
+        <div style={{ position: 'absolute', top: 8, left: '50%', transform: 'translateX(-50%)', background: 'rgba(80,20,120,0.88)', color: '#cc88ff', padding: '4px 14px', borderRadius: 4, fontSize: 11, pointerEvents: 'none', border: '1px solid rgba(153,68,255,0.5)', whiteSpace: 'nowrap' }}>
+          Left-click to place tab · Right-click to remove · Drag to reposition
+        </div>
+      )}
     </div>
   );
+}
+
+// Snap world-point to the nearest point on any of the given closed contour polygons.
+// Returns { t: 0..1, x, y } where t is the arc-fraction along the closest contour.
+function snapToContour(worldPt, contours) {
+  let bestDist = Infinity, bestT = 0, bestX = 0, bestY = 0;
+  for (const contour of contours) {
+    if (!contour || contour.length < 2) continue;
+    const n = contour.length;
+    const cumLen = [0];
+    for (let i = 0; i < n; i++) {
+      const a = contour[i], b = contour[(i + 1) % n];
+      cumLen.push(cumLen[i] + Math.hypot(b.x - a.x, b.y - a.y));
+    }
+    const totalLen = cumLen[n];
+    if (totalLen < 1e-6) continue;
+    for (let i = 0; i < n; i++) {
+      const a = contour[i], b = contour[(i + 1) % n];
+      const dx = b.x - a.x, dy = b.y - a.y;
+      const len = Math.hypot(dx, dy);
+      if (len < 1e-9) continue;
+      const t  = Math.max(0, Math.min(1, ((worldPt.x - a.x) * dx + (worldPt.y - a.y) * dy) / (len * len)));
+      const cx = a.x + t * dx, cy = a.y + t * dy;
+      const d  = Math.hypot(worldPt.x - cx, worldPt.y - cy);
+      if (d < bestDist) {
+        bestDist = d;
+        bestX = cx; bestY = cy;
+        bestT = (cumLen[i] + t * len) / totalLen;
+      }
+    }
+  }
+  return { t: bestT, x: bestX, y: bestY };
+}
+
+// Return the world-space XY of a tab at arc-fraction t on the given contours.
+function tabWorldPosForT(t, contours) {
+  for (const contour of contours) {
+    if (!contour || contour.length < 2) continue;
+    const n = contour.length;
+    const cumLen = [0];
+    for (let i = 0; i < n; i++) {
+      const a = contour[i], b = contour[(i + 1) % n];
+      cumLen.push(cumLen[i] + Math.hypot(b.x - a.x, b.y - a.y));
+    }
+    const totalLen = cumLen[n];
+    if (totalLen < 1e-6) continue;
+    const s = ((t % 1) + 1) % 1 * totalLen;
+    for (let i = 0; i < n; i++) {
+      if (s <= cumLen[i + 1] + 1e-9) {
+        const d    = cumLen[i + 1] - cumLen[i];
+        const frac = d > 1e-9 ? (s - cumLen[i]) / d : 0;
+        const a    = contour[i], b = contour[(i + 1) % n];
+        return { x: a.x + frac * (b.x - a.x), y: a.y + frac * (b.y - a.y) };
+      }
+    }
+  }
+  return null;
 }
 
 // Maps a pass index to a distinct hue: red (shallow) → blue (deep).

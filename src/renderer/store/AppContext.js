@@ -76,6 +76,8 @@ const initialState = {
   viewport: { zoom: 1, panX: 0, panY: 0 },
   showToolpaths: true,
   showRapids: true,
+  tabPlacementActive: false,
+  tabPlacementOpId: null,
   activePanelTab: 'operations',  // operations | tools | machine | gcode
   gcodeOutput: '',
   statusMessage: '',
@@ -199,6 +201,21 @@ function reducer(state, action) {
     case 'TOGGLE_TOOLPATHS':    return { ...state, showToolpaths: !state.showToolpaths };
     case 'TOGGLE_RAPIDS':       return { ...state, showRapids: !state.showRapids };
 
+    case 'SET_TAB_PLACEMENT':
+      return { ...state, tabPlacementActive: action.payload.active, tabPlacementOpId: action.payload.opId ?? null };
+
+    // Update tab positions WITHOUT clearing the toolpath so the contour outline
+    // stays visible for snap-to during manual placement.  The G-code becomes
+    // stale until the user clicks Calculate.
+    case 'UPDATE_TAB_POSITIONS': {
+      const operations = state.operations.map(op =>
+        op.id === action.payload.opId
+          ? { ...op, params: { ...op.params, tabPositions: action.payload.positions } }
+          : op
+      );
+      return { ...state, operations, dirty: true };
+    }
+
     // Project
     case 'SET_PROJECT_PATH': return { ...state, projectPath: action.payload };
     case 'SET_DIRTY':        return { ...state, dirty: action.payload };
@@ -272,7 +289,7 @@ export function useApp() {
 export function getDefaultParams(type) {
   const base = { safeZ: 25, topZ: 0, feedRate: 1500, plungeRate: 500, spindleRpm: 18000, totalDepth: 10, depthPerPass: 3 };
   switch (type) {
-    case 'contour':  return { ...base, toolDiameter: 6.35, cutSide: 'outside', stockToLeave: 0, rampEntry: true, rampAngle: 3, tabs: false, tabHeight: 3, tabWidth: 6, tabCount: 4, finishPass: false, finishStockToLeave: 0 };
+    case 'contour':  return { ...base, toolDiameter: 6.35, cutSide: 'outside', stockToLeave: 0, rampEntry: true, rampAngle: 3, tabs: false, tabMode: 'auto', tabHeight: 1.5, tabWidth: 6, tabCount: 4, tabPositions: [], finishPass: false, finishStockToLeave: 0 };
     case 'pocket':   return { ...base, toolDiameter: 6.35, stepover: 0.45, finishPass: true, finishAllowance: 0.2, startFromCenter: false };
     case 'adaptive': return { ...base, toolDiameter: 6.35, stepover: 0.35, optimalLoad: 0.3, rampAngle: 2, depthPerPass: 5 };
     case 'face':     return { ...base, toolDiameter: 25.4, stepover: 0.75, depthPerPass: 1, totalDepth: 3, feedRate: 3000, plungeRate: 800, angle: 0, stockLeft: 2, stockRight: 2, stockFront: 2, stockBack: 2 };

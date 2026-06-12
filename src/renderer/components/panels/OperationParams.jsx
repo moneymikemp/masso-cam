@@ -186,9 +186,49 @@ export default function OperationParams({ op, tools, onChange }) {
         <div style={S.section}>Tabs</div>
         <CheckField label="Hold-down Tabs" value={p.tabs} onChange={v => set('tabs', v)} />
         {p.tabs && <>
-          <Field label="Tab Count"><NumInput value={p.tabCount || 4} onChange={v => set('tabCount', v)} step={1} min={2} /></Field>
           <Field label="Tab Width" unit={distUnit}><NumInput value={toDisp(p.tabWidth ?? 6)} onChange={v => set('tabWidth', toMM(v))} min={isInch ? 0.04 : 1} step={dStep} /></Field>
-          <Field label="Tab Height" unit={distUnit}><NumInput value={toDisp(p.tabHeight ?? 3)} onChange={v => set('tabHeight', toMM(v))} min={isInch ? 0.02 : 0.5} step={dStep} /></Field>
+          <Field label="Tab Height" unit={distUnit}><NumInput value={toDisp(p.tabHeight ?? 1.5)} onChange={v => set('tabHeight', toMM(v))} min={isInch ? 0.005 : 0.1} step={dStep} /></Field>
+          <Field label="Placement">
+            <Sel value={p.tabMode || 'auto'} onChange={v => set('tabMode', v)} options={[['auto','Automatic'],['manual','Manual']]} />
+          </Field>
+          {(p.tabMode || 'auto') === 'auto' && (
+            <Field label="Tab Count"><NumInput value={p.tabCount || 4} onChange={v => set('tabCount', v)} step={1} min={2} max={12} /></Field>
+          )}
+          {p.tabMode === 'manual' && (() => {
+            const placed = (p.tabPositions || []).length;
+            const isActive = state.tabPlacementActive && state.tabPlacementOpId === op.id;
+            const noContour = !op.toolpath?.contours?.length;
+            return <>
+              <div style={S.row}>
+                <span style={S.label}>Tabs placed</span>
+                <span style={{ color: placed > 0 ? '#88ffaa' : '#666688', fontSize: 11 }}>{placed}</span>
+              </div>
+              {noContour && (
+                <div style={{ ...S.row, color: '#aa8844', fontSize: 10, paddingLeft: 4 }}>
+                  Calculate toolpath first to enable placement
+                </div>
+              )}
+              <Field label="">
+                <button
+                  disabled={noContour}
+                  style={{ ...S.input, cursor: noContour ? 'default' : 'pointer', textAlign: 'center', opacity: noContour ? 0.4 : 1,
+                    background: isActive ? '#2a1040' : '#0d0d20',
+                    borderColor: isActive ? '#9944ff' : '#2a2a50',
+                    color: isActive ? '#cc88ff' : '#ccccee' }}
+                  onClick={() => dispatch({ type: 'SET_TAB_PLACEMENT', payload: { active: !isActive, opId: isActive ? null : op.id } })}>
+                  {isActive ? 'Done Placing' : 'Place on Canvas'}
+                </button>
+              </Field>
+              {placed > 0 && (
+                <Field label="">
+                  <button style={{ ...S.input, cursor: 'pointer', textAlign: 'center', color: '#ff8888' }}
+                    onClick={() => dispatch({ type: 'UPDATE_TAB_POSITIONS', payload: { opId: op.id, positions: [] } })}>
+                    Clear All Tabs
+                  </button>
+                </Field>
+              )}
+            </>;
+          })()}
         </>}
         <div style={S.section}>Finish</div>
         <CheckField label="Finish Pass" value={p.finishPass} onChange={v => set('finishPass', v)} />
