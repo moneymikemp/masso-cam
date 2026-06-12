@@ -45,6 +45,27 @@ export function clipPolygonToRegion(ringPts, boundaryPts) {
     .map(p => isClockwise(p) ? [...p].reverse() : p);
 }
 
+// Subtract clipPaths from subjectPts using Clipper boolean difference.
+// Returns array of CCW polygons representing subject MINUS all clipPaths.
+// Hole boundaries in Clipper output (CW) are reversed to CCW so callers can
+// iterate all results uniformly — each is a valid ring to trace.
+export function differencePolygons(subjectPts, clipPtsList) {
+  const subject = stripClose([...subjectPts]);
+  if (subject.length < 3) return [];
+  const c = new ClipperLib.Clipper();
+  c.AddPath(toClipper(subject), ClipperLib.PolyType.ptSubject, true);
+  for (const clipPts of clipPtsList) {
+    const clip = stripClose([...clipPts]);
+    if (clip.length >= 3) c.AddPath(toClipper(clip), ClipperLib.PolyType.ptClip, true);
+  }
+  const solution = new ClipperLib.Paths();
+  c.Execute(ClipperLib.ClipType.ctDifference, solution);
+  return solution
+    .map(fromClipper)
+    .filter(p => p.length >= 3)
+    .map(p => isClockwise(p) ? [...p].reverse() : p);
+}
+
 // Offset a closed polygon.
 // positive distance = shrink inward; negative = expand outward.
 // Returns result polygons (CCW, no closing point) sorted by area descending.

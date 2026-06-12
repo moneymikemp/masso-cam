@@ -704,6 +704,12 @@ export default function OperationParams({ op, tools, operations = [], onChange }
         <Field label="Max Depth" unit={distUnit}>
           <NumInput value={toDisp(p.maxDepth ?? 15)} onChange={v => set('maxDepth', toMM(v))} min={isInch ? 0.004 : 0.1} step={dStep} />
         </Field>
+        <Field label="Depth/Pass" unit={distUnit}>
+          <NumInput value={toDisp(p.depthPerPass ?? (p.maxDepth ?? 15))} onChange={v => set('depthPerPass', toMM(v))} min={isInch ? 0.001 : 0.01} step={dStep} />
+        </Field>
+        <Field label="Num Passes">
+          <NumInput value={Math.max(1, Math.ceil((p.maxDepth ?? 15) / (p.depthPerPass ?? (p.maxDepth ?? 15))))} onChange={v => { const n = Math.max(1, Math.round(v)); set('depthPerPass', (p.maxDepth ?? 15) / n); }} min={1} step={1} />
+        </Field>
         <Field label="Flat Depth" unit={distUnit}>
           <NumInput value={toDisp(p.flatDepth ?? 0)} onChange={v => set('flatDepth', toMM(v))} min={0} step={dStep} />
         </Field>

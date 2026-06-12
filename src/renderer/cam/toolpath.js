@@ -1,6 +1,6 @@
 // CAM Toolpath Engine - all 2.5D operations
 
-import { offsetPolyline, generatePocketOffsets, generateRestMachiningPasses, generateRasterPasses, polygonArea, isClockwise, clipPolygonToRegion, stripClose, pointInPolygon } from './offset.js';
+import { offsetPolyline, generatePocketOffsets, generateRestMachiningPasses, generateRasterPasses, polygonArea, isClockwise, clipPolygonToRegion, stripClose, pointInPolygon, differencePolygons } from './offset.js';
 import { circleToPoints, arcToPoints, polylineToPoints } from '../dxf/parser.js';
 
 // ── Entry point ───────────────────────────────────────────────────────────────
@@ -793,66 +793,106 @@ function generateVCarve(op, entities, context = {}) {
   const topZ         = p.topZ ?? 0;
   const feedRate     = p.feedRate ?? 1500;
   const plungeRate   = p.plungeRate ?? 300;
+  const depthPerPass = Math.max(0.01, p.depthPerPass ?? maxDepth); // default = single pass
 
   const selected = getSelectedEntities(entities, op.selectedIds);
   if (!selected.length) return { moves: [], warnings: ['No entities selected'] };
 
-  const profiles = buildPocketProfiles(selected);
-  if (!profiles.length) return { moves: [], warnings: ['No closed profiles found — select a closed shape'] };
+  const allProfiles = buildPocketProfiles(selected);
+  if (!allProfiles.length) return { moves: [], warnings: ['No closed profiles found — select a closed shape'] };
+
+  // Sort by area descending: largest polygon = outer boundary; smaller ones inside
+  // it are holes (counter-spaces in letters like 'a', 'd', 'e', 'o').
+  allProfiles.sort((a, b) => Math.abs(polygonArea(b)) - Math.abs(polygonArea(a)));
+
+  // Group into shape groups: each outer profile collects any profiles whose
+  // points lie inside it as holes.  Unplaced profiles start new groups.
+  const shapeGroups = [];
+  for (const rawProfile of allProfiles) {
+    const profile = isClockwise(rawProfile) ? [...rawProfile].reverse() : rawProfile;
+    let placed = false;
+    for (const group of shapeGroups) {
+      if (profile.some(pt => pointInPolygon(pt, group.outer))) {
+        group.holes.push(profile);
+        placed = true;
+        break;
+      }
+    }
+    if (!placed) shapeGroups.push({ outer: profile, holes: [] });
+  }
 
   // XY spacing between successive offset rings.  0.2 mm gives smooth depth
-  // transitions; the loop always terminates once rings collapse or maxDepth is
-  // reached and subsequent rings also produce no new geometry.
+  // transitions; the loop always terminates once the valid region collapses.
   const XY_STEP = 0.2;
+  const numPasses = Math.max(1, Math.ceil(maxDepth / depthPerPass));
 
-  for (const rawProfile of profiles) {
-    const stripped = stripClose([...rawProfile]);
-    if (stripped.length < 3) continue;
-    // Normalise to CCW so a positive offset always shrinks inward.
-    const profile = isClockwise(stripped) ? [...stripped].reverse() : stripped;
-
-    if (Math.abs(polygonArea(profile)) < XY_STEP * XY_STEP * 4) {
+  for (const { outer, holes } of shapeGroups) {
+    if (Math.abs(polygonArea(outer)) < XY_STEP * XY_STEP * 4) {
       warnings.push('Profile too small to V-carve');
       continue;
     }
 
     let anyMoves = false;
-    let prevDepth = -Infinity; // track to avoid emitting identical depth rings at maxDepth
 
-    for (let i = 1; i <= 5000; i++) {
-      const dist = i * XY_STEP;
+    for (let pass = 1; pass <= numPasses; pass++) {
+      const passMaxH = Math.min(depthPerPass * pass, maxDepth);
+      const prevMaxH = depthPerPass * (pass - 1);
 
-      // Depth the V-tip must reach so its cutting radius equals dist.
-      const rawH = dist <= tipRadius ? 0 : (dist - tipRadius) / tanAngle;
-      const h    = Math.max(flatDepth, Math.min(maxDepth, rawH));
+      // Jump directly to the first ring where this pass needs to cut.
+      const minD   = Math.max(XY_STEP, prevMaxH * tanAngle + tipRadius);
+      const startI = Math.max(1, Math.ceil(minD / XY_STEP));
 
-      // Once we have passed the depth cap and are just repeating the same max depth
-      // pass, emit one more ring at maxDepth then stop — the interior is cleared.
-      const atCap = h >= maxDepth && prevDepth >= maxDepth;
+      let prevHThis = -Infinity;
 
-      const rings = offsetPolyline(profile, dist, true);
-      if (!rings || rings.length === 0) break;   // all rings collapsed → medial axis passed
+      for (let i = startI; i <= 5000; i++) {
+        const d      = i * XY_STEP;
+        const rawH   = d <= tipRadius ? 0 : (d - tipRadius) / tanAngle;
+        const hFinal = Math.max(flatDepth, Math.min(maxDepth, rawH));
 
-      let gotAny = false;
-      for (const ring of rings) {
-        if (!ring || ring.length < 3) continue;
-        const pts = stripClose([...ring]);
-        if (pts.length < 3) continue;
+        // Skip rings already cut at full final depth by a previous pass.
+        if (hFinal <= prevMaxH) continue;
 
-        gotAny = true;
-        anyMoves = true;
-        const z = topZ - h;
+        const hThis = Math.min(passMaxH, hFinal);
 
-        moves.push({ type: 'rapid', x: pts[0].x, y: pts[0].y, z: safeZ });
-        moves.push({ type: 'feed',  x: pts[0].x, y: pts[0].y, z, f: plungeRate });
-        for (let j = 1; j < pts.length; j++) {
-          moves.push({ type: 'feed', x: pts[j].x, y: pts[j].y, z, f: feedRate });
+        // Shrink outer boundary inward by d — points at distance ≥ d from outer.
+        const shrunkOuter = offsetPolyline(outer, d, true);
+        if (!shrunkOuter || shrunkOuter.length === 0) break; // shape fully collapsed
+
+        // Grow each hole outward by d — exclusion zone around each hole boundary.
+        // differencePolygons subtracts these from each shrunk ring; Clipper also
+        // returns the hole inner boundary as a CW path (reversed → CCW by
+        // differencePolygons), so both sides of the groove are traced automatically.
+        const expandedHoles = holes.flatMap(hole => offsetPolyline(hole, -d, true));
+
+        const validRings = expandedHoles.length > 0
+          ? shrunkOuter.flatMap(r => differencePolygons(r, expandedHoles))
+          : shrunkOuter;
+
+        if (!validRings || validRings.length === 0) break; // valid region collapsed
+
+        const atCap = hThis >= passMaxH && prevHThis >= passMaxH;
+        let gotAny = false;
+
+        for (const ring of validRings) {
+          if (!ring || ring.length < 3) continue;
+          const pts = stripClose([...ring]);
+          if (pts.length < 3) continue;
+
+          gotAny = true;
+          anyMoves = true;
+          const z = topZ - hThis;
+
+          moves.push({ type: 'rapid', x: pts[0].x, y: pts[0].y, z: safeZ });
+          moves.push({ type: 'feed',  x: pts[0].x, y: pts[0].y, z, f: plungeRate });
+          for (let j = 1; j < pts.length; j++) {
+            moves.push({ type: 'feed', x: pts[j].x, y: pts[j].y, z, f: feedRate });
+          }
+          moves.push({ type: 'feed', x: pts[0].x, y: pts[0].y, z, f: feedRate });
         }
-        moves.push({ type: 'feed', x: pts[0].x, y: pts[0].y, z, f: feedRate }); // close
-      }
 
-      if (!gotAny || atCap) break;
-      prevDepth = h;
+        if (!gotAny || atCap) break;
+        prevHThis = hThis;
+      }
     }
 
     if (!anyMoves) {
