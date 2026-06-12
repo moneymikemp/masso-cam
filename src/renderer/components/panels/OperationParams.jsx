@@ -259,10 +259,13 @@ export default function OperationParams({ op, tools, onChange }) {
         {commonDepth}
         <div style={S.section}>Lead-in</div>
         <Field label="Style">
-          <Sel value={p.leadInStyle || 'plunge'} onChange={v => set('leadInStyle', v)} options={[['plunge','Plunge'],['ramp','Ramp']]} />
+          <Sel value={p.leadInStyle || 'plunge'} onChange={v => set('leadInStyle', v)} options={[['plunge','Plunge'],['ramp','Ramp'],['helical','Helical']]} />
         </Field>
         {(p.leadInStyle || 'plunge') === 'ramp' && (
           <Field label="Ramp Angle" unit="°"><NumInput value={p.rampAngle || 3} onChange={v => set('rampAngle', v)} min={0.5} max={30} /></Field>
+        )}
+        {(p.leadInStyle || 'plunge') === 'helical' && (
+          <Field label="Helix Radius" unit={distUnit}><NumInput value={toDisp(p.leadInArcRadius ?? (p.toolDiameter || 6.35) / 4)} onChange={v => set('leadInArcRadius', toMM(v))} min={isInch ? 0.01 : 0.25} step={dStep} /></Field>
         )}
         <div style={S.section}>Finish</div>
         <CheckField label="Finish Pass" value={p.finishPass} onChange={v => set('finishPass', v)} />
@@ -287,10 +290,13 @@ export default function OperationParams({ op, tools, onChange }) {
         {commonDepth}
         <div style={S.section}>Lead-in</div>
         <Field label="Style">
-          <Sel value={p.leadInStyle || 'ramp'} onChange={v => set('leadInStyle', v)} options={[['plunge','Plunge'],['ramp','Ramp']]} />
+          <Sel value={p.leadInStyle || 'ramp'} onChange={v => set('leadInStyle', v)} options={[['plunge','Plunge'],['ramp','Ramp'],['helical','Helical']]} />
         </Field>
         {(p.leadInStyle || 'ramp') === 'ramp' && (
           <Field label="Ramp Angle" unit="°"><NumInput value={p.rampAngle || 2} onChange={v => set('rampAngle', v)} min={0.5} max={15} /></Field>
+        )}
+        {(p.leadInStyle || 'ramp') === 'helical' && (
+          <Field label="Helix Radius" unit={distUnit}><NumInput value={toDisp(p.leadInArcRadius ?? (p.toolDiameter || 6.35) / 4)} onChange={v => set('leadInArcRadius', toMM(v))} min={isInch ? 0.01 : 0.25} step={dStep} /></Field>
         )}
         {commonSpeeds}
       </>}
@@ -561,6 +567,12 @@ export default function OperationParams({ op, tools, onChange }) {
             <Field label="Wall Stock" unit={distUnit}><NumInput value={toDisp(de.wallStock ?? 0.254)} onChange={v => setPass('detailEndmill', 'wallStock', toMM(v))} min={0} step={isInch ? 0.001 : 0.02} /></Field>
             <CheckField label="Rest Machining" value={!!de.restMachining} onChange={v => setPass('detailEndmill', 'restMachining', v)} />
             {de.restMachining && <Field label="Prev Tool Dia" unit={distUnit}><NumInput value={toDisp(de.prevDiameter ?? 6.35)} onChange={v => setPass('detailEndmill', 'prevDiameter', toMM(v))} min={isInch ? 0.004 : 0.1} step={isInch ? 0.001 : 0.01} /></Field>}
+            <Field label="Lead-in">
+              <Sel value={de.leadInStyle || 'plunge'} onChange={v => setPass('detailEndmill', 'leadInStyle', v)} options={[['plunge','Plunge'],['helical','Helical']]} />
+            </Field>
+            {de.leadInStyle === 'helical' && (
+              <Field label="Helix Radius" unit={distUnit}><NumInput value={toDisp(de.leadInArcRadius ?? (de.diameter || 1.5875) / 4)} onChange={v => setPass('detailEndmill', 'leadInArcRadius', toMM(v))} min={isInch ? 0.01 : 0.25} step={dStep} /></Field>
+            )}
           </>}
 
           {/* ─ Pass 4: Bulk Endmill ─ */}
@@ -581,6 +593,12 @@ export default function OperationParams({ op, tools, onChange }) {
             <Field label="Wall Stock" unit={distUnit}><NumInput value={toDisp(be.wallStock ?? 0.254)} onChange={v => setPass('bulkEndmill', 'wallStock', toMM(v))} min={0} step={isInch ? 0.001 : 0.02} /></Field>
             <CheckField label="Rest Machining" value={!!be.restMachining} onChange={v => setPass('bulkEndmill', 'restMachining', v)} />
             {be.restMachining && <Field label="Prev Tool Dia" unit={distUnit}><NumInput value={toDisp(be.prevDiameter ?? 12.7)} onChange={v => setPass('bulkEndmill', 'prevDiameter', toMM(v))} min={isInch ? 0.004 : 0.1} step={isInch ? 0.001 : 0.01} /></Field>}
+            <Field label="Lead-in">
+              <Sel value={be.leadInStyle || 'plunge'} onChange={v => setPass('bulkEndmill', 'leadInStyle', v)} options={[['plunge','Plunge'],['helical','Helical']]} />
+            </Field>
+            {be.leadInStyle === 'helical' && (
+              <Field label="Helix Radius" unit={distUnit}><NumInput value={toDisp(be.leadInArcRadius ?? (be.diameter || 6.35) / 4)} onChange={v => setPass('bulkEndmill', 'leadInArcRadius', toMM(v))} min={isInch ? 0.01 : 0.25} step={dStep} /></Field>
+            )}
           </>}
 
           <div style={S.section}>Cut Side</div>

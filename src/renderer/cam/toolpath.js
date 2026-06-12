@@ -195,7 +195,7 @@ function generatePocket(op, entities, context = {}) {
   const feedRate = p.feedRate || 1500;
   const plungeRate = p.plungeRate || 500;
   const leadInStyle = p.leadInStyle || 'plunge';
-  const leadInArcR  = p.leadInArcRadius || toolR;
+  const leadInArcR  = p.leadInArcRadius != null ? p.leadInArcRadius : (leadInStyle === 'helical' ? toolR * 0.5 : toolR);
 
   const selected = getSelectedEntities(entities, op.selectedIds);
   if (!selected.length) return { moves: [], warnings: ['No entities selected'] };
@@ -317,7 +317,7 @@ function generateAdaptive(op, entities, context = {}) {
   const stepover = p.stepover || 0.35;
   const safeZ = p.safeZ || 25;
   const leadInStyle = p.leadInStyle || 'ramp';
-  const leadInArcR  = p.leadInArcRadius || toolR;
+  const leadInArcR  = p.leadInArcRadius != null ? p.leadInArcRadius : (leadInStyle === 'helical' ? toolR * 0.5 : toolR);
 
   warnings.push('Adaptive: trochoidal approximation');
 
@@ -864,7 +864,7 @@ function buildTaperedPasses(selected, topZ, depth, safeZ, p, warnings, stockBoun
       rpm: de.rpm || 18000,
       moves: clearFn(selected, topZ, depth, safeZ,
         deR, de.diameter || 1.5875, de.wallStock || 0.254, de.feed || 800, de.plunge || 300,
-        wallRad, 'Detail Endmill', warnings, dePrevR, stockBound),
+        wallRad, 'Detail Endmill', warnings, dePrevR, stockBound, de.leadInStyle || 'plunge', de.leadInArcRadius || 0),
     });
   }
 
@@ -878,7 +878,7 @@ function buildTaperedPasses(selected, topZ, depth, safeZ, p, warnings, stockBoun
       rpm: be.rpm || 18000,
       moves: clearFn(selected, topZ, depth, safeZ,
         beR, be.diameter || 6.35, be.wallStock || 0.254, be.feed || 1500, be.plunge || 500,
-        wallRad, 'Bulk Endmill', warnings, bePrevR, stockBound),
+        wallRad, 'Bulk Endmill', warnings, bePrevR, stockBound, be.leadInStyle || 'plunge', be.leadInArcRadius || 0),
     });
   }
 
@@ -1207,7 +1207,7 @@ function buildTaperTrace(entities, topZ, depth, safeZ, feedRate, plungeRate, tcR
 //   depthPerPass — Z step between levels (pass full depth for single-level)
 //   wallStock   — explicit standoff added on top of the taper geometry clearance
 //   taperRad    — half-angle (rad) of the wall that defines clearance geometry
-function buildPocketClearing(entities, topZ, depth, safeZ, toolR, depthPerPass, wallStock, feedRate, plungeRate, taperRad, passLabel, warnings, prevToolR = 0, stockBound = null) {
+function buildPocketClearing(entities, topZ, depth, safeZ, toolR, depthPerPass, wallStock, feedRate, plungeRate, taperRad, passLabel, warnings, prevToolR = 0, stockBound = null, leadInStyle = 'plunge', leadInArcRadius = 0) {
   const moves     = [];
   const wallLeave = depth * Math.tan(taperRad) + wallStock;
   const inset     = toolR + wallLeave;
@@ -1252,9 +1252,8 @@ function buildPocketClearing(entities, topZ, depth, safeZ, toolR, depthPerPass, 
     return moves;
   }
 
-  const startPt = clearPasses[0][0];
-  moves.push({ type: 'rapid', x: startPt.x, y: startPt.y, z: safeZ });
-  moves.push({ type: 'feed',  x: startPt.x, y: startPt.y, z: zPasses[0], f: plungeRate });
+  const helixR = leadInArcRadius || toolR * 0.5;
+  moves.push(...buildLeadIn(clearPasses[0], topZ, zPasses[0], safeZ, leadInStyle, 3, helixR, feedRate, plungeRate, 'inside'));
 
   for (const z of zPasses) {
     for (const pass of clearPasses) {
@@ -1279,7 +1278,7 @@ function buildPocketClearing(entities, topZ, depth, safeZ, toolR, depthPerPass, 
 //
 // Same parameter signature as buildPocketClearing so buildTaperedPasses can
 // dispatch between the two with a single function reference.
-function buildPlugClearing(entities, topZ, depth, safeZ, toolR, depthPerPass, wallStock, feedRate, plungeRate, taperRad, passLabel, warnings, prevToolR = 0, stockBound = null) {
+function buildPlugClearing(entities, topZ, depth, safeZ, toolR, depthPerPass, wallStock, feedRate, plungeRate, taperRad, passLabel, warnings, prevToolR = 0, stockBound = null, leadInStyle = 'plunge', leadInArcRadius = 0) {
   const moves     = [];
   const wallLeave = depth * Math.tan(taperRad) + wallStock;
   const outset    = toolR + wallLeave;
@@ -1337,9 +1336,8 @@ function buildPlugClearing(entities, topZ, depth, safeZ, toolR, depthPerPass, wa
     return moves;
   }
 
-  const startPt = clearPasses[0][0];
-  moves.push({ type: 'rapid', x: startPt.x, y: startPt.y, z: safeZ });
-  moves.push({ type: 'feed',  x: startPt.x, y: startPt.y, z: zPasses[0], f: plungeRate });
+  const helixR = leadInArcRadius || toolR * 0.5;
+  moves.push(...buildLeadIn(clearPasses[0], topZ, zPasses[0], safeZ, leadInStyle, 3, helixR, feedRate, plungeRate, 'outside'));
 
   for (const z of zPasses) {
     for (const pass of clearPasses) {
@@ -1425,21 +1423,29 @@ function buildArcLeadIn(pts, targetZ, arcRadius, feedRate, safeZ, cutSide = 'out
 }
 
 // Unified lead-in dispatcher.  Includes the approach rapid so callers do not need
-// a separate rapid before calling.  For 'ramp', buildRampEntry supplies its own
-// rapid to topZ+0.5; for 'arc' and 'plunge' a rapid to safeZ is emitted here.
+// a separate rapid before calling.
+// arcRadius doubles as the helix radius for 'helical' style.
 function buildLeadIn(pts, topZ, targetZ, safeZ, leadInStyle, rampAngle, arcRadius, feedRate, plungeRate, cutSide) {
   if (!pts || pts.length < 1) return [];
-  if (pts.length < 2 || leadInStyle !== 'ramp' && leadInStyle !== 'arc') {
-    return [
-      { type: 'rapid', x: pts[0].x, y: pts[0].y, z: safeZ },
-      { type: 'feed',  x: pts[0].x, y: pts[0].y, z: targetZ, f: plungeRate },
-    ];
-  }
-  if (leadInStyle === 'ramp') {
+  if (leadInStyle === 'ramp' && pts.length >= 2) {
     return buildRampEntry(pts, topZ, targetZ, rampAngle || 3, feedRate, plungeRate);
   }
-  // arc
-  return buildArcLeadIn(pts, targetZ, arcRadius || 3.175, feedRate, safeZ, cutSide || 'outside');
+  if (leadInStyle === 'arc' && pts.length >= 2) {
+    return buildArcLeadIn(pts, targetZ, arcRadius || 3.175, feedRate, safeZ, cutSide || 'outside');
+  }
+  if (leadInStyle === 'helical') {
+    const helixR = Math.max(0.1, arcRadius || 0.5);
+    const center = { x: pts[0].x, y: pts[0].y };
+    return [
+      { type: 'rapid', x: center.x, y: center.y, z: safeZ },
+      ...buildHelicalEntry(center, helixR, topZ, targetZ, plungeRate),
+    ];
+  }
+  // plunge (default)
+  return [
+    { type: 'rapid', x: pts[0].x, y: pts[0].y, z: safeZ },
+    { type: 'feed',  x: pts[0].x, y: pts[0].y, z: targetZ, f: plungeRate },
+  ];
 }
 
 function buildHelicalEntry(center, radius, topZ, targetZ, plungeRate) {
