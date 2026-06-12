@@ -22,6 +22,7 @@ export function generateToolpath(operation, entities, context = {}) {
     case 'thread':       return generateThread(operation, entities);
     case 'taperedpocket': return generateTaperedPocket(operation, entities, context);
     case 'taperedplug':   return generateTaperedPlug(operation, entities, context);
+    case 'vcarve':        return generateVCarve(operation, entities, context);
     default:             return { moves: [], warnings: ['Unknown operation: ' + type] };
   }
 }
@@ -762,6 +763,110 @@ function mirrorEntitiesX(entities) {
     vertices: pts.map(pt => ({ x: pt.x + dx, y: pt.y + dy })),
     closed: true,
   }));
+}
+
+// ── V-Carve ───────────────────────────────────────────────────────────────────
+//
+// Generates inward-offset concentric passes, each at the depth dictated by the
+// V-bit geometry.  For a V-bit with half-angle α and tip radius r, a pass at
+// offset distance d from the nearest boundary cuts at:
+//
+//   h = clamp( (d - r) / tan(α) ,  flatDepth, maxDepth )
+//
+// This is identical to the Tapered Pocket per-vertex depth formula, applied to
+// every ring instead of every contour vertex.  Rings are generated with the
+// same Clipper offsetPolyline used by 2D Pocket.
+//
+// Move count is bounded by (tipRadius + maxDepth·tan(α)) / XY_STEP rings, so
+// even large shapes with deep settings stay within a few hundred passes.
+function generateVCarve(op, entities, context = {}) {
+  const moves = [], warnings = [];
+  const p = op.params;
+
+  const halfAngleDeg = Math.max(1, Math.min(89, p.halfAngle ?? 15));
+  const halfAngleRad = halfAngleDeg * Math.PI / 180;
+  const tanAngle     = Math.tan(halfAngleRad);
+  const tipRadius    = (p.tipDiameter ?? 0) / 2;
+  const maxDepth     = Math.abs(p.maxDepth ?? 15);
+  const flatDepth    = Math.max(0, Math.min(maxDepth, p.flatDepth ?? 0));
+  const safeZ        = p.safeZ ?? 25;
+  const topZ         = p.topZ ?? 0;
+  const feedRate     = p.feedRate ?? 1500;
+  const plungeRate   = p.plungeRate ?? 300;
+
+  const selected = getSelectedEntities(entities, op.selectedIds);
+  if (!selected.length) return { moves: [], warnings: ['No entities selected'] };
+
+  const profiles = buildPocketProfiles(selected);
+  if (!profiles.length) return { moves: [], warnings: ['No closed profiles found — select a closed shape'] };
+
+  // XY spacing between successive offset rings.  0.2 mm gives smooth depth
+  // transitions; the loop always terminates once rings collapse or maxDepth is
+  // reached and subsequent rings also produce no new geometry.
+  const XY_STEP = 0.2;
+
+  for (const rawProfile of profiles) {
+    const stripped = stripClose([...rawProfile]);
+    if (stripped.length < 3) continue;
+    // Normalise to CCW so a positive offset always shrinks inward.
+    const profile = isClockwise(stripped) ? [...stripped].reverse() : stripped;
+
+    if (Math.abs(polygonArea(profile)) < XY_STEP * XY_STEP * 4) {
+      warnings.push('Profile too small to V-carve');
+      continue;
+    }
+
+    let anyMoves = false;
+    let prevDepth = -Infinity; // track to avoid emitting identical depth rings at maxDepth
+
+    for (let i = 1; i <= 5000; i++) {
+      const dist = i * XY_STEP;
+
+      // Depth the V-tip must reach so its cutting radius equals dist.
+      const rawH = dist <= tipRadius ? 0 : (dist - tipRadius) / tanAngle;
+      const h    = Math.max(flatDepth, Math.min(maxDepth, rawH));
+
+      // Once we have passed the depth cap and are just repeating the same max depth
+      // pass, emit one more ring at maxDepth then stop — the interior is cleared.
+      const atCap = h >= maxDepth && prevDepth >= maxDepth;
+
+      const rings = offsetPolyline(profile, dist, true);
+      if (!rings || rings.length === 0) break;   // all rings collapsed → medial axis passed
+
+      let gotAny = false;
+      for (const ring of rings) {
+        if (!ring || ring.length < 3) continue;
+        const pts = stripClose([...ring]);
+        if (pts.length < 3) continue;
+
+        gotAny = true;
+        anyMoves = true;
+        const z = topZ - h;
+
+        moves.push({ type: 'rapid', x: pts[0].x, y: pts[0].y, z: safeZ });
+        moves.push({ type: 'feed',  x: pts[0].x, y: pts[0].y, z, f: plungeRate });
+        for (let j = 1; j < pts.length; j++) {
+          moves.push({ type: 'feed', x: pts[j].x, y: pts[j].y, z, f: feedRate });
+        }
+        moves.push({ type: 'feed', x: pts[0].x, y: pts[0].y, z, f: feedRate }); // close
+      }
+
+      if (!gotAny || atCap) break;
+      prevDepth = h;
+    }
+
+    if (!anyMoves) {
+      warnings.push('Profile produced no V-carve passes — check max depth and angle');
+    }
+  }
+
+  // Final lift to safe Z.
+  if (moves.length) {
+    const last = moves[moves.length - 1];
+    moves.push({ type: 'rapid', x: last.x, y: last.y, z: safeZ });
+  }
+
+  return { moves, warnings };
 }
 
 function generateTaperedPocket(op, entities, context = {}) {

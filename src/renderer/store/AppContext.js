@@ -413,6 +413,7 @@ export function getDefaultParams(type) {
     case 'trace':    return { safeZ: 25, topZ: 0, feedRate: 800, plungeRate: 300, depth: 0.5 };
     case 'slot':     return { ...base, toolDiameter: 6.35, rampEntry: true, rampAngle: 3 };
     case 'chamfer':  return { toolDiameter: 6.35, chamferAngle: 45, chamferWidth: 1.0, topZ: 0, safeZ: 25, feedRate: 800, plungeRate: 300, spindleRpm: 18000, stockToLeave: 0 };
+    case 'vcarve':   return { safeZ: 25, topZ: 0, feedRate: 1500, plungeRate: 300, spindleRpm: 18000, halfAngle: 15, tipDiameter: 0, maxDepth: 15, flatDepth: 0 };
     case 'thread':        return { safeZ: 25, topZ: 0, feedRate: 400, plungeRate: 200, totalDepth: 15, toolDiameter: 6.35, pitch: 1.25, internal: true, direction: 'right', spindleRpm: 1000 };
     case 'taperedpocket': return {
       topZ: 0, safeZ: 10, pocketDepth: 5, mirrorX: false,

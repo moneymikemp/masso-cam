@@ -686,6 +686,35 @@ export default function OperationParams({ op, tools, operations = [], onChange }
           })()}
         </>;
       })()}
+
+      {/* ── V-Carve ── */}
+      {op.type === 'vcarve' && <>
+        {toolSelect}
+        <div style={S.section}>V-Bit Geometry</div>
+        <Field label="Half Angle" unit="°">
+          <NumInput value={p.halfAngle ?? 15} onChange={v => set('halfAngle', v)} min={1} max={60} step={0.5} />
+        </Field>
+        <Field label="Tip Diameter" unit={distUnit}>
+          <NumInput value={toDisp(p.tipDiameter ?? 0)} onChange={v => set('tipDiameter', toMM(v))} min={0} step={isInch ? 0.001 : 0.01} />
+        </Field>
+        <div style={{ fontSize: 9, color: '#555577', paddingBottom: 3, lineHeight: 1.4 }}>
+          Set tip ⌀ to 0 for a pointed V-bit. Non-zero = flat-bottom V-bit.
+        </div>
+        <div style={S.section}>Depth</div>
+        <Field label="Max Depth" unit={distUnit}>
+          <NumInput value={toDisp(p.maxDepth ?? 15)} onChange={v => set('maxDepth', toMM(v))} min={isInch ? 0.004 : 0.1} step={dStep} />
+        </Field>
+        <Field label="Flat Depth" unit={distUnit}>
+          <NumInput value={toDisp(p.flatDepth ?? 0)} onChange={v => set('flatDepth', toMM(v))} min={0} step={dStep} />
+        </Field>
+        <div style={{ fontSize: 9, color: '#555577', paddingBottom: 3, lineHeight: 1.4 }}>
+          Flat depth = min cut at shape edges (0 = pointed intersection at boundary).
+        </div>
+        <Field label="Top of Stock" unit={distUnit}>
+          <NumInput value={toDisp(p.topZ ?? 0)} onChange={v => set('topZ', toMM(v))} step={isInch ? 0.02 : 0.5} />
+        </Field>
+        {commonSpeeds}
+      </>}
     </div>
   );
 }
