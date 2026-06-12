@@ -70,7 +70,7 @@ function CheckField({ label, value, onChange }) {
 
 const MM_PER_INCH = 25.4;
 
-export default function OperationParams({ op, tools, onChange }) {
+export default function OperationParams({ op, tools, operations = [], onChange }) {
   const { state, dispatch } = useApp();
   const isInch = state.postConfig?.units === 'inch';
   const p = op.params || {};
@@ -490,7 +490,27 @@ export default function OperationParams({ op, tools, onChange }) {
         const taperRad  = Math.max(0.5, wallAngle / 2) * Math.PI / 180;
         const zRaise    = isPlug ? (p.fitTolerance || 0.127) / Math.tan(taperRad) : 0;
 
+        const partnerType  = isPlug ? 'taperedpocket' : 'taperedplug';
+        const partners     = operations.filter(o => o.type === partnerType && o.id !== op.id);
+        const linkedId     = p.linkedOpId || '';
+        const linkedOp     = operations.find(o => o.id === linkedId) || null;
+
         return <>
+          {/* ─ Link ─ */}
+          <div style={S.section}>Link</div>
+          <Field label="Linked Partner">
+            <select style={S.select} value={linkedId}
+              onChange={e => set('linkedOpId', e.target.value || null)}>
+              <option value="">None</option>
+              {partners.map(o => <option key={o.id} value={o.id}>{o.name}</option>)}
+            </select>
+          </Field>
+          {linkedOp && (
+            <div style={{ padding: '1px 0 4px', fontSize: 9, color: '#9966ff', lineHeight: 1.5 }}>
+              ⛓ Syncing: Depth · Bit (tip ⌀, angle) · Corner angle · Contour lead-in
+            </div>
+          )}
+
           {/* Reactive entity-assignment guard — reads op.selectedIds directly so it
               clears immediately after the Assign button is clicked, not after recalculate. */}
           {!op.selectedIds?.length && (

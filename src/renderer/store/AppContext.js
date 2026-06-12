@@ -3,6 +3,49 @@ import { v4 as uuid } from 'uuid';
 
 const AppContext = createContext(null);
 
+// ── Tapered Pocket / Plug link helpers ────────────────────────────────────────
+
+// Returns the subset of tapered-op params that propagate to a linked partner.
+function extractSharedTaperedParams(params) {
+  const tc = params.passes?.taperContour || {};
+  return {
+    pocketDepth:      params.pocketDepth,
+    topZ:             params.topZ,
+    sharpCornerAngle: params.sharpCornerAngle,
+    _tc: {
+      tipDia:          tc.tipDia,
+      angle:           tc.angle,
+      leadInStyle:     tc.leadInStyle,
+      leadInRampAngle: tc.leadInRampAngle,
+      leadInArcRadius: tc.leadInArcRadius,
+    },
+  };
+}
+
+// Merges shared fields into partnerParams, leaving all non-shared fields intact.
+function applySharedTaperedParams(partnerParams, shared) {
+  const ptc = partnerParams.passes?.taperContour || {};
+  const stc = shared._tc || {};
+  const top = {};
+  if (shared.pocketDepth      != null) top.pocketDepth      = shared.pocketDepth;
+  if (shared.topZ             != null) top.topZ             = shared.topZ;
+  if (shared.sharpCornerAngle != null) top.sharpCornerAngle = shared.sharpCornerAngle;
+  const tc = {};
+  if (stc.tipDia          != null) tc.tipDia          = stc.tipDia;
+  if (stc.angle           != null) tc.angle           = stc.angle;
+  if (stc.leadInStyle     != null) tc.leadInStyle     = stc.leadInStyle;
+  if (stc.leadInRampAngle != null) tc.leadInRampAngle = stc.leadInRampAngle;
+  if (stc.leadInArcRadius != null) tc.leadInArcRadius = stc.leadInArcRadius;
+  return {
+    ...partnerParams,
+    ...top,
+    passes: {
+      ...partnerParams.passes,
+      taperContour: { ...ptc, ...tc },
+    },
+  };
+}
+
 const initialState = {
   // Project
   projectPath: null,
@@ -136,9 +179,43 @@ function reducer(state, action) {
     }
 
     case 'UPDATE_OPERATION': {
-      const operations = state.operations.map(op =>
+      let operations = state.operations.map(op =>
         op.id === action.payload.id ? { ...op, ...action.payload.changes, toolpath: null } : op
       );
+      const updatedOp  = operations.find(o => o.id === action.payload.id);
+      const newLinked  = updatedOp?.params?.linkedOpId ?? null;
+      const oldLinked  = state.operations.find(o => o.id === action.payload.id)?.params?.linkedOpId ?? null;
+
+      // Bidirectional back-link maintenance when the user changes the Link dropdown.
+      if (newLinked !== oldLinked) {
+        // Clear the old partner's back-link if it still pointed to this op.
+        if (oldLinked) {
+          operations = operations.map(op =>
+            op.id === oldLinked && op.params?.linkedOpId === action.payload.id
+              ? { ...op, params: { ...op.params, linkedOpId: null }, toolpath: null }
+              : op
+          );
+        }
+        // Set the new partner's back-link to this op.
+        if (newLinked) {
+          operations = operations.map(op =>
+            op.id === newLinked
+              ? { ...op, params: { ...op.params, linkedOpId: action.payload.id }, toolpath: null }
+              : op
+          );
+        }
+      }
+
+      // Propagate shared settings to the linked partner.
+      if (newLinked && (updatedOp.type === 'taperedpocket' || updatedOp.type === 'taperedplug')) {
+        const shared = extractSharedTaperedParams(updatedOp.params);
+        operations = operations.map(op =>
+          op.id === newLinked
+            ? { ...op, params: applySharedTaperedParams(op.params, shared), toolpath: null }
+            : op
+        );
+      }
+
       return { ...state, operations, dirty: true };
     }
 
@@ -150,7 +227,17 @@ function reducer(state, action) {
     }
 
     case 'DELETE_OPERATION': {
-      const operations = state.operations.filter(op => op.id !== action.payload);
+      const dying = state.operations.find(op => op.id === action.payload);
+      const dyingLinkedId = dying?.params?.linkedOpId ?? null;
+      let operations = state.operations.filter(op => op.id !== action.payload);
+      // Clear the partner's back-link so it doesn't point to a ghost op.
+      if (dyingLinkedId) {
+        operations = operations.map(op =>
+          op.id === dyingLinkedId && op.params?.linkedOpId === action.payload
+            ? { ...op, params: { ...op.params, linkedOpId: null } }
+            : op
+        );
+      }
       const selId = state.selectedOperationId === action.payload
         ? (operations[0]?.id || null) : state.selectedOperationId;
       return { ...state, operations, selectedOperationId: selId, dirty: true };

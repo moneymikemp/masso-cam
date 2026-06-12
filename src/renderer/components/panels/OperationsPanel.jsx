@@ -164,6 +164,11 @@ export default function OperationsPanel() {
               <div style={S.opRow(isSelected, op.enabled)} onClick={() => dispatch({ type: 'SELECT_OPERATION', payload: op.id })}>
                 <span style={S.opIcon}>{info?.icon || '⚙'}</span>
                 <span style={S.opName} title={op.name}>{op.name}</span>
+                {(() => {
+                  const lid = op.params?.linkedOpId;
+                  const partner = lid && operations.find(o => o.id === lid);
+                  return partner ? <span style={{ fontSize: 9, color: '#9966ff', flexShrink: 0 }} title={`Linked to "${partner.name}"`}>⛓</span> : null;
+                })()}
                 <span style={{ fontSize: 9, color: '#555577', flexShrink: 0 }}>{op.selectedIds?.length > 0 ? `${op.selectedIds.length}sel` : 'all'}</span>
                 <div style={S.opStatus(!!op.toolpath)} title={op.toolpath ? `${op.toolpath.moves.length} moves` : 'Not calculated'} />
                 <div style={S.opActions}>
@@ -202,6 +207,7 @@ export default function OperationsPanel() {
           <OperationParams
             op={selectedOp}
             tools={tools}
+            operations={operations}
             onChange={(changes) => dispatch({ type: 'UPDATE_OPERATION', payload: { id: selectedOp.id, changes } })}
           />
         </div>
