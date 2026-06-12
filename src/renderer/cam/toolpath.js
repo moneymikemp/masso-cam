@@ -1,6 +1,6 @@
 // CAM Toolpath Engine - all 2.5D operations
 
-import { offsetPolyline, generatePocketOffsets, generateRestMachiningPasses, generateRasterPasses, polygonArea, isClockwise, clipPolygonToRegion, stripClose } from './offset.js';
+import { offsetPolyline, generatePocketOffsets, generateRestMachiningPasses, generateRasterPasses, polygonArea, isClockwise, clipPolygonToRegion, stripClose, pointInPolygon } from './offset.js';
 import { circleToPoints, arcToPoints, polylineToPoints } from '../dxf/parser.js';
 
 // ── Entry point ───────────────────────────────────────────────────────────────
@@ -824,6 +824,24 @@ function buildTaperedPasses(selected, topZ, depth, safeZ, p, warnings, stockBoun
   const wallAngle = tc.angle ?? tk.angle ?? 10;
   const wallRad   = Math.max(0.5, wallAngle / 2) * Math.PI / 180;
 
+  // Detect user-supplied clip boundary: if the selected entities yield 2+ closed profiles
+  // and the largest fully encloses all others, treat it as a clip boundary for endmill
+  // clearing and exclude it from the taper contour pass.  This lets users select a clamping
+  // rectangle alongside the part geometry without getting unwanted taper moves on it.
+  const allProfiles = buildPocketProfiles(selected);
+  allProfiles.sort((a, b) => Math.abs(polygonArea(b)) - Math.abs(polygonArea(a)));
+  let partProfiles = allProfiles;
+  let effectiveClipBound = stockBound;
+  if (allProfiles.length >= 2) {
+    const candidate = allProfiles[0];
+    const ccwCandidate = isClockwise(candidate) ? [...candidate].reverse() : candidate;
+    const inner = allProfiles.slice(1);
+    if (inner.every(prof => prof.some(pt => pointInPolygon(pt, ccwCandidate)))) {
+      effectiveClipBound = ccwCandidate;
+      partProfiles = inner;
+    }
+  }
+
   const subToolpaths = [];
 
   if (tc.enabled !== false) {
@@ -833,7 +851,7 @@ function buildTaperedPasses(selected, topZ, depth, safeZ, p, warnings, stockBoun
       toolKey:  tc.toolId ?? 'taper',
       toolDesc: `Taper bit — tip ⌀${tc.tipDia || 0.5}mm  ${tc.angle || 10}° half-angle`,
       rpm: tc.rpm || 24000,
-      moves: buildTaperTrace(selected, topZ, depth, safeZ, tc.feed || 1000, tc.plunge || 300, tcRad, cutSide, (tc.tipDia || 0) / 2, p.sharpCornerAngle ?? 180, tc.leadInStyle || 'plunge', tc.leadInRampAngle || 3, tc.leadInArcRadius || 0),
+      moves: buildTaperTrace(selected, topZ, depth, safeZ, tc.feed || 1000, tc.plunge || 300, tcRad, cutSide, (tc.tipDia || 0) / 2, p.sharpCornerAngle ?? 180, tc.leadInStyle || 'plunge', tc.leadInRampAngle || 3, tc.leadInArcRadius || 0, partProfiles),
     });
   }
 
@@ -850,7 +868,7 @@ function buildTaperedPasses(selected, topZ, depth, safeZ, p, warnings, stockBoun
       // Single Z pass at full depth — walls were established by the contour pass.
       moves: clearFn(selected, topZ, depth, safeZ,
         tipR, depth, tk.wallStock || 0.254, tk.feed || 1000, tk.plunge || 300,
-        tkRad, 'Taper Cleanup', warnings, tkPrevR, stockBound),
+        tkRad, 'Taper Cleanup', warnings, tkPrevR, effectiveClipBound, 'plunge', 0, partProfiles),
     });
   }
 
@@ -864,7 +882,7 @@ function buildTaperedPasses(selected, topZ, depth, safeZ, p, warnings, stockBoun
       rpm: de.rpm || 18000,
       moves: clearFn(selected, topZ, depth, safeZ,
         deR, de.diameter || 1.5875, de.wallStock || 0.254, de.feed || 800, de.plunge || 300,
-        wallRad, 'Detail Endmill', warnings, dePrevR, stockBound, de.leadInStyle || 'plunge', de.leadInArcRadius || 0),
+        wallRad, 'Detail Endmill', warnings, dePrevR, effectiveClipBound, de.leadInStyle || 'plunge', de.leadInArcRadius || 0, partProfiles),
     });
   }
 
@@ -878,7 +896,7 @@ function buildTaperedPasses(selected, topZ, depth, safeZ, p, warnings, stockBoun
       rpm: be.rpm || 18000,
       moves: clearFn(selected, topZ, depth, safeZ,
         beR, be.diameter || 6.35, be.wallStock || 0.254, be.feed || 1500, be.plunge || 500,
-        wallRad, 'Bulk Endmill', warnings, bePrevR, stockBound, be.leadInStyle || 'plunge', be.leadInArcRadius || 0),
+        wallRad, 'Bulk Endmill', warnings, bePrevR, effectiveClipBound, be.leadInStyle || 'plunge', be.leadInArcRadius || 0, partProfiles),
     });
   }
 
@@ -1085,7 +1103,7 @@ function arcLengthRemap(depths, fromPts, toPts) {
 // sharpCornerAngle: only interior angles strictly below this value (degrees)
 //   trigger the bisector ramp.  180° = all convex corners (Fusion default);
 //   lower values (e.g. 170°) suppress ramps at near-straight tessellation joints.
-function buildTaperTrace(entities, topZ, depth, safeZ, feedRate, plungeRate, tcRad, cutSide, tipRadius = 0, sharpCornerAngle = 180, leadInStyle = 'plunge', leadInRampAngle = 3, leadInArcRadius = 0) {
+function buildTaperTrace(entities, topZ, depth, safeZ, feedRate, plungeRate, tcRad, cutSide, tipRadius = 0, sharpCornerAngle = 180, leadInStyle = 'plunge', leadInRampAngle = 3, leadInArcRadius = 0, prebuiltProfiles = null) {
   const moves     = [];
   const tanAlpha  = Math.tan(tcRad);
   const floorZ    = topZ - depth;
@@ -1097,7 +1115,7 @@ function buildTaperTrace(entities, topZ, depth, safeZ, feedRate, plungeRate, tcR
   const MIN_CORNER_TURN = Math.max(0, (180 - sharpCornerAngle) * Math.PI / 180);
 
   const isOutside = cutSide === 'outside';
-  const profiles = buildPocketProfiles(entities);
+  const profiles = prebuiltProfiles ?? buildPocketProfiles(entities);
 
   for (const rawProfile of profiles) {
     // Normalise winding to CCW before offsetting.  mirrorEntitiesX Y-flips the
@@ -1207,7 +1225,7 @@ function buildTaperTrace(entities, topZ, depth, safeZ, feedRate, plungeRate, tcR
 //   depthPerPass — Z step between levels (pass full depth for single-level)
 //   wallStock   — explicit standoff added on top of the taper geometry clearance
 //   taperRad    — half-angle (rad) of the wall that defines clearance geometry
-function buildPocketClearing(entities, topZ, depth, safeZ, toolR, depthPerPass, wallStock, feedRate, plungeRate, taperRad, passLabel, warnings, prevToolR = 0, stockBound = null, leadInStyle = 'plunge', leadInArcRadius = 0) {
+function buildPocketClearing(entities, topZ, depth, safeZ, toolR, depthPerPass, wallStock, feedRate, plungeRate, taperRad, passLabel, warnings, prevToolR = 0, stockBound = null, leadInStyle = 'plunge', leadInArcRadius = 0, prebuiltProfiles = null) {
   const moves     = [];
   const wallLeave = depth * Math.tan(taperRad) + wallStock;
   const inset     = toolR + wallLeave;
@@ -1215,7 +1233,7 @@ function buildPocketClearing(entities, topZ, depth, safeZ, toolR, depthPerPass, 
 
   // Profile extraction: chain individual LINE/ARC segments when selected
   // instead of a closed polyline, same logic as generatePocket.
-  const profiles = buildPocketProfiles(entities);
+  const profiles = prebuiltProfiles ?? buildPocketProfiles(entities);
   if (!profiles.length) return moves;
 
   profiles.sort((a, b) => polygonArea(b) - polygonArea(a));
@@ -1278,14 +1296,14 @@ function buildPocketClearing(entities, topZ, depth, safeZ, toolR, depthPerPass, 
 //
 // Same parameter signature as buildPocketClearing so buildTaperedPasses can
 // dispatch between the two with a single function reference.
-function buildPlugClearing(entities, topZ, depth, safeZ, toolR, depthPerPass, wallStock, feedRate, plungeRate, taperRad, passLabel, warnings, prevToolR = 0, stockBound = null, leadInStyle = 'plunge', leadInArcRadius = 0) {
+function buildPlugClearing(entities, topZ, depth, safeZ, toolR, depthPerPass, wallStock, feedRate, plungeRate, taperRad, passLabel, warnings, prevToolR = 0, stockBound = null, leadInStyle = 'plunge', leadInArcRadius = 0, prebuiltProfiles = null) {
   const moves     = [];
   const wallLeave = depth * Math.tan(taperRad) + wallStock;
   const outset    = toolR + wallLeave;
   const step      = toolR * 2 * 0.45;
   const zPasses   = buildZPasses(topZ, depth, depthPerPass);
 
-  const profiles = buildPocketProfiles(entities);
+  const profiles = prebuiltProfiles ?? buildPocketProfiles(entities);
   if (!profiles.length) return moves;
 
   profiles.sort((a, b) => polygonArea(b) - polygonArea(a));
