@@ -5,11 +5,15 @@ const AppContext = createContext(null);
 
 // ── Tapered Pocket / Plug link helpers ────────────────────────────────────────
 
-// Returns the subset of tapered-op params that propagate to a linked partner.
-function extractSharedTaperedParams(params) {
+// Default plug height offset: 0.075 in expressed in mm.
+const PLUG_HEIGHT_OFFSET_MM = 25.4 * 0.075; // ≈ 1.905 mm
+
+// Non-depth shared fields: bit geometry, corner angle, lead-in.
+// Depth is intentionally excluded — the plug gets pocket_depth + offset, not an
+// identical copy of the pocket depth.
+function extractSharedNonDepth(params) {
   const tc = params.passes?.taperContour || {};
   return {
-    pocketDepth:      params.pocketDepth,
     topZ:             params.topZ,
     sharpCornerAngle: params.sharpCornerAngle,
     _tc: {
@@ -22,12 +26,10 @@ function extractSharedTaperedParams(params) {
   };
 }
 
-// Merges shared fields into partnerParams, leaving all non-shared fields intact.
-function applySharedTaperedParams(partnerParams, shared) {
-  const ptc = partnerParams.passes?.taperContour || {};
+function applySharedNonDepth(targetParams, shared) {
+  const ptc = targetParams.passes?.taperContour || {};
   const stc = shared._tc || {};
   const top = {};
-  if (shared.pocketDepth      != null) top.pocketDepth      = shared.pocketDepth;
   if (shared.topZ             != null) top.topZ             = shared.topZ;
   if (shared.sharpCornerAngle != null) top.sharpCornerAngle = shared.sharpCornerAngle;
   const tc = {};
@@ -37,10 +39,10 @@ function applySharedTaperedParams(partnerParams, shared) {
   if (stc.leadInRampAngle != null) tc.leadInRampAngle = stc.leadInRampAngle;
   if (stc.leadInArcRadius != null) tc.leadInArcRadius = stc.leadInArcRadius;
   return {
-    ...partnerParams,
+    ...targetParams,
     ...top,
     passes: {
-      ...partnerParams.passes,
+      ...targetParams.passes,
       taperContour: { ...ptc, ...tc },
     },
   };
@@ -208,12 +210,36 @@ function reducer(state, action) {
 
       // Propagate shared settings to the linked partner.
       if (newLinked && (updatedOp.type === 'taperedpocket' || updatedOp.type === 'taperedplug')) {
-        const shared = extractSharedTaperedParams(updatedOp.params);
-        operations = operations.map(op =>
-          op.id === newLinked
-            ? { ...op, params: applySharedTaperedParams(op.params, shared), toolpath: null }
-            : op
-        );
+        const shared = extractSharedNonDepth(updatedOp.params);
+
+        operations = operations.map(op => {
+          if (op.id !== newLinked) return op;
+          let newParams = applySharedNonDepth(op.params, shared);
+
+          // Depth is asymmetric: pocket drives the plug via plugHeightOffset.
+          // Plug never writes its depth back to the pocket.
+          if (updatedOp.type === 'taperedpocket') {
+            const offset = op.params.plugHeightOffset ?? PLUG_HEIGHT_OFFSET_MM;
+            newParams = { ...newParams, pocketDepth: (updatedOp.params.pocketDepth ?? 5) + offset };
+          }
+
+          return { ...op, params: newParams, toolpath: null };
+        });
+
+        // When the plug itself changed (e.g. user edited plugHeightOffset), re-derive
+        // the plug's pocketDepth from the linked pocket's current depth + the new offset.
+        if (updatedOp.type === 'taperedplug') {
+          const pocket = operations.find(o => o.id === newLinked);
+          if (pocket) {
+            const offset = updatedOp.params.plugHeightOffset ?? PLUG_HEIGHT_OFFSET_MM;
+            const derived = (pocket.params.pocketDepth ?? 5) + offset;
+            operations = operations.map(o =>
+              o.id === action.payload.id
+                ? { ...o, params: { ...o.params, pocketDepth: derived }, toolpath: null }
+                : o
+            );
+          }
+        }
       }
 
       return { ...state, operations, dirty: true };

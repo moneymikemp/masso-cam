@@ -69,6 +69,7 @@ function CheckField({ label, value, onChange }) {
 }
 
 const MM_PER_INCH = 25.4;
+const PLUG_HEIGHT_OFFSET_MM = 25.4 * 0.075; // ≈ 1.905 mm (0.075 in default)
 
 export default function OperationParams({ op, tools, operations = [], onChange }) {
   const { state, dispatch } = useApp();
@@ -507,7 +508,7 @@ export default function OperationParams({ op, tools, operations = [], onChange }
           </Field>
           {linkedOp && (
             <div style={{ padding: '1px 0 4px', fontSize: 9, color: '#9966ff', lineHeight: 1.5 }}>
-              ⛓ Syncing: Depth · Bit (tip ⌀, angle) · Corner angle · Contour lead-in
+              ⛓ Syncing: Bit (tip ⌀, angle) · Corner angle · Contour lead-in · Top of stock
             </div>
           )}
 
@@ -638,7 +639,21 @@ export default function OperationParams({ op, tools, operations = [], onChange }
           <CheckField label="Mirror X" value={!!p.mirrorX} onChange={v => set('mirrorX', v)} />
 
           <div style={S.section}>Depth</div>
-          <Field label="Pocket Depth" unit={distUnit}><NumInput value={toDisp(p.pocketDepth ?? 5)} onChange={v => set('pocketDepth', toMM(v))} min={isInch ? 0.01 : 0.25} step={dStep} /></Field>
+          {isPlug && linkedOp ? <>
+            <Field label="Plug Height Offset" unit={distUnit}>
+              <NumInput value={toDisp(p.plugHeightOffset ?? PLUG_HEIGHT_OFFSET_MM)} onChange={v => set('plugHeightOffset', toMM(v))} min={0} step={dStep} />
+            </Field>
+            <Field label="Plug Total Depth" unit={distUnit}>
+              <span style={{ flex: 1, background: '#0a0a18', border: '1px solid #1a1a38', color: '#88aacc', borderRadius: 3, padding: '2px 5px', fontSize: 11, minWidth: 0 }}>
+                {toDisp(p.pocketDepth ?? 5).toFixed(isInch ? 4 : 3)}
+              </span>
+            </Field>
+            <div style={{ fontSize: 9, color: '#776699', paddingBottom: 3, lineHeight: 1.4 }}>
+              = pocket depth ({toDisp(linkedOp.params.pocketDepth ?? 5).toFixed(isInch ? 4 : 3)} {distUnit}) + offset
+            </div>
+          </> : (
+            <Field label="Pocket Depth" unit={distUnit}><NumInput value={toDisp(p.pocketDepth ?? 5)} onChange={v => set('pocketDepth', toMM(v))} min={isInch ? 0.01 : 0.25} step={dStep} /></Field>
+          )}
           <Field label="Top of Stock" unit={distUnit}><NumInput value={toDisp(p.topZ ?? 0)} onChange={v => set('topZ', toMM(v))} step={isInch ? 0.02 : 0.5} /></Field>
           <Field label="Safe Z" unit={distUnit}><NumInput value={toDisp(p.safeZ ?? 10)} onChange={v => set('safeZ', toMM(v))} step={isInch ? 0.05 : 1} /></Field>
 
