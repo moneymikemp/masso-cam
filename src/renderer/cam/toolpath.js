@@ -795,6 +795,10 @@ function generateVCarve(op, entities, context = {}) {
   const plungeRate   = p.plungeRate ?? 300;
   const depthPerPass = Math.max(0.01, p.depthPerPass ?? maxDepth); // default = single pass
 
+  // Require explicit entity assignment — the fallback to all entities in
+  // getSelectedEntities would pick up reference geometry (bounding boxes, etc.)
+  if (!op.selectedIds?.length) return { moves: [], warnings: ['Select letter/shape entities for this operation (use Assign button)'] };
+
   const selected = getSelectedEntities(entities, op.selectedIds);
   if (!selected.length) return { moves: [], warnings: ['No entities selected'] };
 
