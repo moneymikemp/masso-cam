@@ -32,6 +32,7 @@
   "build": {
     "appId": "com.massocam.app",
     "productName": "MassoCAM",
+    "npmRebuild": false,
     "directories": {
       "output": "dist"
     },
