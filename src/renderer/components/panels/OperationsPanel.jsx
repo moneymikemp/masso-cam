@@ -1,6 +1,6 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import { useApp, getDefaultParams } from '../../store/AppContext';
-import { generateToolpath } from '../../cam/toolpath';
+import { generateToolpath, computeVCarveMedialAxis } from '../../cam/toolpath';
 import OperationParams from './OperationParams';
 
 const OP_TYPES = [
@@ -54,6 +54,13 @@ export default function OperationsPanel() {
   const { state, dispatch } = useApp();
   const { operations, selectedOperationId, entities, tools, selectedEntityIds } = state;
   const [showAddMenu, setShowAddMenu] = useState(false);
+  const [showSkeleton, setShowSkeleton] = useState(false);
+
+  // Clear the skeleton overlay whenever the selected operation changes.
+  useEffect(() => {
+    setShowSkeleton(false);
+    dispatch({ type: 'SET_MEDIAL_AXIS', payload: null });
+  }, [selectedOperationId]);
 
   const selectedOp = operations.find(o => o.id === selectedOperationId);
 
@@ -107,6 +114,19 @@ export default function OperationsPanel() {
   function calculateAll() {
     for (const op of operations) {
       if (op.enabled) calculateToolpath(op);
+    }
+  }
+
+  function toggleSkeleton(op) {
+    if (showSkeleton) {
+      setShowSkeleton(false);
+      dispatch({ type: 'SET_MEDIAL_AXIS', payload: null });
+    } else {
+      const result = computeVCarveMedialAxis(op, entities);
+      if (result.polylines.length > 0) {
+        setShowSkeleton(true);
+        dispatch({ type: 'SET_MEDIAL_AXIS', payload: result.polylines });
+      }
     }
   }
 
@@ -196,6 +216,15 @@ export default function OperationsPanel() {
             {selectedEntityIds.length > 0 && (
               <button style={S.assignBtn} onClick={() => dispatch({ type: 'ASSIGN_SELECTED_TO_OPERATION', payload: selectedOp.id })}>
                 ← Assign {selectedEntityIds.length} selected
+              </button>
+            )}
+            {selectedOp.type === 'vcarve' && (
+              <button
+                style={{ ...S.calcBtn, background: showSkeleton ? '#2a1a5a' : '#2a2a5a', color: showSkeleton ? '#cc44ff' : '#8888ff', borderColor: showSkeleton ? '#9933ff' : '#3a3aaa' }}
+                onClick={() => toggleSkeleton(selectedOp)}
+                title="Show medial axis (skeleton) overlay on canvas"
+              >
+                {showSkeleton ? '◈ Hide Skeleton' : '◈ Show Skeleton'}
               </button>
             )}
             <button style={S.calcBtn} onClick={() => calculateToolpath(selectedOp)}>⟳ Calculate</button>

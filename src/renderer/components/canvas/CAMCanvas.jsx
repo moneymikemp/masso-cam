@@ -17,6 +17,7 @@ const COLORS = {
   origin: '#ff4444',
   stockFill: 'rgba(180, 140, 60, 0.06)',
   stockBorder: 'rgba(200, 160, 80, 0.45)',
+  medialAxis: '#ff00ff',
 };
 
 export default function CAMCanvas() {
@@ -34,7 +35,7 @@ export default function CAMCanvas() {
     statusTimerRef.current = setTimeout(() => setStatusMsg(''), 2000);
   }
 
-  const { viewport, entities, layers, operations, selectedEntityIds, hoveredEntityId, showToolpaths, showRapids, bounds, stockConfig, tabPlacementActive, tabPlacementOpId } = state;
+  const { viewport, entities, layers, operations, selectedEntityIds, hoveredEntityId, showToolpaths, showRapids, bounds, stockConfig, tabPlacementActive, tabPlacementOpId, medialAxisPolylines } = state;
 
   const [zSliderPos, setZSliderPos] = useState(0); // 0 = all passes; 1..N = pass index
   const [isAnimating, setIsAnimating] = useState(false);
@@ -148,6 +149,7 @@ export default function CAMCanvas() {
     drawOrigin(ctx);
     drawEntities(ctx);
     if (showToolpaths) drawToolpaths(ctx);
+    if (medialAxisPolylines?.length) drawMedialAxis(ctx);
     drawMouseCoords(ctx);
   }
 
@@ -458,6 +460,27 @@ export default function CAMCanvas() {
     ctx.setLineDash([]);
   }
 
+  function drawMedialAxis(ctx) {
+    if (!medialAxisPolylines?.length) return;
+    ctx.setLineDash([]);
+    for (let pi = 0; pi < medialAxisPolylines.length; pi++) {
+      const poly = medialAxisPolylines[pi];
+      if (!poly || poly.length < 2) continue;
+      // Fade from semi-transparent (outermost, earliest fractions) to opaque (innermost)
+      const alpha = 0.35 + 0.65 * (pi / Math.max(medialAxisPolylines.length - 1, 1));
+      ctx.strokeStyle = `rgba(255,0,255,${alpha.toFixed(2)})`;
+      ctx.lineWidth = 1.2;
+      ctx.beginPath();
+      const f = w2c(poly[0].x, poly[0].y);
+      ctx.moveTo(f.x, f.y);
+      for (let i = 1; i < poly.length; i++) {
+        const p = w2c(poly[i].x, poly[i].y);
+        ctx.lineTo(p.x, p.y);
+      }
+      ctx.stroke();
+    }
+  }
+
   function drawMouseCoords(ctx) {
     const world = c2w(mousePos.x, mousePos.y);
     ctx.fillStyle = 'rgba(0,0,0,0.6)';
@@ -467,7 +490,7 @@ export default function CAMCanvas() {
     ctx.fillText(`X: ${world.x.toFixed(3)}  Y: ${world.y.toFixed(3)}`, 14, ctx.canvas.height - 14);
   }
 
-  useEffect(() => { draw(); }, [entities, layers, operations, viewport, selectedEntityIds, hoveredEntityId, showToolpaths, showRapids, mousePos, stockConfig, zSliderPos, zLevels, tabPlacementActive, tabPlacementOpId]);
+  useEffect(() => { draw(); }, [entities, layers, operations, viewport, selectedEntityIds, hoveredEntityId, showToolpaths, showRapids, mousePos, stockConfig, zSliderPos, zLevels, tabPlacementActive, tabPlacementOpId, medialAxisPolylines]);
 
   // Mouse events
   const onMouseDown = useCallback((e) => {

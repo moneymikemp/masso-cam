@@ -5,6 +5,78 @@ import { circleToPoints, arcToPoints, polylineToPoints } from '../dxf/parser.js'
 
 // ── Entry point ───────────────────────────────────────────────────────────────
 
+// Compute approximate medial axis (skeleton) of V-carve shapes for visualization.
+// Returns {polylines: [[{x,y},...], ...]} — closed polylines at several erosion
+// depth fractions.  Early fractions expose thin stroke slivers; late fractions
+// converge on the medial axis of each filled region / hole annulus.
+export function computeVCarveMedialAxis(op, entities) {
+  if (!op.selectedIds?.length) return { polylines: [] };
+  const selected = getSelectedEntities(entities, op.selectedIds);
+  if (!selected.length) return { polylines: [] };
+
+  const allProfiles = buildPocketProfiles(selected);
+  if (!allProfiles.length) return { polylines: [] };
+
+  allProfiles.sort((a, b) => Math.abs(polygonArea(b)) - Math.abs(polygonArea(a)));
+
+  const shapeGroups = [];
+  for (const rawProfile of allProfiles) {
+    const profile = isClockwise(rawProfile) ? [...rawProfile].reverse() : rawProfile;
+    let placed = false;
+    for (const group of shapeGroups) {
+      if (profile.some(pt => pointInPolygon(pt, group.outer))) {
+        group.holes.push(profile);
+        placed = true;
+        break;
+      }
+    }
+    if (!placed) shapeGroups.push({ outer: profile, holes: [] });
+  }
+
+  const SKEL_STEP = 0.3; // mm — coarser than toolpath ring step; fast enough for UI
+  const polylines = [];
+
+  for (const { outer, holes } of shapeGroups) {
+    if (Math.abs(polygonArea(outer)) < SKEL_STEP * SKEL_STEP * 4) continue;
+
+    // Collect the eroded ring-sets at every step until the region collapses.
+    const allRings = [];
+    for (let i = 1; i <= 2000; i++) {
+      const d = i * SKEL_STEP;
+      const shrunkOuter = offsetPolyline(outer, d, true);
+      if (!shrunkOuter || !shrunkOuter.length) break;
+
+      const expandedHoles = holes.flatMap(h => offsetPolyline(h, -d, true));
+      const validRings = expandedHoles.length > 0
+        ? shrunkOuter.flatMap(r => differencePolygons(r, expandedHoles))
+        : shrunkOuter;
+
+      if (!validRings || !validRings.length) break;
+      allRings.push(validRings);
+    }
+
+    const n = allRings.length;
+    if (n === 0) continue;
+
+    // Emit rings at a spread of erosion fractions so the user can see:
+    //  - early fractions: stroke regions that collapse first (thin strokes visible)
+    //  - late fractions: innermost rings converging on the medial axis
+    const fractions = [0.15, 0.35, 0.55, 0.75, 0.9, 1.0];
+    const emitted = new Set();
+    for (const frac of fractions) {
+      const idx = Math.min(n - 1, Math.floor(frac * n));
+      if (emitted.has(idx)) continue;
+      emitted.add(idx);
+      for (const ring of allRings[idx]) {
+        const pts = stripClose([...ring]);
+        if (pts.length >= 2) polylines.push([...pts, pts[0]]);
+      }
+    }
+  }
+
+  return { polylines };
+}
+
 export function generateToolpath(operation, entities, context = {}) {
   const { type } = operation;
   switch (type) {

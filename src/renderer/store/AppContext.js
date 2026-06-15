@@ -126,6 +126,7 @@ const initialState = {
   activePanelTab: 'operations',  // operations | tools | machine | gcode
   gcodeOutput: '',
   statusMessage: '',
+  medialAxisPolylines: null,  // set by V-carve skeleton toggle
 
   // Undo/redo
   history: [],
@@ -313,6 +314,7 @@ function reducer(state, action) {
     case 'SET_STATUS':          return { ...state, statusMessage: action.payload };
     case 'TOGGLE_TOOLPATHS':    return { ...state, showToolpaths: !state.showToolpaths };
     case 'TOGGLE_RAPIDS':       return { ...state, showRapids: !state.showRapids };
+    case 'SET_MEDIAL_AXIS':     return { ...state, medialAxisPolylines: action.payload };
 
     case 'SET_TAB_PLACEMENT':
       return { ...state, tabPlacementActive: action.payload.active, tabPlacementOpId: action.payload.opId ?? null };
