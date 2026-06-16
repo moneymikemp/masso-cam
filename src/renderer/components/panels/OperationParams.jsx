@@ -197,6 +197,9 @@ export default function OperationParams({ op, tools, operations = [], onChange }
         {p.tabs && <>
           <Field label="Tab Width" unit={distUnit}><NumInput value={toDisp(p.tabWidth ?? 6)} onChange={v => set('tabWidth', toMM(v))} min={isInch ? 0.04 : 1} step={dStep} /></Field>
           <Field label="Tab Height" unit={distUnit}><NumInput value={toDisp(p.tabHeight ?? 1.5)} onChange={v => set('tabHeight', toMM(v))} min={isInch ? 0.005 : 0.1} step={dStep} /></Field>
+          <Field label="Profile">
+            <Sel value={p.tabProfile || 'flat'} onChange={v => set('tabProfile', v)} options={[['flat','Flat'],['dmd','DMD Curve'],['triangle','Triangle']]} />
+          </Field>
           <Field label="Placement">
             <Sel value={p.tabMode || 'auto'} onChange={v => set('tabMode', v)} options={[['auto','Automatic'],['manual','Manual']]} />
           </Field>

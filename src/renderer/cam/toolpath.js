@@ -109,12 +109,13 @@ export function computeAutoTabPositions(tabCount) {
 // Insert hold-down tab Z-lifts into one Z-pass around a closed contour.
 //
 // Assumes the caller has already moved to pts[0] at cutZ (via plunge or ramp).
-// Returns feed moves covering pts[1]…pts[n-1]…close-to-pts[0], with vertical
-// lift/drop at each tab start/end position.
+// Returns feed moves covering pts[1]…pts[n-1]…close-to-pts[0], with Z shaped
+// by tabProfile: 'flat' (step plateau), 'dmd' (sin² curve), 'triangle' (ramp).
 //
 // tabTValues : t ∈ [0,1) — arc-fraction positions of tab centres
 // tabTopZ    : Z of tab top surface = floorZ + tabHeight  (must be > cutZ)
-function insertTabsIntoContour(contourPts, cutZ, tabTopZ, tabWidth, tabTValues, feedRate) {
+function insertTabsIntoContour(contourPts, cutZ, tabTopZ, tabWidth, tabTValues, feedRate, tabProfile) {
+  tabProfile = tabProfile || 'flat';
   const pts = stripClose([...contourPts]);
   const n   = pts.length;
 
@@ -134,20 +135,6 @@ function insertTabsIntoContour(contourPts, cutZ, tabTopZ, tabWidth, tabTValues, 
     return m;
   }
 
-  // Convert t-values → sorted entering/leaving arc-length events.
-  // Tabs that straddle the seam (s = 0 / totalLen) are nudged inward.
-  const tabBounds = [];
-  for (const t of tabTValues) {
-    const center = ((t % 1) + 1) % 1 * totalLen;
-    const s0     = Math.max(1e-9,            center - tabWidth / 2);
-    const s1     = Math.min(totalLen - 1e-9, center + tabWidth / 2);
-    if (s1 - s0 > 1e-6) {
-      tabBounds.push({ s: s0, entering: true  });
-      tabBounds.push({ s: s1, entering: false });
-    }
-  }
-  tabBounds.sort((a, b) => a.s - b.s);
-
   // Interpolate XY at arc-length s
   function ptAtS(s) {
     if (s >= totalLen - 1e-9) return { ...pts[0] };
@@ -162,27 +149,90 @@ function insertTabsIntoContour(contourPts, cutZ, tabTopZ, tabWidth, tabTValues, 
     return { ...pts[0] };
   }
 
-  const moves = [];
-  let curZ  = cutZ;
-  let tbIdx = 0;
-
-  // Advance to arc-length s: first flush any tab events before s, then emit the point.
-  function walkTo(s) {
-    while (tbIdx < tabBounds.length && tabBounds[tbIdx].s <= s + 1e-9) {
-      const ev = tabBounds[tbIdx++];
-      const tp = ptAtS(ev.s);
-      moves.push({ type: 'feed', x: tp.x, y: tp.y, z: curZ,                    f: feedRate }); // arrive at transition XY
-      curZ = ev.entering ? tabTopZ : cutZ;
-      moves.push({ type: 'feed', x: tp.x, y: tp.y, z: curZ,                    f: feedRate }); // lift or drop
+  if (tabProfile === 'flat') {
+    // Convert t-values → sorted entering/leaving arc-length events.
+    // Tabs that straddle the seam (s = 0 / totalLen) are nudged inward.
+    const tabBounds = [];
+    for (const t of tabTValues) {
+      const center = ((t % 1) + 1) % 1 * totalLen;
+      const s0     = Math.max(1e-9,            center - tabWidth / 2);
+      const s1     = Math.min(totalLen - 1e-9, center + tabWidth / 2);
+      if (s1 - s0 > 1e-6) {
+        tabBounds.push({ s: s0, entering: true  });
+        tabBounds.push({ s: s1, entering: false });
+      }
     }
-    const pt = ptAtS(s);
-    moves.push({ type: 'feed', x: pt.x, y: pt.y, z: curZ, f: feedRate });
+    tabBounds.sort((a, b) => a.s - b.s);
+
+    const moves = [];
+    let curZ  = cutZ;
+    let tbIdx = 0;
+
+    function walkTo(s) {
+      while (tbIdx < tabBounds.length && tabBounds[tbIdx].s <= s + 1e-9) {
+        const ev = tabBounds[tbIdx++];
+        const tp = ptAtS(ev.s);
+        moves.push({ type: 'feed', x: tp.x, y: tp.y, z: curZ,   f: feedRate }); // arrive at transition XY
+        curZ = ev.entering ? tabTopZ : cutZ;
+        moves.push({ type: 'feed', x: tp.x, y: tp.y, z: curZ,   f: feedRate }); // lift or drop
+      }
+      const pt = ptAtS(s);
+      moves.push({ type: 'feed', x: pt.x, y: pt.y, z: curZ, f: feedRate });
+    }
+
+    for (let i = 1; i <= n; i++) walkTo(i < n ? cumLen[i] : totalLen);
+    return moves;
   }
 
-  // Walk each segment endpoint from pts[1] to close (totalLen = pts[0])
-  for (let i = 1; i <= n; i++) {
-    walkTo(i < n ? cumLen[i] : totalLen);
+  // Profiled tab: DMD Curve (sin²) or Triangle
+  const tabH = tabTopZ - cutZ;
+
+  function profileZ(d, w) {
+    const frac = Math.max(0, Math.min(1, d / w));
+    if (tabProfile === 'dmd') {
+      const s = Math.sin(Math.PI * frac);
+      return cutZ + tabH * s * s;
+    }
+    // triangle
+    return cutZ + tabH * (frac <= 0.5 ? 2 * frac : 2 * (1 - frac));
   }
+
+  const tabIntervals = [];
+  for (const t of tabTValues) {
+    const center = ((t % 1) + 1) % 1 * totalLen;
+    const s0 = Math.max(1e-9,            center - tabWidth / 2);
+    const s1 = Math.min(totalLen - 1e-9, center + tabWidth / 2);
+    if (s1 - s0 > 1e-6) tabIntervals.push({ s0, s1 });
+  }
+  tabIntervals.sort((a, b) => a.s0 - b.s0);
+
+  const SAMPLE_STEP = 0.25; // mm between profile samples
+  const moves = [];
+  let cur   = 0;
+  let tiIdx = 0;
+
+  function emit(s, z) {
+    const pt = ptAtS(s);
+    moves.push({ type: 'feed', x: pt.x, y: pt.y, z, f: feedRate });
+  }
+
+  function advanceTo(sTarget) {
+    while (tiIdx < tabIntervals.length && tabIntervals[tiIdx].s0 < sTarget - 1e-9) {
+      const ti = tabIntervals[tiIdx];
+      if (cur < ti.s0 - 1e-9) { emit(ti.s0, cutZ); cur = ti.s0; }
+      const w = ti.s1 - ti.s0;
+      const nSamples = Math.max(4, Math.ceil(w / SAMPLE_STEP));
+      for (let k = 1; k <= nSamples; k++) {
+        const s = ti.s0 + (k / nSamples) * w;
+        emit(s, profileZ(s - ti.s0, w));
+      }
+      cur = ti.s1;
+      tiIdx++;
+    }
+    if (cur < sTarget - 1e-9) { emit(sTarget, cutZ); cur = sTarget; }
+  }
+
+  for (let i = 1; i <= n; i++) advanceTo(i < n ? cumLen[i] : totalLen);
   return moves;
 }
 
@@ -240,7 +290,7 @@ function generateContour(op, entities) {
       const useTabsThisPass = tabsEnabled && closed && tabTValues.length > 0 && z < tabTopZ - 1e-6;
 
       if (useTabsThisPass) {
-        moves.push(...insertTabsIntoContour(contourPts, z, tabTopZ, p.tabWidth || 6, tabTValues, p.feedRate || 1500));
+        moves.push(...insertTabsIntoContour(contourPts, z, tabTopZ, p.tabWidth || 6, tabTValues, p.feedRate || 1500, p.tabProfile || 'flat'));
       } else {
         for (let i = 1; i < contourPts.length; i++) {
           moves.push({ type: 'feed', x: contourPts[i].x, y: contourPts[i].y, z, f: p.feedRate || 1500 });
