@@ -189,6 +189,31 @@ function cornerBranches(outerPolygon, rawSpine, tanAngle, angleThreshold = Math.
   return branches;
 }
 
+// Bridge gaps that are just over the rapid threshold with linearly-interpolated
+// intermediate vertices.  Genuine inter-stroke gaps (>> maxStitchGap) are left
+// alone so they still emit a G00 retract.
+function stitchGaps(pts, rapidGap = 2.0, maxStitchGap = 4.0, stitchStep = 0.1) {
+  if (pts.length < 2) return pts;
+  const result = [pts[0]];
+  for (let i = 1; i < pts.length; i++) {
+    const prev = pts[i - 1], curr = pts[i];
+    const d = Math.sqrt(dist2(prev, curr));
+    if (d > rapidGap && d <= maxStitchGap) {
+      const steps = Math.ceil(d / stitchStep);
+      for (let s = 1; s < steps; s++) {
+        const f = s / steps;
+        result.push({
+          x: prev.x + f * (curr.x - prev.x),
+          y: prev.y + f * (curr.y - prev.y),
+          z: prev.z + f * (curr.z - prev.z),
+        });
+      }
+    }
+    result.push(curr);
+  }
+  return result;
+}
+
 // Order spine points nearest-neighbour, starting from the deepest point.
 function orderSpine(pts) {
   if (!pts.length) return [];
@@ -278,7 +303,8 @@ export function computeVCarveToolpath(outerPolygon, innerHoles = [], config = {}
 
   const rawSpine = extractSpine(outer, holes, tanAngle, depthStep, maxDepth);
   const branches = cornerBranches(outer, rawSpine, tanAngle);
-  const spineVertices = orderSpine([...rawSpine, ...branches]);
+  const ordered = orderSpine([...rawSpine, ...branches]);
+  const spineVertices = stitchGaps(ordered);
 
   const gcode = generateGCode(spineVertices, { safeZ, feedRate, plungeRate, spindleRPM });
   const segments = spineVertices.length >= 2 ? [spineVertices] : [];
