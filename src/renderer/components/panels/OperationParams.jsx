@@ -433,7 +433,7 @@ export default function OperationParams({ op, tools, operations = [], onChange }
         const de = passes.detailEndmill || {};
         const be = passes.bulkEndmill   || {};
 
-        const taperTools   = tools.filter(t => ['tapered','vbit','engraving'].includes(t.type));
+        const taperTools   = tools.filter(t => ['tapered','engraving'].includes(t.type));
         const endmillTools = tools.filter(t => ['flat','upcut','downcut','compression'].includes(t.type));
 
         function setPass(key, field, val) {

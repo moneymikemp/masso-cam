@@ -127,7 +127,7 @@ export default function InlayWizard({ onClose, onGenerate, selectedEntityIds = [
   const m   = v => isInch ? v * MM : v;
   const fmt = (v, dec) => isInch ? (v / MM).toFixed(dec ?? 4) : v.toFixed(dec ?? 2);
 
-  const taperTools   = tools.filter(t => ['tapered','vbit','engraving'].includes(t.type));
+  const taperTools   = tools.filter(t => ['tapered','engraving'].includes(t.type));
   const endmillTools = tools.filter(t => ['flat','upcut','downcut','compression'].includes(t.type));
 
   const [wiz, setWiz] = useState(() => ({

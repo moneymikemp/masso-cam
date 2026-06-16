@@ -50,8 +50,24 @@ function initDatabase() {
       );
     `);
 
-    // Add tool_number column to existing databases that predate this migration.
+    // Schema migrations — each wrapped so they're no-ops on fresh DBs.
     try { db.exec(`ALTER TABLE tools ADD COLUMN tool_number INTEGER DEFAULT 1`); } catch (_) {}
+    try { db.exec(`ALTER TABLE tools ADD COLUMN tip_diameter REAL DEFAULT 0`); } catch (_) {}
+    try { db.exec(`ALTER TABLE tools ADD COLUMN taper_angle  REAL DEFAULT 0`); } catch (_) {}
+
+    // Data migration: vbit → tapered with angle inferred from tool name.
+    db.prepare(`
+      UPDATE tools SET
+        type         = 'tapered',
+        taper_angle  = CASE
+          WHEN name LIKE '%90%' THEN 45
+          WHEN name LIKE '%60%' THEN 30
+          WHEN name LIKE '%45%' THEN 22.5
+          ELSE 45
+        END,
+        tip_diameter = 0
+      WHERE type = 'vbit'
+    `).run();
 
     const toolCount = db.prepare('SELECT COUNT(*) as count FROM tools').get();
     if (toolCount.count === 0) {
@@ -64,8 +80,8 @@ function initDatabase() {
 
 function insertDefaultTools() {
   const insertTool = db.prepare(`
-    INSERT INTO tools (name, type, diameter, flutes, material, notes)
-    VALUES (?, ?, ?, ?, ?, ?)
+    INSERT INTO tools (name, type, diameter, flutes, material, notes, tip_diameter, taper_angle)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
   `);
   const insertFeed = db.prepare(`
     INSERT INTO feeds (tool_id, material, spindle_rpm, feed_rate, plunge_rate, depth_per_pass, stepover)
@@ -94,13 +110,13 @@ function insertDefaultTools() {
         { mat: 'Softwood', rpm: 12000, feed: 2500, plunge: 800, dpp: 6.0, so: 0.45 },
         { mat: 'Hardwood', rpm: 10000, feed: 1800, plunge: 600, dpp: 4.0, so: 0.40 },
       ]},
-    { name: '90° V-Bit 1/4"', type: 'vbit', diameter: 6.35, flutes: 2, material: 'Carbide',
+    { name: '90° V-Bit 1/4"', type: 'tapered', diameter: 6.35, flutes: 2, material: 'Carbide', tipDiameter: 0, taperAngle: 45,
       feeds: [
         { mat: 'MDF', rpm: 18000, feed: 2000, plunge: 600, dpp: 1.0, so: 0.10 },
         { mat: 'Softwood', rpm: 16000, feed: 1800, plunge: 500, dpp: 1.0, so: 0.10 },
         { mat: 'Hardwood', rpm: 14000, feed: 1200, plunge: 400, dpp: 0.8, so: 0.10 },
       ]},
-    { name: '60° V-Bit 1/4"', type: 'vbit', diameter: 6.35, flutes: 2, material: 'Carbide',
+    { name: '60° V-Bit 1/4"', type: 'tapered', diameter: 6.35, flutes: 2, material: 'Carbide', tipDiameter: 0, taperAngle: 30,
       feeds: [
         { mat: 'MDF', rpm: 18000, feed: 2000, plunge: 600, dpp: 1.0, so: 0.10 },
         { mat: 'Hardwood', rpm: 14000, feed: 1200, plunge: 400, dpp: 0.8, so: 0.10 },
@@ -125,7 +141,10 @@ function insertDefaultTools() {
   ];
 
   for (const tool of defaults) {
-    const result = insertTool.run(tool.name, tool.type, tool.diameter, tool.flutes, tool.material, tool.notes || '');
+    const result = insertTool.run(
+      tool.name, tool.type, tool.diameter, tool.flutes, tool.material, tool.notes || '',
+      tool.tipDiameter ?? 0, tool.taperAngle ?? 0,
+    );
     for (const f of tool.feeds) {
       insertFeed.run(result.lastInsertRowid, f.mat, f.rpm, f.feed, f.plunge, f.dpp, f.so);
     }
@@ -299,6 +318,11 @@ ipcMain.handle('db-get-tools', () => {
   const tools = db.prepare('SELECT * FROM tools ORDER BY type, name').all();
   for (const tool of tools) {
     tool.feeds = db.prepare('SELECT * FROM feeds WHERE tool_id = ?').all(tool.id);
+    // Map snake_case DB columns to camelCase for the renderer.
+    tool.tipDiameter = tool.tip_diameter ?? 0;
+    tool.taperAngle  = tool.taper_angle  ?? 0;
+    delete tool.tip_diameter;
+    delete tool.taper_angle;
   }
   return tools;
 });
@@ -307,14 +331,16 @@ ipcMain.handle('db-save-tool', (_, tool) => {
   if (!db) return null;
   const { feeds, ...toolData } = tool;
   let toolId = toolData.id;
-  const toolNum = toolData.tool_number ?? 1;
+  const toolNum     = toolData.tool_number ?? 1;
+  const tipDiameter = toolData.tipDiameter ?? 0;
+  const taperAngle  = toolData.taperAngle  ?? 0;
   if (toolId) {
-    db.prepare('UPDATE tools SET name=?, type=?, diameter=?, flutes=?, material=?, notes=?, tool_number=? WHERE id=?')
-      .run(toolData.name, toolData.type, toolData.diameter, toolData.flutes, toolData.material, toolData.notes, toolNum, toolId);
+    db.prepare('UPDATE tools SET name=?, type=?, diameter=?, flutes=?, material=?, notes=?, tool_number=?, tip_diameter=?, taper_angle=? WHERE id=?')
+      .run(toolData.name, toolData.type, toolData.diameter, toolData.flutes, toolData.material, toolData.notes, toolNum, tipDiameter, taperAngle, toolId);
     db.prepare('DELETE FROM feeds WHERE tool_id=?').run(toolId);
   } else {
-    const result = db.prepare('INSERT INTO tools (name,type,diameter,flutes,material,notes,tool_number) VALUES (?,?,?,?,?,?,?)')
-      .run(toolData.name, toolData.type, toolData.diameter, toolData.flutes, toolData.material, toolData.notes || '', toolNum);
+    const result = db.prepare('INSERT INTO tools (name,type,diameter,flutes,material,notes,tool_number,tip_diameter,taper_angle) VALUES (?,?,?,?,?,?,?,?,?)')
+      .run(toolData.name, toolData.type, toolData.diameter, toolData.flutes, toolData.material, toolData.notes || '', toolNum, tipDiameter, taperAngle);
     toolId = result.lastInsertRowid;
   }
   const insertFeed = db.prepare('INSERT INTO feeds (tool_id,material,spindle_rpm,feed_rate,plunge_rate,depth_per_pass,stepover) VALUES (?,?,?,?,?,?,?)');

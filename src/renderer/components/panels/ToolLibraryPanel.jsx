@@ -1,7 +1,7 @@
 import React, { useState, useEffect } from 'react';
 import { useApp } from '../../store/AppContext';
 
-const TOOL_TYPES = ['flat','ball','vbit','upcut','downcut','compression','tapered','diamond'];
+const TOOL_TYPES = ['flat','ball','tapered','upcut','downcut','compression','diamond'];
 const MATERIALS = ['MDF','Plywood','Softwood','Hardwood','Aluminum','HDPE','Acrylic','Foam','Brass','Steel'];
 
 const MM_PER_INCH = 25.4;
@@ -119,7 +119,7 @@ export default function ToolLibraryPanel() {
   function addFeed() { setEditTool(t => ({ ...t, feeds: [...t.feeds, newFeed()] })); }
   function removeFeed(i) { setEditTool(t => ({ ...t, feeds: t.feeds.filter((_, j) => j !== i) })); }
 
-  const typeIcon = { flat:'⬛',ball:'⬤',vbit:'▼',upcut:'↑',downcut:'↓',compression:'⇅',tapered:'▽',diamond:'◆' };
+  const typeIcon = { flat:'⬛',ball:'⬤',tapered:'▼',upcut:'↑',downcut:'↓',compression:'⇅',diamond:'◆' };
 
   return (
     <div style={S.panel}>
