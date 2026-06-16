@@ -180,7 +180,7 @@ function cornerBranches(outerPolygon, rawSpine, tanAngle, angleThreshold = Math.
         branches.push({
           x: tipX + f * (topSv.x - tipX),
           y: tipY + f * (topSv.y - tipY),
-          z: targetZ,
+          z: targetZ + f * (topSv.z - targetZ),
         });
       }
     }

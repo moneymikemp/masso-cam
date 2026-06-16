@@ -357,7 +357,7 @@ function cornerBranches(outerPolygon, rawSpine, tanAngle, angleThreshold) {
       const extSteps = Math.max(2, Math.ceil(topDist / BRANCH_STEP));
       for (let s = 1; s <= extSteps; s++) {
         const f = s / extSteps;
-        branches.push({ x: tipX + f*(topSv.x-tipX), y: tipY + f*(topSv.y-tipY), z: targetZ });
+        branches.push({ x: tipX + f*(topSv.x-tipX), y: tipY + f*(topSv.y-tipY), z: targetZ + f*(topSv.z-targetZ) });
       }
     }
   }
