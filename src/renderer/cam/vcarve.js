@@ -153,11 +153,36 @@ function cornerBranches(outerPolygon, rawSpine, tanAngle, angleThreshold = Math.
     const hitT = (-targetZ * tanAngle) / sinHalf;
     if (hitT < 0.1) continue;
 
-    // Emit branch points from corner (Z=0) to bisector endpoint (Z=deepestZ)
+    // Emit branch points from corner (Z=0) to bisector endpoint (Z=targetZ)
     const steps = Math.max(5, Math.ceil(hitT / BRANCH_STEP));
     for (let s = 0; s <= steps; s++) {
       const t = (s / steps) * hitT;
       branches.push({ x: curr.x + t * bx, y: curr.y + t * by, z: -(t * sinHalf) / tanAngle });
+    }
+
+    // Vertical extension: continue from the bisector tip straight up to the nearest
+    // rawSpine vertex above it on the same x-side of the arm.  This fills the gap
+    // between the stem-tip spine vertex and the stem-top junction vertex — a gap that
+    // is just over the 2 mm rapid threshold without these intermediate points.
+    const tipX = curr.x + hitT * bx;
+    const tipY = curr.y + hitT * by;
+    let topSv = null, topDist = Infinity;
+    for (const sv of rawSpine) {
+      if (Math.abs(sv.x - tipX) > 1.0) continue; // same x-side of arm
+      if (sv.y <= tipY + 0.05) continue;          // must be above the tip
+      const d = sv.y - tipY;
+      if (d < topDist && d < 5.0) { topDist = d; topSv = sv; }
+    }
+    if (topSv) {
+      const extSteps = Math.max(2, Math.ceil(topDist / BRANCH_STEP));
+      for (let s = 1; s <= extSteps; s++) {
+        const f = s / extSteps;
+        branches.push({
+          x: tipX + f * (topSv.x - tipX),
+          y: tipY + f * (topSv.y - tipY),
+          z: targetZ,
+        });
+      }
     }
   }
 

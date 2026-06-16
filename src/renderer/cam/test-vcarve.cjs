@@ -157,6 +157,21 @@ function cornerBranches(outerPolygon, rawSpine, tanAngle, angleThreshold) {
       const t = (s / steps) * hitT;
       branches.push({ x: curr.x + t * bx, y: curr.y + t * by, z: -(t * sinHalf) / tanAngle });
     }
+    // Vertical extension: stem tip → nearest rawSpine vertex above (same x-side)
+    const tipX = curr.x + hitT * bx, tipY = curr.y + hitT * by;
+    let topSv = null, topDist = Infinity;
+    for (const sv of rawSpine) {
+      if (Math.abs(sv.x - tipX) > 1.0 || sv.y <= tipY + 0.05) continue;
+      const d = sv.y - tipY;
+      if (d < topDist && d < 5.0) { topDist = d; topSv = sv; }
+    }
+    if (topSv) {
+      const extSteps = Math.max(2, Math.ceil(topDist / BRANCH_STEP));
+      for (let s = 1; s <= extSteps; s++) {
+        const f = s / extSteps;
+        branches.push({ x: tipX + f*(topSv.x-tipX), y: tipY + f*(topSv.y-tipY), z: targetZ });
+      }
+    }
   }
   return branches;
 }
