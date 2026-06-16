@@ -1,0 +1,464 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>MassoCAM — Medial Axis Phase 1 Verification</title>
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body { background: #0e0e1e; color: #ccc; font-family: monospace; display: flex; flex-direction: column; height: 100vh; }
+  #toolbar { padding: 8px 12px; background: #13132a; border-bottom: 1px solid #2a2a50; display: flex; align-items: center; gap: 12px; flex-shrink: 0; }
+  #toolbar label { font-size: 12px; color: #8888bb; }
+  #toolbar select, #toolbar input { background: #1a1a3a; border: 1px solid #3a3a70; color: #ccc; padding: 3px 6px; border-radius: 3px; font-size: 12px; }
+  #toolbar button { background: #2a2a5a; border: 1px solid #4444aa; color: #8888ff; padding: 4px 10px; border-radius: 3px; cursor: pointer; font-size: 12px; }
+  #toolbar button:hover { background: #3a3a7a; }
+  #status { font-size: 11px; color: #555588; margin-left: auto; }
+  #main { flex: 1; display: flex; overflow: hidden; }
+  #canvas-wrap { flex: 1; position: relative; }
+  canvas { width: 100%; height: 100%; }
+  #legend { width: 200px; background: #13132a; border-left: 1px solid #2a2a50; padding: 10px; font-size: 11px; overflow-y: auto; }
+  #legend h3 { font-size: 11px; color: #8888bb; text-transform: uppercase; letter-spacing: 1px; margin-bottom: 8px; }
+  .leg-item { display: flex; align-items: center; gap: 6px; margin-bottom: 5px; }
+  .leg-dot { width: 10px; height: 10px; border-radius: 50%; flex-shrink: 0; }
+  #nodeList { margin-top: 10px; max-height: 60%; overflow-y: auto; font-size: 10px; color: #556; }
+  .node-entry { padding: 2px 0; border-bottom: 1px solid #1a1a30; }
+  .node-entry.terminal { color: #cc6666; }
+  .node-entry.junction { color: #6699cc; }
+</style>
+</head>
+<body>
+<div id="toolbar">
+  <label>Shape:</label>
+  <select id="shapeSelect">
+    <option value="aletter">Letter 'a' (bowl+stem+hole)</option>
+    <option value="rect">Thin Rectangle (stroke)</option>
+    <option value="tshape">T-Shape (junction test)</option>
+    <option value="oshape">O-Shape (annular)</option>
+    <option value="lshape">L-Shape (bend)</option>
+    <option value="triangle">Equilateral Triangle</option>
+  </select>
+  <label>Step mm:</label>
+  <input id="stepSize" type="number" value="0.05" min="0.01" max="0.5" step="0.01" style="width:70px">
+  <label>Bit °:</label>
+  <input id="bitAngle" type="number" value="45" min="5" max="85" step="5" style="width:55px">
+  <button id="runBtn">Run</button>
+  <span id="status">Ready.</span>
+</div>
+<div id="main">
+  <div id="canvas-wrap"><canvas id="c"></canvas></div>
+  <div id="legend">
+    <h3>Legend</h3>
+    <div class="leg-item"><div class="leg-dot" style="background:#ffffff"></div> Input shape</div>
+    <div class="leg-item"><div class="leg-dot" style="background:#cc4444"></div> Terminal (collapse)</div>
+    <div class="leg-item"><div class="leg-dot" style="background:#4488cc"></div> Junction (split)</div>
+    <h3 style="margin-top:10px">Nodes</h3>
+    <div id="nodeList"></div>
+  </div>
+</div>
+
+<!-- ClipperLib from local node_modules (browser UMD build) -->
+<script src="../../../node_modules/clipper-lib/clipper.js"></script>
+
+<script>
+// ── Replicated from offset.js (browser-compatible, ClipperLib global) ─────────
+const SCALE = 1000;
+
+function toClipper(pts) {
+  return pts.map(p => ({ X: Math.round(p.x * SCALE), Y: Math.round(p.y * SCALE) }));
+}
+function fromClipper(path) {
+  return path.map(p => ({ x: p.X / SCALE, y: p.Y / SCALE }));
+}
+function stripClose(pts) {
+  if (pts.length > 1 && Math.hypot(pts[pts.length-1].x - pts[0].x, pts[pts.length-1].y - pts[0].y) < 1e-6)
+    return pts.slice(0, -1);
+  return pts;
+}
+function isClockwise(pts) {
+  let sum = 0;
+  const n = pts.length;
+  for (let i = 0; i < n - 1; i++)
+    sum += (pts[i+1].x - pts[i].x) * (pts[i+1].y + pts[i].y);
+  return sum > 0;
+}
+function polygonArea(pts) {
+  let a = 0, n = pts.length;
+  for (let i = 0, j = n-1; i < n; j = i++)
+    a += (pts[j].x + pts[i].x) * (pts[j].y - pts[i].y);
+  return Math.abs(a / 2);
+}
+function pointInPolygon(point, polygon) {
+  let inside = false;
+  for (let i = 0, j = polygon.length-1; i < polygon.length; j = i++) {
+    const xi = polygon[i].x, yi = polygon[i].y, xj = polygon[j].x, yj = polygon[j].y;
+    if (((yi > point.y) !== (yj > point.y)) && (point.x < (xj-xi)*(point.y-yi)/(yj-yi)+xi))
+      inside = !inside;
+  }
+  return inside;
+}
+function clipperClosedOffset(points, distance) {
+  const co = new ClipperLib.ClipperOffset();
+  co.AddPath(toClipper(points), ClipperLib.JoinType.jtMiter, ClipperLib.EndType.etClosedPolygon);
+  const sol = new ClipperLib.Paths();
+  co.Execute(sol, -distance * SCALE);
+  return sol.map(fromClipper).filter(p => p.length >= 3)
+    .map(p => isClockwise(p) ? [...p].reverse() : p)
+    .sort((a, b) => polygonArea(b) - polygonArea(a));
+}
+function offsetPolyline(points, distance, closed = true) {
+  if (!points || points.length < 2) return [points || []];
+  const pts = stripClose([...points]);
+  if (pts.length < 3) return [pts];
+  const results = clipperClosedOffset(pts, distance);
+  if (!results.length) return [[]];
+  return results.map(r => [...r, { ...r[0] }]);
+}
+function differencePolygons(subjectPts, clipPtsList) {
+  const subject = stripClose([...subjectPts]);
+  if (subject.length < 3) return [];
+  const c = new ClipperLib.Clipper();
+  c.AddPath(toClipper(subject), ClipperLib.PolyType.ptSubject, true);
+  for (const clipPts of clipPtsList) {
+    const clip = stripClose([...clipPts]);
+    if (clip.length >= 3) c.AddPath(toClipper(clip), ClipperLib.PolyType.ptClip, true);
+  }
+  const sol = new ClipperLib.Paths();
+  c.Execute(ClipperLib.ClipType.ctDifference, sol);
+  return sol.map(fromClipper).filter(p => p.length >= 3)
+    .map(p => isClockwise(p) ? [...p].reverse() : p);
+}
+
+// ── Replicated from medialaxis.js ─────────────────────────────────────────────
+function vertexCenter(pts) {
+  let sx = 0, sy = 0;
+  for (const p of pts) { sx += p.x; sy += p.y; }
+  return { x: sx / pts.length, y: sy / pts.length };
+}
+function bboxCenter(pts) {
+  let minX = pts[0].x, maxX = pts[0].x, minY = pts[0].y, maxY = pts[0].y;
+  for (const p of pts) {
+    if (p.x < minX) minX = p.x; if (p.x > maxX) maxX = p.x;
+    if (p.y < minY) minY = p.y; if (p.y > maxY) maxY = p.y;
+  }
+  return { x: (minX+maxX)/2, y: (minY+maxY)/2 };
+}
+function dist2(a, b) { return (a.x-b.x)**2 + (a.y-b.y)**2; }
+
+function computeValidPaths(outer, holes, d) {
+  const shrunkOuter = offsetPolyline(outer, d, true);
+  if (!shrunkOuter?.length) return [];
+  const validOuter = shrunkOuter.filter(r => r?.length >= 3);
+  if (!validOuter.length) return [];
+  if (!holes?.length) return validOuter;
+  const expandedHoles = holes.flatMap(h => offsetPolyline(h, -d, true)).filter(r => r?.length >= 3);
+  if (!expandedHoles.length) return validOuter;
+  const result = [];
+  for (const outerComp of validOuter) {
+    const parts = differencePolygons(outerComp, expandedHoles);
+    for (const part of parts) { if (part?.length >= 3) result.push(part); }
+  }
+  return result;
+}
+
+function greedyMatch(prevCenters, curCenters) {
+  const claimed = new Set();
+  const prevMatch = new Array(prevCenters.length).fill(-1);
+  for (let pi = 0; pi < prevCenters.length; pi++) {
+    let best = -1, bestD = Infinity;
+    for (let ci = 0; ci < curCenters.length; ci++) {
+      if (claimed.has(ci)) continue;
+      const d = dist2(prevCenters[pi], curCenters[ci]);
+      if (d < bestD) { bestD = d; best = ci; }
+    }
+    prevMatch[pi] = best;
+    if (best >= 0) claimed.add(best);
+  }
+  const orphanCurs = [];
+  for (let ci = 0; ci < curCenters.length; ci++) {
+    if (!claimed.has(ci)) orphanCurs.push(ci);
+  }
+  return { prevMatch, orphanCurs };
+}
+
+function extractRawSkeletonPoints(outerPolygon, innerHoles = [], config = {}) {
+  const { stepSize = 0.05, bitHalfAngleDeg = 45, maxSteps = 3000 } = config;
+  const tanAngle = Math.tan(bitHalfAngleDeg * Math.PI / 180);
+  const nodes = [];
+
+  const outer = isClockwise(outerPolygon) ? [...outerPolygon].reverse() : outerPolygon;
+  const holes = innerHoles.map(h => isClockwise(h) ? [...h].reverse() : h);
+
+  let prevPaths = computeValidPaths(outer, holes, stepSize);
+  if (prevPaths.length === 0) return nodes;
+
+  for (let i = 2; i <= maxSteps; i++) {
+    const curD = i * stepSize;
+    const prevD = (i - 1) * stepSize;
+    const curPaths = computeValidPaths(outer, holes, curD);
+
+    if (curPaths.length === 0) {
+      for (const p of prevPaths) {
+        const c = vertexCenter(p);
+        nodes.push({ x: c.x, y: c.y, z: -(prevD / tanAngle), eventType: 'terminal' });
+      }
+      break;
+    }
+
+    const prevCenters = prevPaths.map(bboxCenter);
+    const curCenters  = curPaths.map(bboxCenter);
+
+    if (curPaths.length !== prevPaths.length) {
+      const { prevMatch, orphanCurs } = greedyMatch(prevCenters, curCenters);
+      for (let pi = 0; pi < prevPaths.length; pi++) {
+        if (prevMatch[pi] < 0) {
+          const c = vertexCenter(prevPaths[pi]);
+          nodes.push({ x: c.x, y: c.y, z: -(prevD / tanAngle), eventType: 'terminal' });
+        }
+      }
+      for (const ci of orphanCurs) {
+        let bestPi = 0, bestD = dist2(curCenters[ci], prevCenters[0]);
+        for (let pi = 1; pi < prevCenters.length; pi++) {
+          const d = dist2(curCenters[ci], prevCenters[pi]);
+          if (d < bestD) { bestD = d; bestPi = pi; }
+        }
+        const c = vertexCenter(prevPaths[bestPi]);
+        nodes.push({ x: c.x, y: c.y, z: -(prevD / tanAngle), eventType: 'junction' });
+      }
+    } else {
+      // Silent pinch: waist collapses without changing path count — detected via bbox center jump.
+      const jumpThresh = (20 * stepSize) ** 2;
+      for (let pi = 0; pi < prevPaths.length; pi++) {
+        let best = 0, bestD2 = dist2(prevCenters[pi], curCenters[0]);
+        for (let ci = 1; ci < curCenters.length; ci++) {
+          const d2 = dist2(prevCenters[pi], curCenters[ci]);
+          if (d2 < bestD2) { bestD2 = d2; best = ci; }
+        }
+        if (bestD2 > jumpThresh) {
+          const c = vertexCenter(prevPaths[pi]);
+          nodes.push({ x: c.x, y: c.y, z: -(prevD / tanAngle), eventType: 'junction' });
+        }
+      }
+    }
+
+    prevPaths = curPaths;
+  }
+  return nodes;
+}
+
+// ── Test shape definitions (math coords, Y-up, CCW) ──────────────────────────
+function makeNgon(cx, cy, r, n, startAngle = 0) {
+  const pts = [];
+  for (let i = 0; i < n; i++) {
+    const a = startAngle + (2 * Math.PI * i) / n;
+    pts.push({ x: cx + r * Math.cos(a), y: cy + r * Math.sin(a) });
+  }
+  return pts; // CCW (positive angles)
+}
+
+const SHAPES = {
+  // Letter 'a': circular bowl + thin stem below + inner counter hole.
+  // Outer is one closed CCW polygon; hole is the counter-space inside the bowl.
+  aletter: {
+    label: "Letter 'a'",
+    outer: [
+      // Stem base, going CCW (Y-up math coords)
+      { x: -1.5, y: -7 },
+      { x:  1.5, y: -7 },
+      // Up right side of stem, then blend into bowl
+      { x:  1.5, y: -4.5 },
+      { x:  4.0, y: -4.0 },
+      { x:  5.5, y: -2.0 },
+      { x:  6.0, y:  0.0 },
+      { x:  5.5, y:  2.0 },
+      { x:  4.0, y:  4.0 },
+      { x:  2.0, y:  5.5 },
+      { x:  0.0, y:  6.0 },
+      { x: -2.0, y:  5.5 },
+      { x: -4.0, y:  4.0 },
+      { x: -5.5, y:  2.0 },
+      { x: -6.0, y:  0.0 },
+      { x: -5.5, y: -2.0 },
+      { x: -4.0, y: -4.0 },
+      { x: -2.0, y: -5.0 },
+      // Left side of stem back down
+      { x: -1.5, y: -4.5 },
+    ],
+    holes: [makeNgon(0, 1, 2.5, 32)],  // inner counter at bowl centre
+  },
+  rect: {
+    label: 'Thin Rectangle',
+    outer: [
+      { x: 0, y: 0 }, { x: 20, y: 0 }, { x: 20, y: 4 }, { x: 0, y: 4 }
+    ],
+    holes: [],
+  },
+  tshape: {
+    label: 'T-Shape (junction test)',
+    // 5mm-wide stem (collapses at d=2.5), 8mm-tall bar (collapses at d=4)
+    // Stem fires a junction, bar fires a terminal — different depths.
+    outer: [
+      { x: -2.5, y: 0 },
+      { x:  2.5, y: 0 },
+      { x:  2.5, y: 10 },
+      { x:  7.5, y: 10 },
+      { x:  7.5, y: 18 },
+      { x: -7.5, y: 18 },
+      { x: -7.5, y: 10 },
+      { x: -2.5, y: 10 },
+    ],
+    holes: [],
+  },
+  oshape: {
+    label: 'O-Shape (annular)',
+    outer: makeNgon(0, 0, 10, 48),
+    holes: [makeNgon(0, 0, 5, 48)],
+  },
+  lshape: {
+    label: 'L-Shape',
+    outer: [
+      { x: 0, y: 0 }, { x: 5, y: 0 }, { x: 5, y: 12 },
+      { x: 15, y: 12 }, { x: 15, y: 17 }, { x: 0, y: 17 },
+    ],
+    holes: [],
+  },
+  triangle: {
+    label: 'Equilateral Triangle',
+    outer: makeNgon(0, 0, 12, 3, Math.PI / 2),
+    holes: [],
+  },
+};
+
+// ── Canvas rendering ──────────────────────────────────────────────────────────
+const canvas = document.getElementById('c');
+const ctx = canvas.getContext('2d');
+
+function resizeCanvas() {
+  const wrap = document.getElementById('canvas-wrap');
+  canvas.width = wrap.clientWidth;
+  canvas.height = wrap.clientHeight;
+}
+window.addEventListener('resize', () => { resizeCanvas(); renderLast(); });
+resizeCanvas();
+
+let lastResult = null;
+let lastShape = null;
+
+function worldToCanvas(pts, cx, cy, scale) {
+  return pts.map(p => ({ x: cx + p.x * scale, y: cy - p.y * scale }));
+}
+function w2c(p, cx, cy, scale) {
+  return { x: cx + p.x * scale, y: cy - p.y * scale };
+}
+
+function computeScale(shapeOuter, holes, nodes) {
+  let minX = Infinity, maxX = -Infinity, minY = Infinity, maxY = -Infinity;
+  const all = [...shapeOuter, ...(holes || []).flat(), ...nodes];
+  for (const p of all) {
+    if (p.x < minX) minX = p.x; if (p.x > maxX) maxX = p.x;
+    if (p.y < minY) minY = p.y; if (p.y > maxY) maxY = p.y;
+  }
+  const W = canvas.width, H = canvas.height;
+  const pad = 60;
+  const sx = (W - 2*pad) / Math.max(maxX - minX, 0.1);
+  const sy = (H - 2*pad) / Math.max(maxY - minY, 0.1);
+  const scale = Math.min(sx, sy);
+  const cx = W/2 - ((minX + maxX)/2) * scale;
+  const cy = H/2 + ((minY + maxY)/2) * scale;
+  return { cx, cy, scale };
+}
+
+function drawPolygon(pts, { cx, cy, scale }) {
+  if (!pts || pts.length < 2) return;
+  ctx.beginPath();
+  const f = w2c(pts[0], cx, cy, scale);
+  ctx.moveTo(f.x, f.y);
+  for (let i = 1; i < pts.length; i++) {
+    const p = w2c(pts[i], cx, cy, scale);
+    ctx.lineTo(p.x, p.y);
+  }
+  ctx.closePath();
+  ctx.stroke();
+}
+
+function renderResult(shape, nodes) {
+  lastResult = nodes;
+  lastShape = shape;
+  ctx.fillStyle = '#0e0e1e';
+  ctx.fillRect(0, 0, canvas.width, canvas.height);
+
+  const transform = computeScale(shape.outer, shape.holes, nodes);
+
+  // Draw input shape
+  ctx.strokeStyle = 'rgba(255,255,255,0.7)';
+  ctx.lineWidth = 1.5;
+  ctx.setLineDash([]);
+  drawPolygon(shape.outer, transform);
+  for (const h of (shape.holes || [])) {
+    ctx.strokeStyle = 'rgba(255,200,100,0.6)';
+    drawPolygon(h, transform);
+  }
+
+  // Draw skeleton nodes
+  const nodeRadius = 3;
+  for (const n of nodes) {
+    const p = w2c(n, transform.cx, transform.cy, transform.scale);
+    ctx.beginPath();
+    ctx.arc(p.x, p.y, nodeRadius, 0, 2 * Math.PI);
+    if (n.eventType === 'terminal') {
+      ctx.fillStyle = '#cc4444';
+    } else {
+      ctx.fillStyle = '#4488cc';
+    }
+    ctx.fill();
+  }
+
+  // Update status and node list
+  const termCount = nodes.filter(n => n.eventType === 'terminal').length;
+  const juncCount = nodes.filter(n => n.eventType === 'junction').length;
+  document.getElementById('status').textContent =
+    `${nodes.length} nodes: ${termCount} terminal, ${juncCount} junction`;
+
+  const listEl = document.getElementById('nodeList');
+  listEl.innerHTML = nodes.slice(0, 100).map(n =>
+    `<div class="node-entry ${n.eventType}">
+      ${n.eventType === 'terminal' ? '● T' : '● J'}
+      (${n.x.toFixed(2)}, ${n.y.toFixed(2)})
+      z=${n.z.toFixed(3)}mm
+    </div>`
+  ).join('') + (nodes.length > 100 ? `<div style="color:#444">...+${nodes.length - 100} more</div>` : '');
+}
+
+function renderLast() {
+  if (lastResult && lastShape) renderResult(lastShape, lastResult);
+}
+
+// ── Main run ─────────────────────────────────────────────────────────────────
+document.getElementById('runBtn').addEventListener('click', () => {
+  const shapeKey = document.getElementById('shapeSelect').value;
+  const stepSize = parseFloat(document.getElementById('stepSize').value) || 0.05;
+  const bitAngle = parseFloat(document.getElementById('bitAngle').value) || 45;
+
+  const shape = SHAPES[shapeKey];
+  if (!shape) return;
+
+  document.getElementById('status').textContent = 'Running…';
+  setTimeout(() => {
+    const t0 = performance.now();
+    const nodes = extractRawSkeletonPoints(shape.outer, shape.holes || [], {
+      stepSize,
+      bitHalfAngleDeg: bitAngle,
+      maxSteps: 5000,
+    });
+    const elapsed = (performance.now() - t0).toFixed(0);
+    renderResult(shape, nodes);
+    document.getElementById('status').textContent +=
+      `  (${elapsed}ms)`;
+  }, 10);
+});
+
+// Run default shape on load
+window.addEventListener('load', () => {
+  document.getElementById('runBtn').click();
+});
+</script>
+</body>
+</html>
