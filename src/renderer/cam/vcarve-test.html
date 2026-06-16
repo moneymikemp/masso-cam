@@ -2,7 +2,7 @@
 <html lang="en">
 <head>
 <meta charset="UTF-8">
-<title>MassoCAM — V-Carve Outside-In Harness</title>
+<title>MassoCAM — V-Carve Spine Harness</title>
 <style>
 *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
 html, body { height: 100%; background: #111; color: #ccc; font: 13px/1.4 'Consolas','Courier New',monospace; }
@@ -74,7 +74,7 @@ hr { border: none; border-top: 1px solid #2a2a2a; margin: 2px 0; }
 <div id="app">
   <!-- ── Controls ───────────────────────────────────────────── -->
   <div id="controls">
-    <h2>V-Carve Outside-In Harness</h2>
+    <h2>V-Carve Spine Harness</h2>
 
     <div class="field">
       <label>Shape</label>
@@ -86,8 +86,8 @@ hr { border: none; border-top: 1px solid #2a2a2a; margin: 2px 0; }
 
     <hr>
     <div class="field">
-      <label>Depth step (mm)</label>
-      <input id="depthStep" type="number" value="0.10" step="0.01" min="0.01" max="0.5">
+      <label>Spine step (mm)</label>
+      <input id="depthStep" type="number" value="0.05" step="0.01" min="0.01" max="0.5">
     </div>
     <div class="field">
       <label>Bit half-angle (°)</label>
@@ -152,21 +152,16 @@ function stripClose(pts) {
     return pts.slice(0, -1);
   return pts;
 }
-
 function isClockwise(pts) {
-  let sum = 0;
-  const n = pts.length;
-  for (let i = 0; i < n - 1; i++)
-    sum += (pts[i+1].x - pts[i].x) * (pts[i+1].y + pts[i].y);
+  let sum = 0, n = pts.length;
+  for (let i = 0; i < n - 1; i++) sum += (pts[i+1].x - pts[i].x) * (pts[i+1].y + pts[i].y);
   return sum > 0;
 }
-
 function polygonArea(pts) {
   let a = 0, n = pts.length;
   for (let i = 0, j = n - 1; i < n; j = i++) a += (pts[j].x + pts[i].x) * (pts[j].y - pts[i].y);
   return Math.abs(a / 2);
 }
-
 function clipperOffset(pts, distance) {
   const co = new ClipperLib.ClipperOffset();
   co.AddPath(toC(pts), ClipperLib.JoinType.jtMiter, ClipperLib.EndType.etClosedPolygon);
@@ -176,16 +171,15 @@ function clipperOffset(pts, distance) {
     .map(p => isClockwise(p) ? [...p].reverse() : p)
     .sort((a, b) => polygonArea(b) - polygonArea(a));
 }
-
-function offsetPolyline(pts, d, closed = true) {
+function offsetPolyline(pts, d) {
   const p = stripClose([...pts]);
   if (p.length < 3) return [p];
   const r = clipperOffset(p, d);
   if (!r.length) return [[]];
   return r.map(q => [...q, { ...q[0] }]);
 }
-
-function differencePolygons(subj, clipList) {
+// Returns only outer contours from subject MINUS clipList via PolyTree.
+function differenceOuterOnly(subj, clipList) {
   const s = stripClose([...subj]);
   if (s.length < 3) return [];
   const c = new ClipperLib.Clipper();
@@ -194,100 +188,182 @@ function differencePolygons(subj, clipList) {
     const p = stripClose([...cl]);
     if (p.length >= 3) c.AddPath(toC(p), ClipperLib.PolyType.ptClip, true);
   }
-  const sol = new ClipperLib.Paths();
-  c.Execute(ClipperLib.ClipType.ctDifference, sol);
-  return sol.map(fromC).filter(p => p.length >= 3).map(p => isClockwise(p) ? [...p].reverse() : p);
+  const polyTree = new ClipperLib.PolyTree();
+  c.Execute(ClipperLib.ClipType.ctDifference, polyTree);
+  return polyTree.m_Childs
+    .map(node => fromC(node.m_polygon))
+    .filter(p => p.length >= 3)
+    .map(p => isClockwise(p) ? [...p].reverse() : p);
 }
 
-// ── Core helpers ──────────────────────────────────────────────────────────────
+// ── V-Carve spine pipeline ────────────────────────────────────────────────────
 
 function dist2(a, b) { return (a.x - b.x) ** 2 + (a.y - b.y) ** 2; }
 
-function closestPointIdx(pts, target) {
-  let best = 0, bestD = Infinity;
-  for (let i = 0; i < pts.length; i++) {
-    const d = dist2(pts[i], target);
-    if (d < bestD) { bestD = d; best = i; }
-  }
-  return best;
-}
-
 function computeValidPaths(outer, holes, R) {
-  const so = offsetPolyline(outer, R, true);
+  const so = offsetPolyline(outer, R);
   if (!so?.length) return [];
   const vo = so.filter(r => r?.length >= 3);
   if (!vo.length) return [];
   if (!holes?.length) return vo;
-  const eh = holes.flatMap(h => offsetPolyline(h, -R, true)).filter(r => r?.length >= 3);
+  const eh = holes.flatMap(h => offsetPolyline(h, -R)).filter(r => r?.length >= 3);
   if (!eh.length) return vo;
   const res = [];
-  for (const oc of vo) for (const p of differencePolygons(oc, eh)) if (p?.length >= 3) res.push(p);
+  for (const oc of vo) {
+    for (const p of differenceOuterOnly(oc, eh)) if (p?.length >= 3) res.push(p);
+  }
   return res;
 }
 
-// ── Outside-In V-Carve pipeline ───────────────────────────────────────────────
+function extractSpine(outer, holes, tanAngle, stepR, maxDepth) {
+  const maxSteps = Math.ceil(maxDepth / stepR);
+  const COLLAPSE_SQ = (3 * stepR) ** 2;
+  const spine = [];
 
-function generateGCode(segments, config) {
-  const { safeZ = 5, feedRate = 1499, plungeRate = 305, spindleRPM = 18000 } = config;
+  let prevVerts = [];
+  let prevR = 0;
+
+  for (let i = 1; i <= maxSteps; i++) {
+    const R = i * stepR;
+    const paths = computeValidPaths(outer, holes, R);
+
+    if (!paths.length) {
+      const z = -prevR / tanAngle;
+      for (const v of prevVerts) spine.push({ x: v.x, y: v.y, z });
+      break;
+    }
+
+    const currVerts = paths.flatMap(p => stripClose([...p]));
+
+    if (prevVerts.length > 0) {
+      const z = -prevR / tanAngle;
+      for (const v of prevVerts) {
+        let near = false;
+        for (const c of currVerts) {
+          if (dist2(v, c) < COLLAPSE_SQ) { near = true; break; }
+        }
+        if (!near) spine.push({ x: v.x, y: v.y, z });
+      }
+    }
+
+    prevVerts = currVerts;
+    prevR = R;
+  }
+
+  return spine;
+}
+
+function orderSpine(pts) {
+  if (!pts.length) return [];
+  let startIdx = 0;
+  for (let i = 1; i < pts.length; i++) {
+    if (pts[i].z < pts[startIdx].z) startIdx = i;
+  }
+  const rem = [...pts];
+  const out = [];
+  let cur = rem.splice(startIdx, 1)[0];
+  out.push(cur);
+  while (rem.length) {
+    let bestD = Infinity, bestI = -1;
+    for (let i = 0; i < rem.length; i++) {
+      const d = dist2(rem[i], cur);
+      if (d < bestD) { bestD = d; bestI = i; }
+    }
+    cur = rem.splice(bestI, 1)[0];
+    out.push(cur);
+  }
+  return out;
+}
+
+function generateGCode(spinePoints, config) {
+  const { safeZ=5, feedRate=1499, plungeRate=305, spindleRPM=18000, rapidGap=2 } = config;
   const fmt = v => v.toFixed(4);
+  const rapidGapSq = rapidGap * rapidGap;
   const lines = [
-    '; V-Carve — MassoCAM Outside-In Layering',
-    'G21', 'G90',
-    `S${spindleRPM} M03`,
-    `G00 Z${fmt(safeZ)}`,
+    '; V-Carve — MassoCAM Medial-Spine Single Pass',
+    'G21', 'G90', `S${spindleRPM} M03`, `G00 Z${fmt(safeZ)}`,
   ];
-  for (const seg of segments) {
-    if (seg.length < 2) continue;
-    lines.push(`G00 X${fmt(seg[0].x)} Y${fmt(seg[0].y)}`);
-    lines.push(`G01 Z${fmt(seg[0].z)} F${plungeRate}`);
-    for (let i = 1; i < seg.length; i++)
-      lines.push(`G01 X${fmt(seg[i].x)} Y${fmt(seg[i].y)} F${feedRate}`);
+  if (spinePoints.length >= 2) {
+    lines.push(`G00 X${fmt(spinePoints[0].x)} Y${fmt(spinePoints[0].y)}`);
+    lines.push(`G01 Z${fmt(spinePoints[0].z)} F${plungeRate}`);
+    for (let i = 1; i < spinePoints.length; i++) {
+      const prev = spinePoints[i-1], curr = spinePoints[i];
+      if (dist2(curr, prev) > rapidGapSq) {
+        lines.push(`G00 Z${fmt(safeZ)}`);
+        lines.push(`G00 X${fmt(curr.x)} Y${fmt(curr.y)}`);
+        lines.push(`G01 Z${fmt(curr.z)} F${plungeRate}`);
+      } else {
+        lines.push(`G01 X${fmt(curr.x)} Y${fmt(curr.y)} Z${fmt(curr.z)} F${feedRate}`);
+      }
+    }
     lines.push(`G00 Z${fmt(safeZ)}`);
   }
   lines.push('M05', 'M30');
   return lines.join('\n');
 }
 
+function cornerBranches(outerPolygon, rawSpine, tanAngle, angleThreshold) {
+  if (!rawSpine.length) return [];
+  angleThreshold = angleThreshold !== undefined ? angleThreshold : Math.PI / 2;
+  const n = outerPolygon.length;
+  const SEARCH_SQ = 36, BRANCH_STEP = 0.05;
+  const branches = [];
+  for (let i = 0; i < n; i++) {
+    const prev = outerPolygon[(i + n - 1) % n];
+    const curr = outerPolygon[i];
+    const next = outerPolygon[(i + 1) % n];
+    const aLen = Math.hypot(prev.x - curr.x, prev.y - curr.y);
+    const bLen = Math.hypot(next.x - curr.x, next.y - curr.y);
+    if (aLen < 1e-9 || bLen < 1e-9) continue;
+    const adx = (prev.x - curr.x) / aLen, ady = (prev.y - curr.y) / aLen;
+    const bdx = (next.x - curr.x) / bLen, bdy = (next.y - curr.y) / bLen;
+    const cross = adx * bdy - ady * bdx;
+    if (cross >= 0) continue;
+    const dot = adx * bdx + ady * bdy;
+    const angle = Math.atan2(-cross, dot);
+    if (angle > angleThreshold) continue;
+    const bisRawX = adx + bdx, bisRawY = ady + bdy;
+    const bisLen = Math.hypot(bisRawX, bisRawY);
+    if (bisLen < 1e-9) continue;
+    const bx = bisRawX / bisLen, by = bisRawY / bisLen;
+    const sinHalf = Math.sin(angle / 2);
+    const PERP_MAX = 2.0;
+    let bestPerp = Infinity, targetZ = 0;
+    for (const sv of rawSpine) {
+      const dx = sv.x - curr.x, dy = sv.y - curr.y;
+      if (dx * dx + dy * dy > SEARCH_SQ) continue;
+      const proj = dx * bx + dy * by;
+      if (proj < 0.05) continue;
+      const perp = Math.abs(dx * by - dy * bx);
+      if (perp < bestPerp) { bestPerp = perp; targetZ = sv.z; }
+    }
+    if (bestPerp > PERP_MAX || targetZ >= 0) continue;
+    const hitT = (-targetZ * tanAngle) / sinHalf;
+    if (hitT < 0.1) continue;
+    const steps = Math.max(5, Math.ceil(hitT / BRANCH_STEP));
+    for (let s = 0; s <= steps; s++) {
+      const t = (s / steps) * hitT;
+      branches.push({ x: curr.x + t * bx, y: curr.y + t * by, z: -(t * sinHalf) / tanAngle });
+    }
+  }
+  return branches;
+}
+
 function computeVCarveToolpath(outer, holes, config) {
   const {
-    depthStep = 0.1, maxDepth = 25.0, bitHalfAngleDeg = 45,
-    safeZ = 5, feedRate = 1499, plungeRate = 305, spindleRPM = 18000,
+    depthStep=0.05, maxDepth=25, bitHalfAngleDeg=45,
+    safeZ=5, feedRate=1499, plungeRate=305, spindleRPM=18000,
   } = config;
 
   const tanAngle = Math.tan(bitHalfAngleDeg * Math.PI / 180);
   const outerN = isClockwise(outer) ? [...outer].reverse() : outer;
   const holesN = (holes || []).map(h => isClockwise(h) ? [...h].reverse() : h);
 
-  const layers = [];
-  const maxSteps = Math.ceil(maxDepth / depthStep);
-  for (let i = 1; i <= maxSteps; i++) {
-    const z = -(i * depthStep);
-    const R = Math.abs(z) * tanAngle;
-    const paths = computeValidPaths(outerN, holesN, R);
-    if (!paths.length) break;
-    layers.push({ z, paths });
-  }
-
-  const segments = [];
-  let lastPt = null;
-  for (const { z, paths } of layers) {
-    const orderedPaths = lastPt
-      ? [...paths].sort((a, b) =>
-          Math.min(...a.map(p => dist2(p, lastPt))) -
-          Math.min(...b.map(p => dist2(p, lastPt))))
-      : paths;
-    for (const path of orderedPaths) {
-      const startIdx = lastPt ? closestPointIdx(path, lastPt) : 0;
-      const rotated = startIdx === 0 ? path : [...path.slice(startIdx), ...path.slice(0, startIdx)];
-      const seg = rotated.map(p => ({ x: p.x, y: p.y, z }));
-      seg.push({ ...seg[0] });
-      segments.push(seg);
-      lastPt = seg[0];
-    }
-  }
-
-  const gcode = generateGCode(segments, { safeZ, feedRate, plungeRate, spindleRPM });
-  return { layers, segments, gcode };
+  const rawSpine = extractSpine(outerN, holesN, tanAngle, depthStep, maxDepth);
+  const branches = cornerBranches(outerN, rawSpine, tanAngle);
+  const spineVertices = orderSpine([...rawSpine, ...branches]);
+  const gcode = generateGCode(spineVertices, { safeZ, feedRate, plungeRate, spindleRPM });
+  return { spineVertices, gcode };
 }
 
 // ── Shape definitions ─────────────────────────────────────────────────────────
@@ -335,13 +411,11 @@ const SHAPES = {
 
 const canvas = document.getElementById('canvas');
 const ctx = canvas.getContext('2d');
-let lastResult = null;
+let lastRender = null;
 
-// Map depth fraction t∈[0,1] (0=shallow, 1=deep) to a CSS colour.
-// Gradient: yellow (hsl 60) → green (120) → cyan (180) → blue (240).
+// Depth fraction t∈[0,1] (0=shallow, 1=deep) → CSS colour.
 function depthColor(t) {
-  const hue = Math.round(60 + t * 180);
-  return `hsl(${hue},100%,55%)`;
+  return `hsl(${Math.round(60 + t * 180)},100%,55%)`;
 }
 
 function drawLegendBar() {
@@ -361,17 +435,18 @@ function resizeCanvas() {
   const wrap = document.getElementById('canvas-wrap');
   canvas.width  = wrap.clientWidth;
   canvas.height = wrap.clientHeight;
-  if (lastResult) renderAll(lastResult);
+  if (lastRender) renderAll(lastRender);
 }
 
-function makeBounds(shape, result) {
+function makeBounds(shape, spineVertices) {
   let mnX = Infinity, mxX = -Infinity, mnY = Infinity, mxY = -Infinity;
-  const add = (x, y) => { if(x<mnX)mnX=x; if(x>mxX)mxX=x; if(y<mnY)mnY=y; if(y>mxY)mxY=y; };
+  const add = (x, y) => {
+    if (x < mnX) mnX = x; if (x > mxX) mxX = x;
+    if (y < mnY) mnY = y; if (y > mxY) mxY = y;
+  };
   for (const p of shape.outer) add(p.x, p.y);
   for (const h of shape.holes) for (const p of h) add(p.x, p.y);
-  if (result) {
-    for (const seg of result.segments) for (const p of seg) add(p.x, p.y);
-  }
+  for (const p of spineVertices) add(p.x, p.y);
   return { mnX, mxX, mnY, mxY };
 }
 
@@ -399,60 +474,72 @@ function drawPoly(poly, T, stroke, fill, lw = 1.5) {
   if (stroke) { ctx.strokeStyle = stroke; ctx.lineWidth = lw; ctx.stroke(); }
 }
 
-function renderAll({ shape, result }) {
+function renderAll({ shape, spineVertices }) {
   ctx.clearRect(0, 0, canvas.width, canvas.height);
   ctx.fillStyle = '#141414';
   ctx.fillRect(0, 0, canvas.width, canvas.height);
 
-  const bounds = makeBounds(shape, result);
+  const bounds = makeBounds(shape, spineVertices);
   const T = makeTransform(bounds);
 
-  // Shape outline and holes
-  drawPoly(shape.outer, T, 'rgba(255,255,255,0.7)', 'rgba(255,255,255,0.04)', 2);
+  // Shape outline and holes (faint reference)
+  drawPoly(shape.outer, T, 'rgba(255,255,255,0.25)', 'rgba(255,255,255,0.03)', 1.5);
   for (const h of shape.holes)
-    drawPoly(h, T, 'rgba(180,180,180,0.5)', 'rgba(0,0,0,0.3)', 1.5);
+    drawPoly(h, T, 'rgba(180,180,180,0.25)', 'rgba(0,0,0,0.2)', 1);
 
-  if (!result) return;
+  if (!spineVertices.length) return;
 
-  const nLayers = result.layers.length;
-  if (!nLayers) return;
+  const zMin = Math.min(...spineVertices.map(p => p.z));
+  const zMax = Math.max(...spineVertices.map(p => p.z));
+  const zRange = zMax - zMin || 1;
 
-  // Draw each layer's rings colour-coded by depth.
-  // Draw from deepest to shallowest so shallower (wider) rings render on top.
-  for (let li = nLayers - 1; li >= 0; li--) {
-    const { z, paths } = result.layers[li];
-    const t = li / Math.max(1, nLayers - 1); // 0=shallowest, 1=deepest
-    const color = depthColor(t);
-    for (const path of paths) {
-      if (path.length < 2) continue;
-      ctx.beginPath();
-      ctx.moveTo(T.x(path[0]), T.y(path[0]));
-      for (let i = 1; i < path.length; i++) ctx.lineTo(T.x(path[i]), T.y(path[i]));
-      ctx.closePath();
-      ctx.strokeStyle = color;
-      ctx.lineWidth = 1.5;
-      ctx.stroke();
-    }
+  // Identify rapid gaps (> 2 mm) — don't draw those segments
+  const RAPID_GAP_SQ = 4; // 2mm²
+
+  // Draw spine path, segment by segment, coloured by midpoint Z depth
+  ctx.lineWidth = 2.5;
+  ctx.lineCap = 'round';
+  for (let i = 1; i < spineVertices.length; i++) {
+    const p1 = spineVertices[i - 1];
+    const p2 = spineVertices[i];
+    if (dist2(p1, p2) > RAPID_GAP_SQ) continue; // skip rapid
+    const t = ((p1.z + p2.z) / 2 - zMax) / (zMin - zMax); // 0=shallow,1=deep
+    ctx.strokeStyle = depthColor(Math.max(0, Math.min(1, t)));
+    ctx.beginPath();
+    ctx.moveTo(T.x(p1), T.y(p1));
+    ctx.lineTo(T.x(p2), T.y(p2));
+    ctx.stroke();
   }
 
-  // Z-depth info (top-left)
-  const zMin = result.layers[result.layers.length - 1].z;
+  // Draw spine vertices as small dots
+  for (const p of spineVertices) {
+    const t = (p.z - zMax) / (zMin - zMax);
+    ctx.fillStyle = depthColor(Math.max(0, Math.min(1, t)));
+    ctx.beginPath();
+    ctx.arc(T.x(p), T.y(p), 2, 0, Math.PI * 2);
+    ctx.fill();
+  }
+
+  // Info overlay
   ctx.font = '10px Consolas, monospace';
   ctx.fillStyle = '#555';
-  ctx.fillText(`Z range: ${zMin.toFixed(2)} → 0.00 mm   layers: ${nLayers}`, 8, 14);
+  ctx.fillText(
+    `Z: ${zMin.toFixed(2)} → ${zMax.toFixed(2)} mm   spine pts: ${spineVertices.length}`,
+    8, 14
+  );
 }
 
 // ── Run pipeline ──────────────────────────────────────────────────────────────
 
 function getConfig() {
   return {
-    depthStep:      +document.getElementById('depthStep').value,
+    depthStep:       +document.getElementById('depthStep').value,
     bitHalfAngleDeg: +document.getElementById('bitAngle').value,
-    maxDepth:       25.0,
-    safeZ:          +document.getElementById('safeZ').value,
-    feedRate:       +document.getElementById('feedRate').value,
-    plungeRate:     +document.getElementById('plungeRate').value,
-    spindleRPM:     +document.getElementById('spindleRPM').value,
+    maxDepth:        25.0,
+    safeZ:           +document.getElementById('safeZ').value,
+    feedRate:        +document.getElementById('feedRate').value,
+    plungeRate:      +document.getElementById('plungeRate').value,
+    spindleRPM:      +document.getElementById('spindleRPM').value,
   };
 }
 
@@ -478,21 +565,29 @@ document.getElementById('runBtn').addEventListener('click', () => {
     }
     const ms = (performance.now() - t0).toFixed(0);
 
-    const totalRings = result.segments.length;
-    const totalMoves = result.segments.reduce((s, sg) => s + sg.length, 0);
-    const zMin = result.layers.length ? result.layers[result.layers.length - 1].z : 0;
+    const { spineVertices, gcode } = result;
+    const zMin = spineVertices.length ? Math.min(...spineVertices.map(p => p.z)) : 0;
+    const zMax = spineVertices.length ? Math.max(...spineVertices.map(p => p.z)) : 0;
+
+    // Path length (sum of non-rapid segments)
+    let pathLen = 0;
+    const RAPID_GAP_SQ = 4;
+    for (let i = 1; i < spineVertices.length; i++) {
+      const d = dist2(spineVertices[i], spineVertices[i-1]);
+      if (d <= RAPID_GAP_SQ) pathLen += Math.sqrt(d);
+    }
 
     setStatus(
       `${shape.label}\n` +
       `Step: ${cfg.depthStep}mm  Angle: ${cfg.bitHalfAngleDeg}°\n` +
-      `Layers: ${result.layers.length}\n` +
-      `Rings: ${totalRings}  (${totalMoves} moves)\n` +
-      `Z range: ${zMin.toFixed(3)} → 0.000 mm\n` +
+      `Spine pts: ${spineVertices.length}\n` +
+      `Z range: ${zMin.toFixed(3)} → ${zMax.toFixed(3)} mm\n` +
+      `Path len: ${pathLen.toFixed(1)} mm\n` +
       `Time: ${ms}ms`
     );
 
-    document.getElementById('gcode').value = result.gcode;
-    lastResult = { shape, result };
+    document.getElementById('gcode').value = gcode;
+    lastRender = { shape, spineVertices };
     resizeCanvas();
   }, 10);
 });
