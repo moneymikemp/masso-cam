@@ -28,6 +28,11 @@ const S = {
   }),
   infoBox: { background: '#0d0d20', border: '1px solid #1a1a38', borderRadius: 3, padding: '6px 8px', marginTop: 8, fontSize: 10, color: '#555577', lineHeight: 1.7 },
   infoVal: { color: '#8888aa' },
+  presetBtn: {
+    flex: 1, background: '#1a1a38', border: '1px solid #2a2a50',
+    color: '#8888cc', borderRadius: 3, padding: '4px 0',
+    cursor: 'pointer', fontSize: 10, textAlign: 'center',
+  },
   actionBtn: (enabled) => ({
     flex: 1, background: enabled ? '#1a1a3a' : '#111120', border: `1px solid ${enabled ? '#2a2a60' : '#1a1a38'}`,
     color: enabled ? '#8888cc' : '#333355', borderRadius: 3, padding: '5px 0',
@@ -219,9 +224,26 @@ export default function StockPanel() {
 
         <div style={S.section}>Z Reference</div>
         <div style={S.row}>
-          <span style={S.label}>Top of Stock (Z0)</span>
+          <span style={S.label}>Work Zero (Z0)</span>
           <NumInput value={toDisp(stockConfig.topZ)} onChange={v => set('topZ', toMM(v))} step={isInch ? 0.001 : 0.1} />
           <span style={S.unit}>{distUnit}</span>
+        </div>
+        <div style={{ display: 'flex', gap: 4, marginBottom: 6 }}>
+          <div style={{ width: 120, flexShrink: 0 }} />
+          <button
+            style={S.presetBtn}
+            onClick={() => set('topZ', stockConfig.thickness)}
+            title={`Set Z0 to ${toDisp(stockConfig.thickness)} ${distUnit} — work zero at top surface of stock`}
+          >
+            Stock Top
+          </button>
+          <button
+            style={S.presetBtn}
+            onClick={() => set('topZ', 0)}
+            title="Set Z0 to 0 — work zero at bottom of stock"
+          >
+            Stock Bottom
+          </button>
         </div>
 
         <div style={S.section}>Datum / Origin</div>
