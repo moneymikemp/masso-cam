@@ -13,7 +13,14 @@ function initDatabase() {
   try {
     const Database = require('better-sqlite3');
     const userDataPath = app.getPath('userData');
-    const dbPath = path.join(userDataPath, 'massocam.db');
+    const dbPath = path.join(userDataPath, 'dmdcam.db');
+    // One-time migration: copy old MassoCAM DB if new one doesn't exist yet
+    const oldDbSameDir = path.join(userDataPath, 'massocam.db');
+    const oldDbProdDir = path.join(path.dirname(userDataPath), 'MassoCAM', 'massocam.db');
+    if (!fs.existsSync(dbPath)) {
+      if (fs.existsSync(oldDbSameDir)) try { fs.copyFileSync(oldDbSameDir, dbPath); } catch (_) {}
+      else if (fs.existsSync(oldDbProdDir)) try { fs.copyFileSync(oldDbProdDir, dbPath); } catch (_) {}
+    }
     db = new Database(dbPath);
 
     db.exec(`
@@ -163,7 +170,7 @@ function createWindow() {
       preload: path.join(__dirname, 'preload.js'),
     },
     titleBarStyle: 'default',
-    title: 'MassoCAM',
+    title: 'DMDCAM',
     backgroundColor: '#1a1a2e',
   });
 
@@ -233,7 +240,7 @@ function buildMenu() {
     {
       label: 'Help',
       submenu: [
-        { label: 'About MassoCAM', click: () => mainWindow.webContents.send('menu-about') },
+        { label: 'About DMDCAM', click: () => mainWindow.webContents.send('menu-about') },
       ]
     }
   ];
@@ -295,7 +302,7 @@ ipcMain.handle('write-file', async (_, filePath, content) => {
 ipcMain.handle('dialog-open-project', async () => {
   const result = await dialog.showOpenDialog(mainWindow, {
     title: 'Open Project',
-    filters: [{ name: 'MassoCAM Project', extensions: ['mcam'] }],
+    filters: [{ name: 'DMDCAM Project', extensions: ['dmdcam', 'mcam'] }],
     properties: ['openFile']
   });
   if (result.canceled) return null;
@@ -306,8 +313,8 @@ ipcMain.handle('dialog-open-project', async () => {
 ipcMain.handle('dialog-save-project', async (_, defaultPath) => {
   const result = await dialog.showSaveDialog(mainWindow, {
     title: 'Save Project',
-    defaultPath: defaultPath || 'project.mcam',
-    filters: [{ name: 'MassoCAM Project', extensions: ['mcam'] }]
+    defaultPath: (defaultPath || 'project.dmdcam').replace(/\.mcam$/, '.dmdcam'),
+    filters: [{ name: 'DMDCAM Project', extensions: ['dmdcam'] }]
   });
   return result.canceled ? null : result.filePath;
 });

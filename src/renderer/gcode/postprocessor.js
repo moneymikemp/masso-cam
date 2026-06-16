@@ -62,7 +62,7 @@ export function generateGcode(operations, postConfig = {}) {
 
   // ── Program Header ──────────────────────────────────────────────────────────
   emit('%');
-  emit(`(MassoCAM - Generated ${new Date().toLocaleString()})`);
+  emit(`(DMDCAM - Generated ${new Date().toLocaleString()})`);
   emit(`(Units: ${cfg.units === 'mm' ? 'Metric mm' : 'Imperial inch'})`);
   emit('');
   emit(`${n()}${cfg.units === 'mm' ? 'G21' : 'G20'}`);

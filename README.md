@@ -1,4 +1,4 @@
-# MassoCAM
+# DMDCAM
 
 A 2.5D CAM application for the Masso G3 CNC router. Import DXF files from AutoCAD, set up machining operations, and export Masso-compatible G-code.
 
@@ -37,7 +37,7 @@ A 2.5D CAM application for the Masso G3 CNC router. Import DXF files from AutoCA
 - Syntax-highlighted G-code preview
 
 ### Project
-- Save/load projects (.mcam files)
+- Save/load projects (.dmdcam files; legacy .mcam files can still be opened)
 - Full undo/redo support
 
 ---
@@ -49,7 +49,7 @@ Go to https://github.com and sign up (free).
 
 ### Step 2: Create a new repository
 1. Click **New repository**
-2. Name it `masso-cam`
+2. Name it `dmd-cam`
 3. Set it to **Public** (required for free Actions minutes)
 4. Click **Create repository**
 
@@ -74,8 +74,8 @@ Option B — GitHub web upload:
 ### Step 5: Download your .exe
 1. When the build is green ✅, click on it
 2. Scroll down to **Artifacts**
-3. Download **MassoCAM-Windows-Installer**
-4. Unzip it — inside is `MassoCAM Setup X.X.X.exe`
+3. Download **DMDCAM-Windows-Installer**
+4. Unzip it — inside is `DMDCAM Setup X.X.X.exe`
 5. Run the installer on your Windows machine
 
 Every time you push changes, a new .exe is automatically built.

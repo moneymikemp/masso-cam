@@ -150,8 +150,8 @@ function AboutModal({ onClose }) {
   return (
     <div style={MS.overlay} onClick={onClose}>
       <div style={{ ...MS.box, minWidth:340, textAlign:'center' }} onClick={e => e.stopPropagation()}>
-        <div style={{ fontSize:40, marginBottom:8 }}>📐</div>
-        <div style={{ fontSize:22, fontWeight:700, color:'#aaaaff', marginBottom:4 }}>MassoCAM</div>
+        <img src={`${process.env.PUBLIC_URL}/dmdcam-logo.png`} alt="DMDCAM" style={{ height:80, marginBottom:12, objectFit:'contain' }} />
+        <div style={{ fontSize:22, fontWeight:700, color:'#aaaaff', marginBottom:4 }}>DMDCAM</div>
         <div style={{ fontSize:12, color:'#666688', marginBottom:16 }}>2.5D CAM for Masso G3 CNC Router</div>
         <div style={{ fontSize:11, color:'#8888aa', lineHeight:1.8, marginBottom:16 }}>
           Operations: Contour · Pocket · Adaptive · Face<br/>
@@ -410,7 +410,7 @@ export default function App() {
 
       {/* Top Toolbar */}
       <div style={S.topbar}>
-        <span style={S.logo}>MASSOCAM</span>
+        <img src={`${process.env.PUBLIC_URL}/dmdcam-logo.png`} alt="DMDCAM" style={{ height:22, objectFit:'contain', marginRight:8, flexShrink:0 }} />
         <div style={{ display:'flex', gap:4, flex:1 }}>
           <button style={S.tbBtn} onClick={importDxf}>📐 Import DXF</button>
           <button style={S.tbBtn} onClick={exportGcode}>💾 Export G-code</button>

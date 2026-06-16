@@ -27,7 +27,7 @@ jobs:
       - name: Upload installer artifact
         uses: actions/upload-artifact@v4
         with:
-          name: MassoCAM-Windows-Installer
+          name: DMDCAM-Windows-Installer
           path: dist/*.exe
           retention-days: 30
       - name: Create Release
@@ -35,7 +35,7 @@ jobs:
         uses: softprops/action-gh-release@v1
         with:
           tag_name: v${{ github.run_number }}
-          name: MassoCAM v${{ github.run_number }}
+          name: DMDCAM v${{ github.run_number }}
           files: dist/*.exe
           generate_release_notes: true
         env:

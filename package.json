@@ -1,8 +1,8 @@
 {
-  "name": "masso-cam",
+  "name": "dmd-cam",
   "version": "1.0.0",
-  "description": "2.5D CAM software for Masso G3 CNC router",
-  "author": "MassoCAM",
+  "description": "2.5D CAM software for CNC routing",
+  "author": "DMDCNC",
   "main": "src/main/main.js",
   "scripts": {
     "start": "concurrently \"npm run dev:renderer\" \"wait-on http://localhost:3000 && npm run dev:electron\"",
@@ -30,8 +30,9 @@
     "wait-on": "^7.2.0"
   },
   "build": {
-    "appId": "com.massocam.app",
-    "productName": "MassoCAM",
+    "appId": "com.dmdcam.app",
+    "productName": "DMDCAM",
+    "icon": "build/icon.png",
     "npmRebuild": false,
     "directories": {
       "output": "dist"
@@ -60,7 +61,7 @@
       "allowToChangeInstallationDirectory": true,
       "createDesktopShortcut": true,
       "createStartMenuShortcut": true,
-      "shortcutName": "MassoCAM"
+      "shortcutName": "DMDCAM"
     }
   },
   "homepage": "./",
