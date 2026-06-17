@@ -27,6 +27,109 @@ const newFeedRow = () => ({
   plunge_rate:800, depth_per_pass:3.0, stepover:0.45,
 });
 
+// ── Fusion 360 import helpers ─────────────────────────────────────────────────
+function isFusion360(obj) {
+  return (
+    obj !== null && typeof obj === 'object' && !Array.isArray(obj) &&
+    (Array.isArray(obj.data) || Array.isArray(obj.tools)) &&
+    ('version' in obj || 'jsonVersion' in obj || 'vendor' in obj || 'type' in obj)
+  );
+}
+
+const F360_TYPE_MAP = {
+  'flat end mill': 'flat', 'square end mill': 'flat',
+  'ball end mill': 'ball', 'ball nose': 'ball',
+  'bull nose end mill': 'flat',
+  'tapered end mill': 'tapered', 'tapered ball end mill': 'tapered',
+  'chamfer mill': 'tapered', 'v-bit': 'tapered', 'vbit': 'tapered',
+  'engraving': 'diamond', 'engraving bit': 'diamond',
+  'drill': 'flat', 'spot drill': 'tapered', 'center drill': 'tapered', 'countersink': 'tapered',
+  'upcut end mill': 'upcut', 'downcut end mill': 'downcut',
+  'compression end mill': 'compression',
+};
+
+function mapF360Type(ft) {
+  if (!ft) return 'flat';
+  const t = ft.toLowerCase().trim();
+  if (F360_TYPE_MAP[t]) return F360_TYPE_MAP[t];
+  if (t.includes('ball'))                                       return 'ball';
+  if (t.includes('taper'))                                      return 'tapered';
+  if (t.includes('v-bit') || t.includes('engrav') || t.includes('chamfer')) return 'tapered';
+  if (t.includes('upcut'))                                      return 'upcut';
+  if (t.includes('downcut'))                                    return 'downcut';
+  if (t.includes('compress'))                                   return 'compression';
+  if (t.includes('diamond') || t.includes('pcd'))               return 'diamond';
+  return 'flat';
+}
+
+function mapF360Material(bmc) {
+  const m = (bmc || '').toLowerCase();
+  if (m.includes('carbide'))                        return 'Carbide';
+  if (m.includes('hss') || m.includes('high speed')) return 'HSS';
+  if (m.includes('cobalt'))                         return 'Cobalt';
+  if (m.includes('ceramic'))                        return 'Ceramic';
+  if (m.includes('diamond') || m.includes('cbn') || m.includes('pcd')) return 'Diamond PCD';
+  return 'Carbide';
+}
+
+function convertFusion360(obj) {
+  const rawTools = obj.data || obj.tools || [];
+  const converted = [];
+  const skipped   = [];
+
+  for (const ft of rawTools) {
+    try {
+      const inchTool = /inch/i.test(ft.unit || '');
+      const toMM = v => (v != null && isFinite(+v)) ? (inchTool ? +v * 25.4 : +v) : 0;
+
+      const geo     = ft.geometry || {};
+      const pp      = ft['post-process'] || {};
+      const presets = ft['start-values']?.presets || ft.presets || [];
+
+      const diameter  = toMM(geo.DC ?? geo.diameter ?? 0);
+      const tipDia    = toMM(geo.SFDM ?? geo.BD ?? 0);
+      const taperAng  = +(geo.TAPERANGLE ?? geo.taperAngle ?? 0);
+
+      const feeds = presets
+        .filter(p => p && (p.n || p.feed || p.spindleSpeed))
+        .map(p => {
+          const feedRate   = toMM(p.feed    ?? p.feedRate   ?? 0) || 1500;
+          const plungeRate = toMM(p.plunge  ?? p.plungeRate ?? feedRate * 0.3) || 500;
+          const stepdown   = toMM(p.stepdown ?? p.depthPerPass ?? 3) || 3;
+          // Fusion stores stepover as absolute in tool units; convert to fraction if > 1
+          let so = p.stepover ?? p.stepOver ?? 0.45;
+          if (so > 1 && diameter > 0) so = toMM(so) / diameter;
+          so = Math.max(0.01, Math.min(1.0, so));
+          return {
+            material:       (p.name || p.description || 'Material').trim(),
+            spindle_rpm:    Math.round(p.n ?? p.spindleSpeed ?? 18000),
+            feed_rate:      Math.round(feedRate),
+            plunge_rate:    Math.round(plungeRate),
+            depth_per_pass: +stepdown.toFixed(3),
+            stepover:       +so.toFixed(4),
+          };
+        });
+
+      converted.push({
+        name:        (ft.description || ft.name || 'Unnamed Tool').trim(),
+        type:        mapF360Type(ft.type),
+        tool_number: pp['tool-number'] ?? pp.toolNumber ?? 1,
+        diameter:    +diameter.toFixed(4),
+        tipDiameter: +tipDia.toFixed(4),
+        taperAngle:  +taperAng.toFixed(2),
+        flutes:      ft.fluteCount ?? ft.flutes ?? 2,
+        material:    mapF360Material(ft.BMC || ft.material || ''),
+        notes:       [ft.vendor, ft.productId].filter(Boolean).join(' · '),
+        feeds,
+      });
+    } catch (_) {
+      skipped.push(ft?.description || ft?.name || 'unknown');
+    }
+  }
+
+  return { converted, skipped };
+}
+
 // ── Styles ────────────────────────────────────────────────────────────────────
 const S = {
   overlay:  { position:'fixed', inset:0, background:'rgba(0,0,0,0.75)', zIndex:1000, display:'flex', alignItems:'center', justifyContent:'center' },
@@ -203,21 +306,42 @@ export default function ToolLibraryModal({ onClose }) {
     if (!file) return;
     const text = await file.text();
     e.target.value = '';
-    try {
-      const imported = JSON.parse(text);
-      if (!Array.isArray(imported)) throw new Error('Not an array');
-      if (!window.confirm(`Import ${imported.length} tools? This will REPLACE your current library.`)) return;
-      for (const t of tools) await window.electron.deleteTool(t.id);
-      for (const t of imported) {
-        const { id, ...rest } = t;
-        await window.electron.saveTool(rest);
-      }
-      await refreshAndDispatch();
-      setSelectedId(null); setEditTool(null); setDirty(false);
-      setMsg({ text:`Imported ${imported.length} tools.`, isErr:false });
-    } catch {
-      setMsg({ text:'Import failed — invalid JSON.', isErr:true });
+
+    let parsed;
+    try { parsed = JSON.parse(text); }
+    catch { setMsg({ text:'Import failed — file is not valid JSON.', isErr:true }); return; }
+
+    let toolsToImport;
+    let label;
+
+    if (Array.isArray(parsed)) {
+      // Native DMDCAM format
+      toolsToImport = parsed.map(({ id, ...rest }) => rest);
+      label = 'DMDCAM';
+    } else if (isFusion360(parsed)) {
+      // Fusion 360 tool library
+      const { converted, skipped } = convertFusion360(parsed);
+      toolsToImport = converted;
+      label = skipped.length > 0
+        ? `Fusion 360 (${skipped.length} tool${skipped.length > 1 ? 's' : ''} skipped)`
+        : 'Fusion 360';
+    } else {
+      setMsg({ text:'Unrecognised format — expected a DMDCAM tool array or Fusion 360 library.', isErr:true });
+      return;
     }
+
+    if (toolsToImport.length === 0) {
+      setMsg({ text:'No tools found in file.', isErr:true });
+      return;
+    }
+
+    if (!window.confirm(`Import ${toolsToImport.length} tool${toolsToImport.length !== 1 ? 's' : ''} from ${label}?\nThis will REPLACE your current library.`)) return;
+
+    for (const t of tools) await window.electron.deleteTool(t.id);
+    for (const t of toolsToImport) await window.electron.saveTool(t);
+    await refreshAndDispatch();
+    setSelectedId(null); setEditTool(null); setDirty(false);
+    setMsg({ text:`Imported ${toolsToImport.length} tools (${label}).`, isErr:false });
   }
 
   // ── Unit helpers ───────────────────────────────────────────────────────────
