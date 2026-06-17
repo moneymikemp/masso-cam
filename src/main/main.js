@@ -172,6 +172,9 @@ function createWindow() {
     titleBarStyle: 'default',
     title: 'DMDCAM',
     backgroundColor: '#1a1a2e',
+    icon: isDev
+      ? path.join(__dirname, '../../public/icon.ico')
+      : path.join(__dirname, '../../build/icon.ico'),
   });
 
   const startUrl = isDev
