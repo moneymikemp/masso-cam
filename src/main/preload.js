@@ -18,6 +18,14 @@ contextBridge.exposeInMainWorld('electron', {
   storeGet: (key) => ipcRenderer.invoke('store-get', key),
   storeSet: (key, val) => ipcRenderer.invoke('store-set', key, val),
 
+  // File association / CLI open
+  getInitialFile: () => ipcRenderer.invoke('get-initial-file'),
+  onOpenFile: (callback) => {
+    const handler = (_, payload) => callback(payload);
+    ipcRenderer.on('open-file', handler);
+    return () => ipcRenderer.removeListener('open-file', handler);
+  },
+
   // Menu events
   onMenu: (callback) => {
     const events = [

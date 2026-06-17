@@ -8,6 +8,7 @@ const store = new Store();
 
 let mainWindow;
 let db;
+let pendingOpenPath = null;
 
 function initDatabase() {
   try {
@@ -251,10 +252,43 @@ function buildMenu() {
   Menu.setApplicationMenu(Menu.buildFromTemplate(template));
 }
 
-app.whenReady().then(() => {
-  initDatabase();
-  createWindow();
-});
+// Returns a .dmdcam/.mcam file path from argv if present, or null.
+function getFileArgument(argv) {
+  const args = argv || process.argv;
+  for (let i = 1; i < args.length; i++) {
+    if (/\.(dmdcam|mcam)$/i.test(args[i])) {
+      try { if (fs.existsSync(args[i])) return args[i]; } catch {}
+    }
+  }
+  return null;
+}
+
+// Enforce single-instance so double-clicking a file while the app is running
+// focuses the existing window and loads the new file rather than spawning a second instance.
+const gotTheLock = app.requestSingleInstanceLock();
+if (!gotTheLock) {
+  app.quit();
+} else {
+  app.on('second-instance', (event, argv) => {
+    if (mainWindow) {
+      if (mainWindow.isMinimized()) mainWindow.restore();
+      mainWindow.focus();
+      const filePath = getFileArgument(argv);
+      if (filePath) {
+        try {
+          const data = JSON.parse(fs.readFileSync(filePath, 'utf-8'));
+          mainWindow.webContents.send('open-file', { path: filePath, data });
+        } catch {}
+      }
+    }
+  });
+
+  app.whenReady().then(() => {
+    pendingOpenPath = getFileArgument();
+    initDatabase();
+    createWindow();
+  });
+}
 
 app.on('window-all-closed', () => {
   if (process.platform !== 'darwin') app.quit();
@@ -370,3 +404,16 @@ ipcMain.handle('db-delete-tool', (_, toolId) => {
 
 ipcMain.handle('store-get', (_, key) => store.get(key));
 ipcMain.handle('store-set', (_, key, value) => { store.set(key, value); return true; });
+
+// Returns and clears the file path passed as a CLI argument at launch (file association open).
+ipcMain.handle('get-initial-file', () => {
+  if (!pendingOpenPath) return null;
+  const filePath = pendingOpenPath;
+  pendingOpenPath = null;
+  try {
+    const content = fs.readFileSync(filePath, 'utf-8');
+    return { path: filePath, data: JSON.parse(content) };
+  } catch {
+    return null;
+  }
+});

@@ -34,6 +34,15 @@
     "productName": "DMDCAM",
     "icon": "build/icon.ico",
     "npmRebuild": false,
+    "fileAssociations": [
+      {
+        "ext": "dmdcam",
+        "name": "DMDCAM Project",
+        "description": "DMDCAM Project File",
+        "icon": "build/icon.ico",
+        "role": "Editor"
+      }
+    ],
     "directories": {
       "output": "dist"
     },

@@ -200,6 +200,30 @@ export default function App() {
     }
   }, []);
 
+  // Load a project file passed as CLI argument (file association double-click at launch)
+  useEffect(() => {
+    if (!window.electron?.getInitialFile) return;
+    window.electron.getInitialFile().then(result => {
+      if (result) {
+        dispatch({ type: 'LOAD_PROJECT', payload: result.data });
+        dispatch({ type: 'SET_PROJECT_PATH', payload: result.path });
+        dispatch({ type: 'SET_STATUS', payload: `Opened: ${result.path}` });
+      }
+    });
+  }, []);
+
+  // Load a project file when the app is already running and a second .dmdcam is double-clicked
+  useEffect(() => {
+    if (!window.electron?.onOpenFile) return;
+    return window.electron.onOpenFile((result) => {
+      if (result) {
+        dispatch({ type: 'LOAD_PROJECT', payload: result.data });
+        dispatch({ type: 'SET_PROJECT_PATH', payload: result.path });
+        dispatch({ type: 'SET_STATUS', payload: `Opened: ${result.path}` });
+      }
+    });
+  }, [dispatch]);
+
   useEffect(() => {
     if (!window.electron) return;
     return window.electron.onMenu(async (event, ...args) => {
