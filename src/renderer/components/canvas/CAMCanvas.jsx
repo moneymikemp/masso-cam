@@ -35,7 +35,8 @@ export default function CAMCanvas() {
     statusTimerRef.current = setTimeout(() => setStatusMsg(''), 2000);
   }
 
-  const { viewport, entities, layers, operations, selectedEntityIds, hoveredEntityId, showToolpaths, showRapids, bounds, stockConfig, tabPlacementActive, tabPlacementOpId, dogboneSelectionActive, dogboneSelectionOpId, textPlacementActive, textPlacementOpId, medialAxisPolylines } = state;
+  const { viewport, entities, layers, operations, selectedEntityIds, hoveredEntityId, showToolpaths, showRapids, bounds, stockConfig, tabPlacementActive, tabPlacementOpId, dogboneSelectionActive, dogboneSelectionOpId, textPlacementActive, textPlacementOpId, medialAxisPolylines, postConfig } = state;
+  const isInch = postConfig?.units === 'inch';
 
   const [zSliderPos, setZSliderPos] = useState(0); // 0 = all passes; 1..N = pass index
   const [isAnimating, setIsAnimating] = useState(false);
@@ -575,11 +576,16 @@ export default function CAMCanvas() {
 
   function drawMouseCoords(ctx) {
     const world = c2w(mousePos.x, mousePos.y);
+    const MM_PER_INCH = 25.4;
+    const cx = isInch ? world.x / MM_PER_INCH : world.x;
+    const cy = isInch ? world.y / MM_PER_INCH : world.y;
+    const unit = isInch ? 'in' : 'mm';
+    const decimals = isInch ? 4 : 3;
     ctx.fillStyle = 'rgba(0,0,0,0.6)';
-    ctx.fillRect(8, ctx.canvas.height - 28, 160, 20);
+    ctx.fillRect(8, ctx.canvas.height - 28, 180, 20);
     ctx.fillStyle = '#aaaacc';
     ctx.font = '11px monospace';
-    ctx.fillText(`X: ${world.x.toFixed(3)}  Y: ${world.y.toFixed(3)}`, 14, ctx.canvas.height - 14);
+    ctx.fillText(`X: ${cx.toFixed(decimals)}  Y: ${cy.toFixed(decimals)} ${unit}`, 14, ctx.canvas.height - 14);
   }
 
   useEffect(() => { draw(); }, [entities, layers, operations, viewport, selectedEntityIds, hoveredEntityId, showToolpaths, showRapids, mousePos, stockConfig, zSliderPos, zLevels, tabPlacementActive, tabPlacementOpId, dogboneSelectionActive, dogboneSelectionOpId, textPlacementActive, textPlacementOpId, medialAxisPolylines]);
