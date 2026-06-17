@@ -9,6 +9,7 @@ import StockPanel from './components/panels/StockPanel';
 import { parseDxf, getBounds } from './dxf/parser';
 import { generateGcode, generateGcodeByTool } from './gcode/postprocessor';
 import InlayWizard from './components/panels/InlayWizard';
+import ToolLibraryModal from './components/panels/ToolLibraryModal';
 
 // ── Modal styles ──────────────────────────────────────────────────────────────
 const MS = {
@@ -233,7 +234,7 @@ export default function App() {
         case 'menu-zoom-fit':         dispatch({ type: 'RESET_VIEWPORT' }); break;
         case 'menu-toggle-toolpaths': dispatch({ type: 'TOGGLE_TOOLPATHS' }); break;
         case 'menu-toggle-rapids':    dispatch({ type: 'TOGGLE_RAPIDS' }); break;
-        case 'menu-tool-library':     dispatch({ type: 'SET_PANEL_TAB', payload: 'tools' }); break;
+        case 'menu-tool-library':     setModal('tool-library'); break;
         case 'menu-machine-setup':    setModal('machine'); break;
         case 'menu-post-settings':    setModal('post'); break;
         case 'menu-about':            setModal('about'); break;
@@ -421,6 +422,7 @@ export default function App() {
         />
       )}
       {modal === 'about' && <AboutModal onClose={() => setModal(null)} />}
+      {modal === 'tool-library' && <ToolLibraryModal onClose={() => setModal(null)} />}
       {modal === 'inlay-wizard' && (
         <InlayWizard
           onClose={() => setModal(null)}
