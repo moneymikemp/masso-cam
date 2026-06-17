@@ -10,6 +10,7 @@ import { parseDxf, getBounds } from './dxf/parser';
 import { generateGcode, generateGcodeByTool } from './gcode/postprocessor';
 import InlayWizard from './components/panels/InlayWizard';
 import ToolLibraryModal from './components/panels/ToolLibraryModal';
+import MachineProfilesModal from './components/panels/MachineProfilesModal';
 
 // ── Modal styles ──────────────────────────────────────────────────────────────
 const MS = {
@@ -236,7 +237,7 @@ export default function App() {
         case 'menu-toggle-rapids':    dispatch({ type: 'TOGGLE_RAPIDS' }); break;
         case 'menu-tool-library':     setModal('tool-library'); break;
         case 'menu-machine-setup':    setModal('machine'); break;
-        case 'menu-post-settings':    setModal('post'); break;
+        case 'menu-post-settings':    setModal('profiles'); break;
         case 'menu-about':            setModal('about'); break;
         case 'menu-inlay-wizard':    setModal('inlay-wizard'); break;
         case 'menu-new-project':      newProject(); break;
@@ -407,20 +408,7 @@ export default function App() {
           onClose={() => setModal(null)}
         />
       )}
-      {modal === 'post' && (
-        <PostSettingsModal
-          config={state.postConfig}
-          onSave={cfg => {
-            dispatch({ type: 'SET_POST_CONFIG', payload: cfg });
-            if (window.electron) {
-              window.electron.storeSet('pref.units',       cfg.units);
-              window.electron.storeSet('pref.safeZ',       cfg.safeZ);
-              window.electron.storeSet('pref.toolChangeZ', cfg.toolChangeZ);
-            }
-          }}
-          onClose={() => setModal(null)}
-        />
-      )}
+      {modal === 'profiles' && <MachineProfilesModal onClose={() => setModal(null)} />}
       {modal === 'about' && <AboutModal onClose={() => setModal(null)} />}
       {modal === 'tool-library' && <ToolLibraryModal onClose={() => setModal(null)} />}
       {modal === 'inlay-wizard' && (
@@ -445,7 +433,7 @@ export default function App() {
           <button style={{ ...S.tbBtn, ...(state.showToolpaths ? S.tbBtnActive : {}) }} onClick={() => dispatch({ type: 'TOGGLE_TOOLPATHS' })}>⬡ Paths</button>
           <button style={{ ...S.tbBtn, ...(state.showRapids ? S.tbBtnActive : {}) }} onClick={() => dispatch({ type: 'TOGGLE_RAPIDS' })}>↗ Rapids</button>
           <div style={{ width:1, background:'#2a2a50', margin:'0 4px' }} />
-          <button style={S.tbBtn} onClick={() => setModal('post')} title="Post processor settings">
+          <button style={S.tbBtn} onClick={() => setModal('profiles')} title="Machine profiles &amp; post processor settings">
             Post <span style={S.unitBadge}>{unitsLabel}</span>
           </button>
           <button style={S.tbBtn} onClick={() => setModal('machine')}>Machine</button>

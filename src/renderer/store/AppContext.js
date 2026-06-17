@@ -102,6 +102,7 @@ const initialState = {
 
   postConfig: {
     name: 'Masso G3',
+    postProcessor: 'massoG3',
     units: 'mm',
     coolant: 'off',
     spindleDelay: 3,
@@ -115,7 +116,12 @@ const initialState = {
     homeY: 0,
     programHeader: '',
     programFooter: '',
+    toolNumbers: {},
   },
+
+  // Machine profiles — persisted globally in electron-store, not per-project
+  machineProfiles: [],
+  activeProfileId: null,
 
   // UI state
   viewport: { zoom: 1, panX: 0, panY: 0 },
@@ -308,6 +314,40 @@ function reducer(state, action) {
     case 'APPLY_SAVED_PREFS': return { ...state, postConfig: { ...state.postConfig, ...action.payload } };
     case 'SET_STOCK_CONFIG':   return { ...state, stockConfig: { ...state.stockConfig, ...action.payload }, dirty: true };
 
+    // Machine profiles
+    case 'SET_MACHINE_PROFILES':
+      return { ...state, machineProfiles: action.payload };
+
+    case 'ADD_MACHINE_PROFILE':
+      return { ...state, machineProfiles: [...state.machineProfiles, action.payload] };
+
+    case 'UPDATE_MACHINE_PROFILE': {
+      const profiles = state.machineProfiles.map(p => p.id === action.payload.id ? { ...p, ...action.payload } : p);
+      const isActive = state.activeProfileId === action.payload.id;
+      const newPostConfig = isActive
+        ? { ...state.postConfig, ...action.payload.settings, postProcessor: action.payload.postProcessor, toolNumbers: action.payload.toolNumbers || {} }
+        : state.postConfig;
+      return { ...state, machineProfiles: profiles, postConfig: newPostConfig };
+    }
+
+    case 'DELETE_MACHINE_PROFILE': {
+      const profiles = state.machineProfiles.filter(p => p.id !== action.payload);
+      const newActiveId = state.activeProfileId === action.payload ? (profiles[0]?.id || null) : state.activeProfileId;
+      const newActive = profiles.find(p => p.id === newActiveId);
+      const newPostConfig = newActive
+        ? { ...state.postConfig, ...newActive.settings, postProcessor: newActive.postProcessor, toolNumbers: newActive.toolNumbers || {} }
+        : state.postConfig;
+      return { ...state, machineProfiles: profiles, activeProfileId: newActiveId, postConfig: newPostConfig };
+    }
+
+    case 'SET_ACTIVE_PROFILE': {
+      const profile = state.machineProfiles.find(p => p.id === action.payload);
+      const newPostConfig = profile
+        ? { ...state.postConfig, ...profile.settings, postProcessor: profile.postProcessor, toolNumbers: profile.toolNumbers || {} }
+        : state.postConfig;
+      return { ...state, activeProfileId: action.payload, postConfig: newPostConfig };
+    }
+
     // Viewport
     case 'SET_VIEWPORT': return { ...state, viewport: { ...state.viewport, ...action.payload } };
     case 'RESET_VIEWPORT': return { ...state, viewport: { zoom: 1, panX: 0, panY: 0 } };
@@ -379,21 +419,32 @@ function reducer(state, action) {
 export function AppProvider({ children }) {
   const [state, dispatch] = useReducer(reducer, initialState);
 
-  // Restore persisted user preferences on first mount.
-  // Uses APPLY_SAVED_PREFS so the project is not marked dirty.
+  // Load machine profiles from electron-store on first mount.
+  // Falls back to legacy pref.* keys if no profiles have been saved yet.
   useEffect(() => {
     if (!window.electron) return;
-    Promise.all([
-      window.electron.storeGet('pref.units'),
-      window.electron.storeGet('pref.safeZ'),
-      window.electron.storeGet('pref.toolChangeZ'),
-    ]).then(([units, safeZ, toolChangeZ]) => {
-      const overrides = {};
-      if (units      != null) overrides.units       = units;
-      if (safeZ      != null) overrides.safeZ       = safeZ;
-      if (toolChangeZ != null) overrides.toolChangeZ = toolChangeZ;
-      if (Object.keys(overrides).length > 0) {
-        dispatch({ type: 'APPLY_SAVED_PREFS', payload: overrides });
+    window.electron.storeGet('machineProfiles').then(profiles => {
+      if (profiles?.length) {
+        dispatch({ type: 'SET_MACHINE_PROFILES', payload: profiles });
+        window.electron.storeGet('activeProfileId').then(activeId => {
+          const id = (activeId && profiles.find(p => p.id === activeId)) ? activeId : profiles[0].id;
+          dispatch({ type: 'SET_ACTIVE_PROFILE', payload: id });
+        });
+      } else {
+        // Legacy fallback: load old pref.* keys for existing installs without profiles
+        Promise.all([
+          window.electron.storeGet('pref.units'),
+          window.electron.storeGet('pref.safeZ'),
+          window.electron.storeGet('pref.toolChangeZ'),
+        ]).then(([units, safeZ, toolChangeZ]) => {
+          const overrides = {};
+          if (units       != null) overrides.units       = units;
+          if (safeZ       != null) overrides.safeZ       = safeZ;
+          if (toolChangeZ != null) overrides.toolChangeZ = toolChangeZ;
+          if (Object.keys(overrides).length > 0) {
+            dispatch({ type: 'APPLY_SAVED_PREFS', payload: overrides });
+          }
+        });
       }
     });
   }, []);
