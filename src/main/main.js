@@ -8,6 +8,7 @@ const store = new Store();
 
 let mainWindow;
 let db;
+let dbInitError = null;
 let pendingOpenPath = null;
 
 function initDatabase() {
@@ -85,6 +86,7 @@ function initDatabase() {
       console.log('[DB] inserted default tools');
     }
   } catch (err) {
+    dbInitError = err?.message || String(err);
     console.error('[DB] Database init error — tool library will be unavailable:', err);
   }
 }
@@ -377,7 +379,7 @@ ipcMain.handle('db-get-tools', () => {
 ipcMain.handle('db-save-tool', (_, tool) => {
   if (!db) {
     console.error('[db-save-tool] Database not initialised — tool save aborted');
-    return null;
+    return { __error: dbInitError || 'Database not initialised' };
   }
   console.log('[db-save-tool] saving:', tool?.name, 'id:', tool?.id);
   const { feeds, ...toolData } = tool;

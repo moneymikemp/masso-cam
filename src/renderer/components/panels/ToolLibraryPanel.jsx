@@ -104,14 +104,15 @@ export default function ToolLibraryPanel() {
       console.log('[ToolLibrary] saving tool:', editTool);
       const saved = await window.electron.saveTool(editTool);
       console.log('[ToolLibrary] save result:', saved);
-      if (saved) {
-        // Preserve the units field which isn't stored in the DB
+      if (saved?.__error) {
+        setSaveError(`DB init failed: ${saved.__error}`);
+      } else if (saved) {
         const restoredUnits = { units: editTool.units || 'mm', ...saved };
         await loadTools();
         setSelected(saved.id);
         setEditTool(restoredUnits);
       } else {
-        setSaveError('Save returned no result — the database may not be initialised. Check the main process console for details.');
+        setSaveError('Save returned no result — check the main process console for details.');
       }
     } catch (err) {
       console.error('[ToolLibrary] save error:', err);
