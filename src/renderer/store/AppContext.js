@@ -315,8 +315,12 @@ function reducer(state, action) {
     case 'SET_STOCK_CONFIG':   return { ...state, stockConfig: { ...state.stockConfig, ...action.payload }, dirty: true };
 
     // Machine profiles
-    case 'SET_MACHINE_PROFILES':
-      return { ...state, machineProfiles: action.payload };
+    case 'SET_MACHINE_PROFILES': {
+      // Ensure all profiles have a machineConfig (migration for profiles created before this field existed)
+      const mcDefaults = { workAreaX: 1200, workAreaY: 900, workAreaZ: 150, maxSpindle: 24000, minSpindle: 1000, maxFeedXY: 10000, maxFeedZ: 3000, maxRapid: 10000, homeX: 0, homeY: 0, homeZ: 150 };
+      const profiles = action.payload.map(p => ({ ...p, machineConfig: { ...mcDefaults, ...p.machineConfig } }));
+      return { ...state, machineProfiles: profiles };
+    }
 
     case 'ADD_MACHINE_PROFILE':
       return { ...state, machineProfiles: [...state.machineProfiles, action.payload] };
@@ -327,7 +331,10 @@ function reducer(state, action) {
       const newPostConfig = isActive
         ? { ...state.postConfig, ...action.payload.settings, postProcessor: action.payload.postProcessor, toolNumbers: action.payload.toolNumbers || {} }
         : state.postConfig;
-      return { ...state, machineProfiles: profiles, postConfig: newPostConfig };
+      const newMachineConfig = isActive
+        ? { ...state.machineConfig, ...(action.payload.machineConfig || {}), name: action.payload.name }
+        : state.machineConfig;
+      return { ...state, machineProfiles: profiles, postConfig: newPostConfig, machineConfig: newMachineConfig };
     }
 
     case 'DELETE_MACHINE_PROFILE': {
@@ -337,7 +344,10 @@ function reducer(state, action) {
       const newPostConfig = newActive
         ? { ...state.postConfig, ...newActive.settings, postProcessor: newActive.postProcessor, toolNumbers: newActive.toolNumbers || {} }
         : state.postConfig;
-      return { ...state, machineProfiles: profiles, activeProfileId: newActiveId, postConfig: newPostConfig };
+      const newMachineConfig = newActive
+        ? { ...state.machineConfig, ...(newActive.machineConfig || {}), name: newActive.name }
+        : state.machineConfig;
+      return { ...state, machineProfiles: profiles, activeProfileId: newActiveId, postConfig: newPostConfig, machineConfig: newMachineConfig };
     }
 
     case 'SET_ACTIVE_PROFILE': {
@@ -345,7 +355,10 @@ function reducer(state, action) {
       const newPostConfig = profile
         ? { ...state.postConfig, ...profile.settings, postProcessor: profile.postProcessor, toolNumbers: profile.toolNumbers || {} }
         : state.postConfig;
-      return { ...state, activeProfileId: action.payload, postConfig: newPostConfig };
+      const newMachineConfig = profile
+        ? { ...state.machineConfig, ...(profile.machineConfig || {}), name: profile.name }
+        : state.machineConfig;
+      return { ...state, activeProfileId: action.payload, postConfig: newPostConfig, machineConfig: newMachineConfig };
     }
 
     // Viewport

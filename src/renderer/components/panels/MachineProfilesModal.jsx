@@ -3,6 +3,31 @@ import { v4 as uuid } from 'uuid';
 import { useApp } from '../../store/AppContext';
 import { POST_PROCESSORS, PP_LIST } from '../../gcode/postProcessors';
 
+const MACHINE_CONFIG_DEFAULTS = {
+  workAreaX: 1200,
+  workAreaY: 900,
+  workAreaZ: 150,
+  maxSpindle: 24000,
+  minSpindle: 1000,
+  maxFeedXY: 10000,
+  maxFeedZ: 3000,
+  maxRapid: 10000,
+  homeX: 0,
+  homeY: 0,
+  homeZ: 150,
+};
+
+const HW_FIELDS = [
+  { key: 'workAreaX',  label: 'X Travel',    unit: 'mm',     step: 10,   min: 1 },
+  { key: 'workAreaY',  label: 'Y Travel',    unit: 'mm',     step: 10,   min: 1 },
+  { key: 'workAreaZ',  label: 'Z Travel',    unit: 'mm',     step: 10,   min: 1 },
+  { key: 'maxSpindle', label: 'Max Spindle', unit: 'RPM',    step: 1000, min: 0 },
+  { key: 'minSpindle', label: 'Min Spindle', unit: 'RPM',    step: 100,  min: 0 },
+  { key: 'maxFeedXY',  label: 'Max Feed XY', unit: 'mm/min', step: 100,  min: 1 },
+  { key: 'maxFeedZ',   label: 'Max Feed Z',  unit: 'mm/min', step: 100,  min: 1 },
+  { key: 'maxRapid',   label: 'Max Rapid',   unit: 'mm/min', step: 100,  min: 1 },
+];
+
 function newProfile(ppId = 'massoG3') {
   const pp = POST_PROCESSORS[ppId] || POST_PROCESSORS.massoG3;
   return {
@@ -10,6 +35,7 @@ function newProfile(ppId = 'massoG3') {
     name: `New ${pp.label} Machine`,
     postProcessor: ppId,
     settings: { ...pp.defaultSettings },
+    machineConfig: { ...MACHINE_CONFIG_DEFAULTS },
     toolNumbers: {},
   };
 }
@@ -161,6 +187,11 @@ export default function MachineProfilesModal({ onClose }) {
     setDirty(true);
   }
 
+  function setMachineConfigField(key, val) {
+    setEditProfile(p => ({ ...p, machineConfig: { ...(p.machineConfig || MACHINE_CONFIG_DEFAULTS), [key]: val } }));
+    setDirty(true);
+  }
+
   function setToolNumber(toolId, num) {
     setEditProfile(p => ({ ...p, toolNumbers: { ...p.toolNumbers, [String(toolId)]: num } }));
     setDirty(true);
@@ -298,6 +329,25 @@ export default function MachineProfilesModal({ onClose }) {
                     </select>
                     <div style={S.note}>{pp?.description}</div>
                   </div>
+                </div>
+
+                {/* Machine hardware limits */}
+                <div style={S.section}>Machine Hardware</div>
+                <div style={S.grid}>
+                  {HW_FIELDS.map(({ key, label, unit, step, min }) => (
+                    <React.Fragment key={key}>
+                      <span style={S.label}>{label}</span>
+                      <div style={{ display:'flex', alignItems:'center', gap:4 }}>
+                        <input
+                          style={{ ...S.input, width:90 }}
+                          type="number" min={min} step={step}
+                          value={editProfile.machineConfig?.[key] ?? MACHINE_CONFIG_DEFAULTS[key]}
+                          onChange={e => setMachineConfigField(key, parseFloat(e.target.value) || 0)}
+                        />
+                        <span style={S.unitTag}>{unit}</span>
+                      </div>
+                    </React.Fragment>
+                  ))}
                 </div>
 
                 {/* Dynamic settings */}

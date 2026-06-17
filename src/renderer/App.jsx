@@ -37,54 +37,6 @@ function Field({ label, children, note }) {
   </>;
 }
 
-// ── Machine Setup Modal ───────────────────────────────────────────────────────
-function MachineSetupModal({ config, onSave, onClose }) {
-  const [cfg, setCfg] = useState({ ...config });
-  const set = (k, v) => setCfg(c => ({ ...c, [k]: v }));
-
-  return (
-    <div style={MS.overlay} onClick={onClose}>
-      <div style={MS.box} onClick={e => e.stopPropagation()}>
-        <div style={MS.title}>⚙ Machine Setup</div>
-        <div style={MS.grid}>
-          <span style={{ ...MS.label, ...MS.section, textAlign:'left' }}>Identity</span>
-          <Field label="Machine Name">
-            <input style={MS.input} value={cfg.name} onChange={e => set('name', e.target.value)} />
-          </Field>
-          <span style={{ ...MS.section, gridColumn:'1/-1' }}>Work Area</span>
-          <Field label="X Travel (mm)">
-            <input style={MS.input} type="number" value={cfg.workAreaX} onChange={e => set('workAreaX', +e.target.value)} />
-          </Field>
-          <Field label="Y Travel (mm)">
-            <input style={MS.input} type="number" value={cfg.workAreaY} onChange={e => set('workAreaY', +e.target.value)} />
-          </Field>
-          <Field label="Z Travel (mm)">
-            <input style={MS.input} type="number" value={cfg.workAreaZ} onChange={e => set('workAreaZ', +e.target.value)} />
-          </Field>
-          <span style={{ ...MS.section, gridColumn:'1/-1' }}>Speeds</span>
-          <Field label="Max Spindle (RPM)">
-            <input style={MS.input} type="number" step="1000" value={cfg.maxSpindle} onChange={e => set('maxSpindle', +e.target.value)} />
-          </Field>
-          <Field label="Max Feed XY (mm/min)">
-            <input style={MS.input} type="number" step="500" value={cfg.maxFeedXY} onChange={e => set('maxFeedXY', +e.target.value)} />
-          </Field>
-          <Field label="Max Feed Z (mm/min)">
-            <input style={MS.input} type="number" step="100" value={cfg.maxFeedZ} onChange={e => set('maxFeedZ', +e.target.value)} />
-          </Field>
-          <span style={{ ...MS.section, gridColumn:'1/-1' }}>Defaults</span>
-          <Field label="Safe Z (mm)">
-            <input style={MS.input} type="number" value={cfg.safeZ} onChange={e => set('safeZ', +e.target.value)} />
-          </Field>
-        </div>
-        <div style={MS.btnRow}>
-          <button style={{ ...MS.btn, ...MS.btnSecondary }} onClick={onClose}>Cancel</button>
-          <button style={{ ...MS.btn, ...MS.btnPrimary }} onClick={() => { onSave(cfg); onClose(); }}>Save</button>
-        </div>
-      </div>
-    </div>
-  );
-}
-
 // ── Post Processor Modal ──────────────────────────────────────────────────────
 function PostSettingsModal({ config, onSave, onClose }) {
   const [cfg, setCfg] = useState({ ...config });
@@ -194,7 +146,7 @@ const S = {
 export default function App() {
   const { state, dispatch, getProject } = useApp();
   const { activePanelTab, statusMessage, selectedEntityIds, entities, operations, postConfig } = state;
-  const [modal, setModal] = useState(null); // 'machine' | 'post' | 'about' | 'inlay-wizard'
+  const [modal, setModal] = useState(null); // 'profiles' | 'tool-library' | 'about' | 'inlay-wizard'
 
   useEffect(() => {
     if (window.electron) {
@@ -236,7 +188,7 @@ export default function App() {
         case 'menu-toggle-toolpaths': dispatch({ type: 'TOGGLE_TOOLPATHS' }); break;
         case 'menu-toggle-rapids':    dispatch({ type: 'TOGGLE_RAPIDS' }); break;
         case 'menu-tool-library':     setModal('tool-library'); break;
-        case 'menu-machine-setup':    setModal('machine'); break;
+        case 'menu-machine-setup':    setModal('profiles'); break;
         case 'menu-post-settings':    setModal('profiles'); break;
         case 'menu-about':            setModal('about'); break;
         case 'menu-inlay-wizard':    setModal('inlay-wizard'); break;
@@ -401,13 +353,6 @@ export default function App() {
   return (
     <div style={S.app}>
       {/* Modals */}
-      {modal === 'machine' && (
-        <MachineSetupModal
-          config={state.machineConfig}
-          onSave={cfg => dispatch({ type: 'SET_MACHINE_CONFIG', payload: cfg })}
-          onClose={() => setModal(null)}
-        />
-      )}
       {modal === 'profiles' && <MachineProfilesModal onClose={() => setModal(null)} />}
       {modal === 'about' && <AboutModal onClose={() => setModal(null)} />}
       {modal === 'tool-library' && <ToolLibraryModal onClose={() => setModal(null)} />}
@@ -436,7 +381,7 @@ export default function App() {
           <button style={S.tbBtn} onClick={() => setModal('profiles')} title="Machine profiles &amp; post processor settings">
             Post <span style={S.unitBadge}>{unitsLabel}</span>
           </button>
-          <button style={S.tbBtn} onClick={() => setModal('machine')}>Machine</button>
+          <button style={S.tbBtn} onClick={() => setModal('profiles')}>Machine</button>
           <div style={{ flex:1 }} />
           <span style={{ fontSize:10, color:'#444466' }}>
             {enabledOpsCount > 0 ? `${calculatedCount}/${enabledOpsCount} ops calculated` : ''}
