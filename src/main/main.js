@@ -298,6 +298,94 @@ ipcMain.handle('db-delete-tool', (_, toolId) => {
 ipcMain.handle('store-get', (_, key) => store.get(key));
 ipcMain.handle('store-set', (_, key, value) => { store.set(key, value); return true; });
 
+// Tool library import — unified file picker for .json and .vtdb
+ipcMain.handle('dialog-open-tool-library', async () => {
+  const result = await dialog.showOpenDialog(mainWindow, {
+    title: 'Import Tool Library',
+    filters: [
+      { name: 'Tool Libraries', extensions: ['json', 'vtdb'] },
+      { name: 'JSON (DMDCAM / Fusion 360)', extensions: ['json'] },
+      { name: 'VCarve Tool Library', extensions: ['vtdb'] },
+    ],
+    properties: ['openFile'],
+  });
+  if (result.canceled || !result.filePaths.length) return null;
+  const filePath = result.filePaths[0];
+  const ext = path.extname(filePath).toLowerCase();
+  if (ext === '.json') {
+    try {
+      const content = fs.readFileSync(filePath, 'utf-8');
+      return { path: filePath, ext, content };
+    } catch (err) {
+      return { path: filePath, ext, error: err.message };
+    }
+  }
+  return { path: filePath, ext };
+});
+
+// VCarve .vtdb import — reads SQLite database using better-sqlite3 (read-only)
+// Returns { ok, rows } on success or { ok: false, error } on failure.
+ipcMain.handle('import-vtdb', async (_, filePath) => {
+  let db;
+  try {
+    const Database = require('better-sqlite3');
+    db = new Database(filePath, { readonly: true, fileMustExist: true });
+
+    const tables = db.prepare(
+      "SELECT name FROM sqlite_master WHERE type='table'"
+    ).all().map(r => r.name);
+
+    // Try known VCarve table names in order of likelihood
+    const candidates = ['Tools', 'tools', 'TOOLS', 'ToolLibrary', 'VCarveToolLibrary', 'CncToolLibrary'];
+    let rows = null;
+    let usedTable = null;
+
+    for (const tbl of candidates) {
+      if (tables.includes(tbl)) {
+        rows = db.prepare(`SELECT * FROM "${tbl}"`).all();
+        usedTable = tbl;
+        break;
+      }
+    }
+
+    // Fallback: pick first table that has a Name or ToolType column
+    if (!rows) {
+      for (const tbl of tables) {
+        try {
+          const sample = db.prepare(`SELECT * FROM "${tbl}" LIMIT 1`).get();
+          if (sample && ('Name' in sample || 'ToolType' in sample || 'name' in sample)) {
+            rows = db.prepare(`SELECT * FROM "${tbl}"`).all();
+            usedTable = tbl;
+            break;
+          }
+        } catch {}
+      }
+    }
+
+    db.close();
+
+    if (!rows || rows.length === 0) {
+      return {
+        ok: false,
+        error: `No tool data found. Tables in database: ${tables.join(', ') || '(none)'}`,
+      };
+    }
+
+    return { ok: true, rows, table: usedTable };
+  } catch (err) {
+    if (db) { try { db.close(); } catch {} }
+    const isABI = /NODE_MODULE_VERSION|was compiled against|binding/i.test(err.message || '');
+    if (isABI) {
+      return {
+        ok: false,
+        error: 'better-sqlite3 needs to be rebuilt for this version of Electron.\n' +
+               'Run in the project folder:  npx @electron/rebuild -f -w better-sqlite3',
+      };
+    }
+    return { ok: false, error: err.message || String(err) };
+  }
+});
+
 // Returns and clears the file path passed as a CLI argument at launch (file association open).
 ipcMain.handle('get-initial-file', () => {
   if (!pendingOpenPath) return null;

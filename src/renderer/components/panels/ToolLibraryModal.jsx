@@ -1,14 +1,15 @@
-import React, { useState, useEffect, useRef, useCallback } from 'react';
+import React, { useState, useEffect, useCallback } from 'react';
 import { useApp } from '../../store/AppContext';
 
 const MM_PER_INCH = 25.4;
 const TOOL_TYPES   = ['flat','ball','tapered','upcut','downcut','compression','diamond'];
 const TOOL_MATS    = ['Carbide','HSS','Cobalt','Ceramic','Diamond PCD'];
 const FEED_MATS    = ['MDF','Plywood','Softwood','Hardwood','Aluminum','HDPE','Acrylic','Foam','Brass','Steel','Copper'];
-const CATEGORIES   = ['End Mill','V-Bit','Ball Nose','Tapered Bit','Engraving','Other'];
-const TYPE_ICON    = { flat:'⬛',ball:'⬤',tapered:'▼',upcut:'↑',downcut:'↓',compression:'⇅',diamond:'◆' };
+const STD_CATEGORIES = ['End Mill','V-Bit','Ball Nose','Tapered Bit','Engraving','Other'];
+const TYPE_ICON      = { flat:'⬛',ball:'⬤',tapered:'▼',upcut:'↑',downcut:'↓',compression:'⇅',diamond:'◆' };
 
 function getCategory(t) {
+  if (t.userCategory) return t.userCategory;
   switch (t.type) {
     case 'flat': case 'upcut': case 'downcut': case 'compression': return 'End Mill';
     case 'ball': return 'Ball Nose';
@@ -130,10 +131,79 @@ function convertFusion360(obj) {
   return { converted, skipped };
 }
 
+// ── VCarve .vtdb import helpers ───────────────────────────────────────────────
+const VCARVE_TYPE_MAP = {
+  'end mill': 'flat', 'ball nose': 'ball', 'ballnose': 'ball',
+  'v-bit': 'tapered', 'vbit': 'tapered', 'v bit': 'tapered',
+  'tapered ball nose': 'tapered', 'tapered ballnose': 'tapered',
+  'engraving': 'diamond', 'drill': 'flat', 'spiral': 'flat',
+  'upcut spiral': 'upcut', 'downcut spiral': 'downcut',
+};
+
+function mapVCarveType(toolType) {
+  const t = (toolType || '').toLowerCase().trim();
+  if (VCARVE_TYPE_MAP[t]) return VCARVE_TYPE_MAP[t];
+  if (t.includes('ball'))     return 'ball';
+  if (t.includes('v-bit') || t.includes('vbit')) return 'tapered';
+  if (t.includes('engrav'))   return 'diamond';
+  if (t.includes('upcut'))    return 'upcut';
+  if (t.includes('downcut'))  return 'downcut';
+  return 'flat';
+}
+
+function convertVCarve(rows) {
+  const converted = [];
+  const skipped   = [];
+  let toolNum = 1;
+
+  for (const r of rows) {
+    try {
+      const name = r.Name ?? r.name ?? r.ToolName ?? '';
+      if (!name) { skipped.push('(unnamed)'); continue; }
+
+      const diameter    = +(r.Diameter ?? r.diameter ?? 0);
+      const tipDia      = +(r.CoreDiameter ?? r.coreDiameter ?? r.TipDiameter ?? 0);
+      const flutes      = +(r.FluteCount ?? r.fluteCount ?? r.NumberOfFlutes ?? 2);
+      const passDepth   = +(r.PassDepth ?? r.passDepth ?? r.CuttingDepth ?? 3);
+      const feedRate    = +(r.FeedRate ?? r.feedRate ?? r.Feed ?? 1500);
+      const plungeRate  = +(r.PlungeRate ?? r.plungeRate ?? r.Plunge ?? 500);
+      const spindle     = +(r.SpindleSpeed ?? r.spindleSpeed ?? r.RPM ?? 18000);
+      // StepOver in VCarve is stored as fraction 0.0–1.0; normalize defensively
+      const soRaw = +(r.StepOver ?? r.stepOver ?? r.Stepover ?? 0.45);
+      const stepover = soRaw > 1 ? soRaw / 100 : soRaw;
+
+      const feeds = (feedRate > 0 || spindle > 0) ? [{
+        material:       'Default',
+        spindle_rpm:    Math.round(spindle) || 18000,
+        feed_rate:      Math.round(feedRate) || 1500,
+        plunge_rate:    Math.round(plungeRate) || 500,
+        depth_per_pass: +passDepth.toFixed(3) || 3,
+        stepover:       +Math.max(0.01, Math.min(1, stepover)).toFixed(4),
+      }] : [];
+
+      converted.push({
+        name:        name.trim(),
+        type:        mapVCarveType(r.ToolType ?? r.toolType ?? r.Type ?? ''),
+        tool_number: toolNum++,
+        diameter:    +diameter.toFixed(4),
+        tipDiameter: +tipDia.toFixed(4),
+        taperAngle:  +(r.HalfAngle ?? r.halfAngle ?? r.Angle ?? 0),
+        flutes:      Math.max(1, Math.round(flutes)),
+        material:    'Carbide',
+        notes:       (r.Notes ?? r.notes ?? '').toString().trim(),
+        feeds,
+      });
+    } catch (err) {
+      skipped.push(r.Name || r.name || 'unknown');
+    }
+  }
+  return { converted, skipped };
+}
+
 // ── Styles ────────────────────────────────────────────────────────────────────
 const S = {
   overlay:  { position:'fixed', inset:0, background:'rgba(0,0,0,0.75)', zIndex:1000, display:'flex', alignItems:'center', justifyContent:'center' },
-  modal:    { background:'#13132a', border:'1px solid #3a3a70', borderRadius:8, display:'flex', flexDirection:'column', width:'min(95vw,1140px)', height:'min(90vh,760px)', color:'#ccc', fontFamily:'system-ui,sans-serif', overflow:'hidden', boxShadow:'0 8px 40px rgba(0,0,0,0.6)' },
+  modal:    { position:'relative', background:'#13132a', border:'1px solid #3a3a70', borderRadius:8, display:'flex', flexDirection:'column', width:'min(95vw,1140px)', height:'min(90vh,760px)', color:'#ccc', fontFamily:'system-ui,sans-serif', overflow:'hidden', boxShadow:'0 8px 40px rgba(0,0,0,0.6)' },
   header:   { display:'flex', alignItems:'center', gap:8, padding:'10px 16px', borderBottom:'1px solid #2a2a50', flexShrink:0, background:'#1a1a38' },
   title:    { fontSize:14, fontWeight:700, color:'#aaaaff', flex:1 },
   iconBtn:  { background:'none', border:'1px solid #2a2a50', color:'#8888aa', borderRadius:3, padding:'3px 10px', cursor:'pointer', fontSize:11 },
@@ -173,6 +243,17 @@ const S = {
   addFeedBtn:{ marginTop:4, background:'none', border:'1px solid #2a2a50', color:'#5555aa', borderRadius:3, padding:'3px 10px', cursor:'pointer', fontSize:10 },
   delFeedBtn:{ background:'none', border:'none', color:'#884444', cursor:'pointer', fontSize:12, padding:'0 4px' },
 
+  // Import confirmation overlay
+  confirmBg:  { position:'absolute', inset:0, background:'rgba(0,0,0,0.72)', display:'flex', alignItems:'center', justifyContent:'center', zIndex:20, borderRadius:8 },
+  confirmBox: { background:'#1a1a3a', border:'1px solid #3a3a70', borderRadius:10, padding:'22px 28px', maxWidth:460, width:'90%', boxShadow:'0 8px 32px rgba(0,0,0,0.7)' },
+  confirmTitle: { fontSize:14, fontWeight:700, color:'#aaaaff', marginBottom:6 },
+  confirmSub:   { fontSize:11, color:'#8888aa', marginBottom:18, lineHeight:1.5 },
+  confirmModes: { display:'flex', flexDirection:'column', gap:10, marginBottom:16 },
+  modeBtn: (col) => ({ display:'flex', flexDirection:'column', alignItems:'flex-start', padding:'10px 14px', borderRadius:6, cursor:'pointer', border:`1px solid ${col}40`, background:`${col}12`, textAlign:'left' }),
+  modeBtnLabel: (col) => ({ fontSize:12, fontWeight:600, color:col, marginBottom:2 }),
+  modeBtnDesc:  { fontSize:10, color:'#666688', lineHeight:1.4 },
+  confirmCancel: { background:'none', border:'1px solid #333355', color:'#666688', borderRadius:4, padding:'6px 16px', cursor:'pointer', fontSize:11, width:'100%' },
+
   // Footer
   footer:   { display:'flex', alignItems:'center', gap:8, padding:'10px 16px', borderTop:'1px solid #2a2a50', flexShrink:0, background:'#1a1a38' },
   saveMsg:  { fontSize:10, color:'#44cc88', flex:1 },
@@ -194,14 +275,15 @@ export default function ToolLibraryModal({ onClose }) {
   const isInch     = state.postConfig?.units === 'inch';
   const machineName = state.machineConfig?.name || 'Masso G3';
 
-  const [tools,       setTools]      = useState([]);
-  const [selectedId,  setSelectedId] = useState(null);
-  const [editTool,    setEditTool]   = useState(null);
-  const [dirty,       setDirty]      = useState(false);
-  const [search,      setSearch]     = useState('');
-  const [collapsed,   setCollapsed]  = useState({});
-  const [msg,         setMsg]        = useState({ text:'', isErr:false });
-  const importRef = useRef(null);
+  const [tools,         setTools]        = useState([]);
+  const [selectedId,    setSelectedId]   = useState(null);
+  const [editTool,      setEditTool]     = useState(null);
+  const [dirty,         setDirty]        = useState(false);
+  const [search,        setSearch]       = useState('');
+  const [collapsed,     setCollapsed]    = useState({});
+  const [msg,           setMsg]          = useState({ text:'', isErr:false });
+  const [pendingImport, setPendingImport] = useState(null);
+  // pendingImport = { tools: [...], label: string, count: number }
 
   useEffect(() => { loadTools(); }, []);
 
@@ -301,47 +383,89 @@ export default function ToolLibraryModal({ onClose }) {
     URL.revokeObjectURL(url);
   }
 
-  async function handleImport(e) {
-    const file = e.target.files?.[0];
-    if (!file) return;
-    const text = await file.text();
-    e.target.value = '';
+  async function handleImport() {
+    if (!window.electron) { setMsg({ text:'File import requires Electron.', isErr:true }); return; }
 
-    let parsed;
-    try { parsed = JSON.parse(text); }
-    catch { setMsg({ text:'Import failed — file is not valid JSON.', isErr:true }); return; }
+    const result = await window.electron.openToolLibrary();
+    if (!result) return;
 
-    let toolsToImport;
-    let label;
+    if (result.error) { setMsg({ text:`Import failed: ${result.error}`, isErr:true }); return; }
 
-    if (Array.isArray(parsed)) {
-      // Native DMDCAM format
-      toolsToImport = parsed.map(({ id, ...rest }) => rest);
-      label = 'DMDCAM';
-    } else if (isFusion360(parsed)) {
-      // Fusion 360 tool library
-      const { converted, skipped } = convertFusion360(parsed);
+    let toolsToImport = [];
+    let label = '';
+
+    if (result.ext === '.json') {
+      let parsed;
+      try { parsed = JSON.parse(result.content); }
+      catch { setMsg({ text:'Import failed — file is not valid JSON.', isErr:true }); return; }
+
+      if (Array.isArray(parsed)) {
+        toolsToImport = parsed.map(({ id, ...rest }) => rest);
+        label = 'DMDCAM';
+      } else if (isFusion360(parsed)) {
+        const { converted, skipped } = convertFusion360(parsed);
+        toolsToImport = converted;
+        label = skipped.length > 0
+          ? `Fusion 360 (${skipped.length} skipped)`
+          : 'Fusion 360';
+      } else {
+        setMsg({ text:'Unrecognised JSON format — expected a DMDCAM tool array or Fusion 360 library.', isErr:true });
+        return;
+      }
+    } else if (result.ext === '.vtdb') {
+      const vtdbResult = await window.electron.importVtdb(result.path);
+      if (!vtdbResult.ok) {
+        setMsg({ text:`VCarve import failed: ${vtdbResult.error}`, isErr:true }); return;
+      }
+      const { converted, skipped } = convertVCarve(vtdbResult.rows);
       toolsToImport = converted;
       label = skipped.length > 0
-        ? `Fusion 360 (${skipped.length} tool${skipped.length > 1 ? 's' : ''} skipped)`
-        : 'Fusion 360';
+        ? `VCarve (${skipped.length} skipped)`
+        : 'VCarve';
     } else {
-      setMsg({ text:'Unrecognised format — expected a DMDCAM tool array or Fusion 360 library.', isErr:true });
-      return;
+      setMsg({ text:`Unsupported file type: ${result.ext}`, isErr:true }); return;
     }
 
     if (toolsToImport.length === 0) {
-      setMsg({ text:'No tools found in file.', isErr:true });
-      return;
+      setMsg({ text:'No tools found in file.', isErr:true }); return;
     }
 
-    if (!window.confirm(`Import ${toolsToImport.length} tool${toolsToImport.length !== 1 ? 's' : ''} from ${label}?\nThis will REPLACE your current library.`)) return;
+    setPendingImport({ tools: toolsToImport, label, count: toolsToImport.length });
+  }
 
-    for (const t of tools) await window.electron.deleteTool(t.id);
-    for (const t of toolsToImport) await window.electron.saveTool(t);
-    await refreshAndDispatch();
-    setSelectedId(null); setEditTool(null); setDirty(false);
-    setMsg({ text:`Imported ${toolsToImport.length} tools (${label}).`, isErr:false });
+  async function doImport(mode) {
+    if (!pendingImport) return;
+    const { tools: incoming, label, count } = pendingImport;
+    setPendingImport(null);
+
+    if (mode === 'replace') {
+      for (const t of tools) await window.electron.deleteTool(t.id);
+      for (const t of incoming) await window.electron.saveTool(t);
+      await refreshAndDispatch();
+      setSelectedId(null); setEditTool(null); setDirty(false);
+      setMsg({ text:`Replaced library with ${count} tools from ${label}.`, isErr:false });
+
+    } else if (mode === 'merge') {
+      const existingNames = new Set(tools.map(t => t.name.toLowerCase().trim()));
+      const toAdd = incoming.filter(t => !existingNames.has(t.name.toLowerCase().trim()));
+      const skippedCount = incoming.length - toAdd.length;
+      for (const t of toAdd) await window.electron.saveTool(t);
+      await refreshAndDispatch();
+      setMsg({
+        text: `Merged ${toAdd.length} new tool${toAdd.length !== 1 ? 's' : ''} from ${label}` +
+              (skippedCount > 0 ? ` (${skippedCount} duplicate${skippedCount > 1 ? 's' : ''} skipped)` : '') + '.',
+        isErr: false,
+      });
+
+    } else if (mode === 'newcategory') {
+      const defaultName = label.replace(/\s*\(.*\)/, '').trim() + ' Import';
+      const catName = window.prompt('Category name for imported tools:', defaultName);
+      if (!catName) return;
+      const tagged = incoming.map(t => ({ ...t, userCategory: catName.trim() }));
+      for (const t of tagged) await window.electron.saveTool(t);
+      await refreshAndDispatch();
+      setMsg({ text:`Imported ${count} tools into category "${catName.trim()}".`, isErr:false });
+    }
   }
 
   // ── Unit helpers ───────────────────────────────────────────────────────────
@@ -352,15 +476,21 @@ export default function ToolLibraryModal({ onClose }) {
   const dStep  = isInch ? 0.0001 : 0.01;
   const fStep  = isInch ? 0.1 : 25;
 
-  // ── Group tools ────────────────────────────────────────────────────────────
+  // ── Group tools — standard categories + any userCategory groups ───────────
   const q = search.toLowerCase();
   const filtered = tools.filter(t =>
     !q || t.name.toLowerCase().includes(q) || t.type.toLowerCase().includes(q)
   );
+
+  const customCats = [...new Set(
+    tools.map(t => t.userCategory).filter(c => c && !STD_CATEGORIES.includes(c))
+  )];
+  const CATEGORIES = [...STD_CATEGORIES, ...customCats];
+
   const grouped = Object.fromEntries(CATEGORIES.map(c => [c, []]));
   for (const t of filtered) {
     const cat = getCategory(t);
-    (grouped[cat] ?? grouped['Other']).push(t);
+    (grouped[cat] ?? (grouped[cat] = [])).push(t);
   }
 
   const isTapered = editTool?.type === 'tapered';
@@ -374,11 +504,38 @@ export default function ToolLibraryModal({ onClose }) {
         {/* Header */}
         <div style={S.header}>
           <span style={S.title}>🔧 Tool Library</span>
-          <input ref={importRef} type="file" accept=".json" style={{ display:'none' }} onChange={handleImport} />
-          <button style={S.iconBtn} onClick={() => importRef.current?.click()}>⬆ Import JSON</button>
+          <button style={S.iconBtn} onClick={handleImport}>⬆ Import</button>
           <button style={S.iconBtn} onClick={handleExport}>⬇ Export JSON</button>
           <button style={{ ...S.iconBtn, marginLeft:8, fontSize:14, padding:'2px 9px' }} onClick={onClose}>✕</button>
         </div>
+
+        {/* Import mode confirmation overlay */}
+        {pendingImport && (
+          <div style={S.confirmBg}>
+            <div style={S.confirmBox}>
+              <div style={S.confirmTitle}>Import {pendingImport.count} tool{pendingImport.count !== 1 ? 's' : ''}</div>
+              <div style={S.confirmSub}>
+                Source: <strong style={{ color:'#aaaaee' }}>{pendingImport.label}</strong><br/>
+                Choose how to add these tools to your library:
+              </div>
+              <div style={S.confirmModes}>
+                <button style={S.modeBtn('#88cc88')} onClick={() => doImport('merge')}>
+                  <span style={S.modeBtnLabel('#88cc88')}>Merge</span>
+                  <span style={S.modeBtnDesc}>Add imported tools to the existing library. Skips any tool whose name already exists.</span>
+                </button>
+                <button style={S.modeBtn('#cc8888')} onClick={() => doImport('replace')}>
+                  <span style={S.modeBtnLabel('#cc8888')}>Replace</span>
+                  <span style={S.modeBtnDesc}>Delete the entire current library and replace it with the imported tools.</span>
+                </button>
+                <button style={S.modeBtn('#88aacc')} onClick={() => doImport('newcategory')}>
+                  <span style={S.modeBtnLabel('#88aacc')}>Import as New Category</span>
+                  <span style={S.modeBtnDesc}>Add all imported tools under a named category group (e.g. "Fusion 360 Import"). You'll be prompted for the name.</span>
+                </button>
+              </div>
+              <button style={S.confirmCancel} onClick={() => setPendingImport(null)}>Cancel</button>
+            </div>
+          </div>
+        )}
 
         {/* Body */}
         <div style={S.body}>

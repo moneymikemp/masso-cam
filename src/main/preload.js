@@ -18,6 +18,10 @@ contextBridge.exposeInMainWorld('electron', {
   storeGet: (key) => ipcRenderer.invoke('store-get', key),
   storeSet: (key, val) => ipcRenderer.invoke('store-set', key, val),
 
+  // Tool library import
+  openToolLibrary: () => ipcRenderer.invoke('dialog-open-tool-library'),
+  importVtdb: (filePath) => ipcRenderer.invoke('import-vtdb', filePath),
+
   // File association / CLI open
   getInitialFile: () => ipcRenderer.invoke('get-initial-file'),
   onOpenFile: (callback) => {
