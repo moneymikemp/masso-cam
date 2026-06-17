@@ -7,160 +7,66 @@ const isDev = process.env.NODE_ENV === 'development';
 const store = new Store();
 
 let mainWindow;
-let db;
-let dbInitError = null;
 let pendingOpenPath = null;
 
-function initDatabase() {
-  try {
-    const Database = require('better-sqlite3');
-    const userDataPath = app.getPath('userData');
-    const dbPath = path.join(userDataPath, 'dmdcam.db');
-    console.log('[DB] opening database at:', dbPath);
-    // One-time migration: copy old MassoCAM DB if new one doesn't exist yet
-    const oldDbSameDir = path.join(userDataPath, 'massocam.db');
-    const oldDbProdDir = path.join(path.dirname(userDataPath), 'MassoCAM', 'massocam.db');
-    if (!fs.existsSync(dbPath)) {
-      if (fs.existsSync(oldDbSameDir)) try { fs.copyFileSync(oldDbSameDir, dbPath); } catch (_) {}
-      else if (fs.existsSync(oldDbProdDir)) try { fs.copyFileSync(oldDbProdDir, dbPath); } catch (_) {}
-    }
-    db = new Database(dbPath);
+const DEFAULT_TOOLS = [
+  { name: '1/4" Flat End Mill', type: 'flat', diameter: 6.35, flutes: 2, material: 'HSS', notes: '', tool_number: 1, tipDiameter: 0, taperAngle: 0,
+    feeds: [
+      { material: 'MDF',      spindle_rpm: 18000, feed_rate: 2500, plunge_rate: 800,  depth_per_pass: 3.0, stepover: 0.45 },
+      { material: 'Softwood', spindle_rpm: 16000, feed_rate: 2000, plunge_rate: 600,  depth_per_pass: 4.0, stepover: 0.45 },
+      { material: 'Hardwood', spindle_rpm: 14000, feed_rate: 1500, plunge_rate: 500,  depth_per_pass: 2.5, stepover: 0.40 },
+      { material: 'Aluminum', spindle_rpm: 10000, feed_rate: 800,  plunge_rate: 300,  depth_per_pass: 0.5, stepover: 0.35 },
+      { material: 'HDPE',     spindle_rpm: 12000, feed_rate: 1800, plunge_rate: 600,  depth_per_pass: 3.0, stepover: 0.45 },
+    ]},
+  { name: '1/8" Flat End Mill', type: 'flat', diameter: 3.175, flutes: 2, material: 'HSS', notes: '', tool_number: 2, tipDiameter: 0, taperAngle: 0,
+    feeds: [
+      { material: 'MDF',      spindle_rpm: 22000, feed_rate: 1500, plunge_rate: 500,  depth_per_pass: 1.5, stepover: 0.45 },
+      { material: 'Softwood', spindle_rpm: 20000, feed_rate: 1200, plunge_rate: 400,  depth_per_pass: 2.0, stepover: 0.45 },
+      { material: 'Hardwood', spindle_rpm: 18000, feed_rate: 900,  plunge_rate: 300,  depth_per_pass: 1.5, stepover: 0.40 },
+      { material: 'Aluminum', spindle_rpm: 12000, feed_rate: 500,  plunge_rate: 150,  depth_per_pass: 0.3, stepover: 0.30 },
+    ]},
+  { name: '1/2" Flat End Mill', type: 'flat', diameter: 12.7, flutes: 2, material: 'HSS', notes: '', tool_number: 3, tipDiameter: 0, taperAngle: 0,
+    feeds: [
+      { material: 'MDF',      spindle_rpm: 14000, feed_rate: 3000, plunge_rate: 1000, depth_per_pass: 5.0, stepover: 0.45 },
+      { material: 'Softwood', spindle_rpm: 12000, feed_rate: 2500, plunge_rate: 800,  depth_per_pass: 6.0, stepover: 0.45 },
+      { material: 'Hardwood', spindle_rpm: 10000, feed_rate: 1800, plunge_rate: 600,  depth_per_pass: 4.0, stepover: 0.40 },
+    ]},
+  { name: '90° V-Bit 1/4"', type: 'tapered', diameter: 6.35, flutes: 2, material: 'Carbide', notes: '', tool_number: 4, tipDiameter: 0, taperAngle: 45,
+    feeds: [
+      { material: 'MDF',      spindle_rpm: 18000, feed_rate: 2000, plunge_rate: 600,  depth_per_pass: 1.0, stepover: 0.10 },
+      { material: 'Softwood', spindle_rpm: 16000, feed_rate: 1800, plunge_rate: 500,  depth_per_pass: 1.0, stepover: 0.10 },
+      { material: 'Hardwood', spindle_rpm: 14000, feed_rate: 1200, plunge_rate: 400,  depth_per_pass: 0.8, stepover: 0.10 },
+    ]},
+  { name: '60° V-Bit 1/4"', type: 'tapered', diameter: 6.35, flutes: 2, material: 'Carbide', notes: '', tool_number: 5, tipDiameter: 0, taperAngle: 30,
+    feeds: [
+      { material: 'MDF',      spindle_rpm: 18000, feed_rate: 2000, plunge_rate: 600,  depth_per_pass: 1.0, stepover: 0.10 },
+      { material: 'Hardwood', spindle_rpm: 14000, feed_rate: 1200, plunge_rate: 400,  depth_per_pass: 0.8, stepover: 0.10 },
+    ]},
+  { name: '1/4" Ball Nose', type: 'ball', diameter: 6.35, flutes: 2, material: 'Carbide', notes: '', tool_number: 6, tipDiameter: 0, taperAngle: 0,
+    feeds: [
+      { material: 'MDF',      spindle_rpm: 18000, feed_rate: 2000, plunge_rate: 600,  depth_per_pass: 2.0, stepover: 0.15 },
+      { material: 'Hardwood', spindle_rpm: 14000, feed_rate: 1200, plunge_rate: 400,  depth_per_pass: 1.5, stepover: 0.15 },
+      { material: 'Aluminum', spindle_rpm: 10000, feed_rate: 600,  plunge_rate: 200,  depth_per_pass: 0.4, stepover: 0.10 },
+    ]},
+  { name: '1/4" Upcut Spiral', type: 'upcut', diameter: 6.35, flutes: 2, material: 'Carbide', notes: '', tool_number: 7, tipDiameter: 0, taperAngle: 0,
+    feeds: [
+      { material: 'MDF',      spindle_rpm: 18000, feed_rate: 2800, plunge_rate: 900,  depth_per_pass: 3.5, stepover: 0.45 },
+      { material: 'Softwood', spindle_rpm: 16000, feed_rate: 2200, plunge_rate: 700,  depth_per_pass: 4.5, stepover: 0.45 },
+      { material: 'Plywood',  spindle_rpm: 16000, feed_rate: 2000, plunge_rate: 600,  depth_per_pass: 4.0, stepover: 0.45 },
+    ]},
+  { name: '1/4" Downcut Spiral', type: 'downcut', diameter: 6.35, flutes: 2, material: 'Carbide', notes: '', tool_number: 8, tipDiameter: 0, taperAngle: 0,
+    feeds: [
+      { material: 'MDF',      spindle_rpm: 18000, feed_rate: 2500, plunge_rate: 800,  depth_per_pass: 3.0, stepover: 0.45 },
+      { material: 'Plywood',  spindle_rpm: 16000, feed_rate: 1800, plunge_rate: 600,  depth_per_pass: 3.5, stepover: 0.45 },
+    ]},
+];
 
-    db.exec(`
-      CREATE TABLE IF NOT EXISTS tools (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        name TEXT NOT NULL,
-        type TEXT NOT NULL,
-        diameter REAL NOT NULL,
-        flutes INTEGER DEFAULT 2,
-        material TEXT DEFAULT 'HSS',
-        notes TEXT DEFAULT '',
-        tool_number INTEGER DEFAULT 1,
-        created_at DATETIME DEFAULT CURRENT_TIMESTAMP
-      );
-
-      CREATE TABLE IF NOT EXISTS feeds (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        tool_id INTEGER NOT NULL,
-        material TEXT NOT NULL,
-        spindle_rpm INTEGER NOT NULL,
-        feed_rate REAL NOT NULL,
-        plunge_rate REAL NOT NULL,
-        depth_per_pass REAL NOT NULL,
-        stepover REAL DEFAULT 0.5,
-        FOREIGN KEY (tool_id) REFERENCES tools(id) ON DELETE CASCADE
-      );
-
-      CREATE TABLE IF NOT EXISTS projects (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        name TEXT NOT NULL,
-        data TEXT NOT NULL,
-        created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-        updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
-      );
-    `);
-
-    // Schema migrations — each wrapped so they're no-ops on fresh DBs.
-    try { db.exec(`ALTER TABLE tools ADD COLUMN tool_number INTEGER DEFAULT 1`); } catch (_) {}
-    try { db.exec(`ALTER TABLE tools ADD COLUMN tip_diameter REAL DEFAULT 0`); } catch (_) {}
-    try { db.exec(`ALTER TABLE tools ADD COLUMN taper_angle  REAL DEFAULT 0`); } catch (_) {}
-
-    // Data migration: vbit → tapered with angle inferred from tool name.
-    db.prepare(`
-      UPDATE tools SET
-        type         = 'tapered',
-        taper_angle  = CASE
-          WHEN name LIKE '%90%' THEN 45
-          WHEN name LIKE '%60%' THEN 30
-          WHEN name LIKE '%45%' THEN 22.5
-          ELSE 45
-        END,
-        tip_diameter = 0
-      WHERE type = 'vbit'
-    `).run();
-
-    const toolCount = db.prepare('SELECT COUNT(*) as count FROM tools').get();
-    console.log('[DB] initialised, tool count:', toolCount.count);
-    if (toolCount.count === 0) {
-      insertDefaultTools();
-      console.log('[DB] inserted default tools');
-    }
-  } catch (err) {
-    dbInitError = err?.message || String(err);
-    console.error('[DB] Database init error — tool library will be unavailable:', err);
-  }
-}
-
-function insertDefaultTools() {
-  const insertTool = db.prepare(`
-    INSERT INTO tools (name, type, diameter, flutes, material, notes, tip_diameter, taper_angle)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-  `);
-  const insertFeed = db.prepare(`
-    INSERT INTO feeds (tool_id, material, spindle_rpm, feed_rate, plunge_rate, depth_per_pass, stepover)
-    VALUES (?, ?, ?, ?, ?, ?, ?)
-  `);
-
-  const defaults = [
-    { name: '1/4" Flat End Mill', type: 'flat', diameter: 6.35, flutes: 2, material: 'HSS',
-      feeds: [
-        { mat: 'MDF', rpm: 18000, feed: 2500, plunge: 800, dpp: 3.0, so: 0.45 },
-        { mat: 'Softwood', rpm: 16000, feed: 2000, plunge: 600, dpp: 4.0, so: 0.45 },
-        { mat: 'Hardwood', rpm: 14000, feed: 1500, plunge: 500, dpp: 2.5, so: 0.40 },
-        { mat: 'Aluminum', rpm: 10000, feed: 800, plunge: 300, dpp: 0.5, so: 0.35 },
-        { mat: 'HDPE', rpm: 12000, feed: 1800, plunge: 600, dpp: 3.0, so: 0.45 },
-      ]},
-    { name: '1/8" Flat End Mill', type: 'flat', diameter: 3.175, flutes: 2, material: 'HSS',
-      feeds: [
-        { mat: 'MDF', rpm: 22000, feed: 1500, plunge: 500, dpp: 1.5, so: 0.45 },
-        { mat: 'Softwood', rpm: 20000, feed: 1200, plunge: 400, dpp: 2.0, so: 0.45 },
-        { mat: 'Hardwood', rpm: 18000, feed: 900, plunge: 300, dpp: 1.5, so: 0.40 },
-        { mat: 'Aluminum', rpm: 12000, feed: 500, plunge: 150, dpp: 0.3, so: 0.30 },
-      ]},
-    { name: '1/2" Flat End Mill', type: 'flat', diameter: 12.7, flutes: 2, material: 'HSS',
-      feeds: [
-        { mat: 'MDF', rpm: 14000, feed: 3000, plunge: 1000, dpp: 5.0, so: 0.45 },
-        { mat: 'Softwood', rpm: 12000, feed: 2500, plunge: 800, dpp: 6.0, so: 0.45 },
-        { mat: 'Hardwood', rpm: 10000, feed: 1800, plunge: 600, dpp: 4.0, so: 0.40 },
-      ]},
-    { name: '90° V-Bit 1/4"', type: 'tapered', diameter: 6.35, flutes: 2, material: 'Carbide', tipDiameter: 0, taperAngle: 45,
-      feeds: [
-        { mat: 'MDF', rpm: 18000, feed: 2000, plunge: 600, dpp: 1.0, so: 0.10 },
-        { mat: 'Softwood', rpm: 16000, feed: 1800, plunge: 500, dpp: 1.0, so: 0.10 },
-        { mat: 'Hardwood', rpm: 14000, feed: 1200, plunge: 400, dpp: 0.8, so: 0.10 },
-      ]},
-    { name: '60° V-Bit 1/4"', type: 'tapered', diameter: 6.35, flutes: 2, material: 'Carbide', tipDiameter: 0, taperAngle: 30,
-      feeds: [
-        { mat: 'MDF', rpm: 18000, feed: 2000, plunge: 600, dpp: 1.0, so: 0.10 },
-        { mat: 'Hardwood', rpm: 14000, feed: 1200, plunge: 400, dpp: 0.8, so: 0.10 },
-      ]},
-    { name: '1/4" Ball Nose', type: 'ball', diameter: 6.35, flutes: 2, material: 'Carbide',
-      feeds: [
-        { mat: 'MDF', rpm: 18000, feed: 2000, plunge: 600, dpp: 2.0, so: 0.15 },
-        { mat: 'Hardwood', rpm: 14000, feed: 1200, plunge: 400, dpp: 1.5, so: 0.15 },
-        { mat: 'Aluminum', rpm: 10000, feed: 600, plunge: 200, dpp: 0.4, so: 0.10 },
-      ]},
-    { name: '1/4" Upcut Spiral', type: 'upcut', diameter: 6.35, flutes: 2, material: 'Carbide',
-      feeds: [
-        { mat: 'MDF', rpm: 18000, feed: 2800, plunge: 900, dpp: 3.5, so: 0.45 },
-        { mat: 'Softwood', rpm: 16000, feed: 2200, plunge: 700, dpp: 4.5, so: 0.45 },
-        { mat: 'Plywood', rpm: 16000, feed: 2000, plunge: 600, dpp: 4.0, so: 0.45 },
-      ]},
-    { name: '1/4" Downcut Spiral', type: 'downcut', diameter: 6.35, flutes: 2, material: 'Carbide',
-      feeds: [
-        { mat: 'MDF', rpm: 18000, feed: 2500, plunge: 800, dpp: 3.0, so: 0.45 },
-        { mat: 'Plywood', rpm: 16000, feed: 1800, plunge: 600, dpp: 3.5, so: 0.45 },
-      ]},
-  ];
-
-  for (const tool of defaults) {
-    const result = insertTool.run(
-      tool.name, tool.type, tool.diameter, tool.flutes, tool.material, tool.notes || '',
-      tool.tipDiameter ?? 0, tool.taperAngle ?? 0,
-    );
-    for (const f of tool.feeds) {
-      insertFeed.run(result.lastInsertRowid, f.mat, f.rpm, f.feed, f.plunge, f.dpp, f.so);
-    }
+function initToolStore() {
+  if (!store.has('tools')) {
+    const tools = DEFAULT_TOOLS.map((t, i) => ({ ...t, id: i + 1 }));
+    store.set('tools', tools);
+    store.set('nextToolId', tools.length + 1);
+    console.log('[ToolStore] seeded', tools.length, 'default tools');
   }
 }
 
@@ -290,7 +196,7 @@ if (!gotTheLock) {
 
   app.whenReady().then(() => {
     pendingOpenPath = getFileArgument();
-    initDatabase();
+    initToolStore();
     createWindow();
   });
 }
@@ -361,70 +267,31 @@ ipcMain.handle('dialog-save-project', async (_, defaultPath) => {
   return result.canceled ? null : result.filePath;
 });
 
-// Tool library DB handlers
+// Tool library — persisted in electron-store (no native module required)
 ipcMain.handle('db-get-tools', () => {
-  if (!db) return [];
-  const tools = db.prepare('SELECT * FROM tools ORDER BY type, name').all();
-  for (const tool of tools) {
-    tool.feeds = db.prepare('SELECT * FROM feeds WHERE tool_id = ?').all(tool.id);
-    // Map snake_case DB columns to camelCase for the renderer.
-    tool.tipDiameter = tool.tip_diameter ?? 0;
-    tool.taperAngle  = tool.taper_angle  ?? 0;
-    delete tool.tip_diameter;
-    delete tool.taper_angle;
-  }
-  return tools;
+  return store.get('tools', []);
 });
 
 ipcMain.handle('db-save-tool', (_, tool) => {
-  if (!db) {
-    console.error('[db-save-tool] Database not initialised — tool save aborted');
-    return { __error: dbInitError || 'Database not initialised' };
+  const tools = store.get('tools', []);
+  const { units, ...toolData } = tool; // units is renderer-only display state, not persisted
+  if (toolData.id && toolData.id !== '__new__') {
+    const idx = tools.findIndex(t => t.id === toolData.id);
+    if (idx >= 0) {
+      tools[idx] = toolData;
+      store.set('tools', tools);
+      return tools[idx];
+    }
   }
-  console.log('[db-save-tool] saving:', tool?.name, 'id:', tool?.id);
-  const { feeds, ...toolData } = tool;
-  let toolId = toolData.id;
-  const toolNum     = toolData.tool_number ?? 1;
-  const tipDiameter = toolData.tipDiameter ?? 0;
-  const taperAngle  = toolData.taperAngle  ?? 0;
-  const name        = toolData.name     || '';
-  const notes       = toolData.notes    || '';
-  const material    = toolData.material || 'Carbide';
-  const diameter    = Number(toolData.diameter)  || 0;
-  const flutes      = Number(toolData.flutes)    || 2;
-  if (toolId) {
-    db.prepare('UPDATE tools SET name=?, type=?, diameter=?, flutes=?, material=?, notes=?, tool_number=?, tip_diameter=?, taper_angle=? WHERE id=?')
-      .run(name, toolData.type, diameter, flutes, material, notes, toolNum, tipDiameter, taperAngle, toolId);
-    db.prepare('DELETE FROM feeds WHERE tool_id=?').run(toolId);
-  } else {
-    const result = db.prepare('INSERT INTO tools (name,type,diameter,flutes,material,notes,tool_number,tip_diameter,taper_angle) VALUES (?,?,?,?,?,?,?,?,?)')
-      .run(name, toolData.type, diameter, flutes, material, notes, toolNum, tipDiameter, taperAngle);
-    toolId = result.lastInsertRowid;
-    console.log('[db-save-tool] inserted new tool, id:', toolId);
-  }
-  const insertFeed = db.prepare('INSERT INTO feeds (tool_id,material,spindle_rpm,feed_rate,plunge_rate,depth_per_pass,stepover) VALUES (?,?,?,?,?,?,?)');
-  for (const f of (feeds || [])) {
-    insertFeed.run(toolId, f.material, f.spindle_rpm, f.feed_rate, f.plunge_rate, f.depth_per_pass, f.stepover ?? 0.45);
-  }
-  const saved = db.prepare('SELECT * FROM tools WHERE id=?').get(toolId);
-  if (!saved) {
-    console.error('[db-save-tool] SELECT after insert returned nothing for id:', toolId);
-    return null;
-  }
-  saved.feeds = db.prepare('SELECT * FROM feeds WHERE tool_id=?').all(toolId);
-  // Apply the same camelCase mapping used by db-get-tools so the renderer always
-  // receives a consistent shape regardless of which handler it called.
-  saved.tipDiameter = saved.tip_diameter ?? 0;
-  saved.taperAngle  = saved.taper_angle  ?? 0;
-  delete saved.tip_diameter;
-  delete saved.taper_angle;
-  console.log('[db-save-tool] returning saved tool id:', saved.id);
+  const nextId = store.get('nextToolId', 1);
+  const saved = { ...toolData, id: nextId };
+  store.set('nextToolId', nextId + 1);
+  store.set('tools', [...tools, saved]);
   return saved;
 });
 
 ipcMain.handle('db-delete-tool', (_, toolId) => {
-  if (!db) return false;
-  db.prepare('DELETE FROM tools WHERE id=?').run(toolId);
+  store.set('tools', (store.get('tools', [])).filter(t => t.id !== toolId));
   return true;
 });
 

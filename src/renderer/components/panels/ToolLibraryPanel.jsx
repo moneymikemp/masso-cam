@@ -104,9 +104,7 @@ export default function ToolLibraryPanel() {
       console.log('[ToolLibrary] saving tool:', editTool);
       const saved = await window.electron.saveTool(editTool);
       console.log('[ToolLibrary] save result:', saved);
-      if (saved?.__error) {
-        setSaveError(`DB init failed: ${saved.__error}`);
-      } else if (saved) {
+      if (saved) {
         const restoredUnits = { units: editTool.units || 'mm', ...saved };
         await loadTools();
         setSelected(saved.id);
