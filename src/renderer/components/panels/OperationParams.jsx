@@ -1,5 +1,6 @@
-import React from 'react';
+import React, { useState, useEffect } from 'react';
 import { useApp } from '../../store/AppContext';
+import { loadFontFromArrayBuffer, textToGlyphContours, getTextBounds } from '../../cam/textEngine';
 
 const S = {
   form: { padding: '6px 8px', fontSize: 11 },
@@ -75,6 +76,38 @@ export default function OperationParams({ op, tools, operations = [], onChange }
   const { state, dispatch } = useApp();
   const isInch = state.postConfig?.units === 'inch';
   const p = op.params || {};
+
+  // ── Text Engraving: font list state ────────────────────────────────────────
+  const [fontList, setFontList] = useState([]);
+  const [loadingFonts, setLoadingFonts] = useState(false);
+  const [generatingGeometry, setGeneratingGeometry] = useState(false);
+
+  useEffect(() => {
+    if (op.type !== 'text' || fontList.length > 0 || loadingFonts) return;
+    setLoadingFonts(true);
+    window.electron?.listSystemFonts?.()
+      .then(fonts => setFontList(fonts || []))
+      .catch(() => {})
+      .finally(() => setLoadingFonts(false));
+  }, [op.type]); // load once when text op is first shown
+
+  async function generateTextGeometry() {
+    if (!p.fontPath || !p.text) return;
+    setGeneratingGeometry(true);
+    try {
+      const fontBytes = await window.electron.readFontFile(p.fontPath);
+      if (!fontBytes) { setGeneratingGeometry(false); return; }
+      const ab = fontBytes.buffer.slice(fontBytes.byteOffset, fontBytes.byteOffset + fontBytes.byteLength);
+      const font = loadFontFromArrayBuffer(ab);
+      const capHeightMm = isInch ? (p.fontSize ?? 10) * MM_PER_INCH : (p.fontSize ?? 10);
+      const glyphGroups = textToGlyphContours(font, p.text, capHeightMm);
+      const bounds = getTextBounds(glyphGroups);
+      onChange({ params: { ...p, textContoursRel: glyphGroups, textBoundsRel: bounds } });
+    } catch (e) {
+      console.error('Text geometry generation failed:', e);
+    }
+    setGeneratingGeometry(false);
+  }
 
   function set(key, val) {
     onChange({ params: { ...p, [key]: val } });
@@ -722,6 +755,92 @@ export default function OperationParams({ op, tools, operations = [], onChange }
         <Field label="Top of Stock" unit={distUnit}>
           <NumInput value={toDisp(p.topZ ?? 0)} onChange={v => set('topZ', toMM(v))} step={isInch ? 0.02 : 0.5} />
         </Field>
+        {commonSpeeds}
+      </>}
+
+      {/* ── Text Engraving ── */}
+      {op.type === 'text' && <>
+        <div style={S.section}>Text</div>
+        <div style={S.row}>
+          <span style={S.label}>Content</span>
+          <textarea
+            style={{ ...S.input, resize: 'vertical', minHeight: 48, fontFamily: 'monospace', lineHeight: 1.4 }}
+            value={p.text || ''}
+            rows={2}
+            onChange={e => onChange({ params: { ...p, text: e.target.value, textContoursRel: null, textBoundsRel: null } })}
+          />
+        </div>
+        <div style={S.section}>Font</div>
+        <Field label="Font">
+          {loadingFonts
+            ? <span style={{ color: '#555577', fontSize: 10 }}>Loading fonts…</span>
+            : <select
+                style={S.select}
+                value={p.fontPath || ''}
+                onChange={e => {
+                  const sel = fontList.find(f => f.path === e.target.value);
+                  if (sel) onChange({ params: { ...p, fontFamily: sel.family, fontPath: sel.path, textContoursRel: null, textBoundsRel: null } });
+                }}>
+                <option value="">Select a font…</option>
+                {fontList.map(f => <option key={f.path} value={f.path}>{f.family}</option>)}
+              </select>
+          }
+        </Field>
+        <Field label="Cap Height" unit={distUnit}>
+          <NumInput value={toDisp(p.fontSize ?? 10)} onChange={v => onChange({ params: { ...p, fontSize: toMM(v), textContoursRel: null, textBoundsRel: null } })} min={isInch ? 0.04 : 1} step={dStep} />
+        </Field>
+        <div style={S.section}>Output Mode</div>
+        <Field label="Mode">
+          <Sel value={p.outputMode || 'engraved'} onChange={v => set('outputMode', v)}
+               options={[['engraved','Engraved (V-bit trace)'],['outlined','Outlined (contour cut)'],['filled','Filled (pocket)']]} />
+        </Field>
+        {(p.outputMode || 'engraved') === 'filled' && (
+          <Field label="Stepover" unit={distUnit}>
+            <NumInput value={toDisp(p.stepover ?? 0.45)} onChange={v => set('stepover', toMM(v))} min={isInch ? 0.001 : 0.01} step={dStep} />
+          </Field>
+        )}
+        <div style={S.section}>Geometry</div>
+        <div style={{ fontSize: 10, padding: '2px 0 4px 0', color: p.textContoursRel ? '#44cc88' : '#aa8844' }}>
+          {p.textContoursRel ? `Ready — ${p.textContoursRel.length} glyph(s)` : 'Generate geometry after setting text and font'}
+        </div>
+        <Field label="">
+          <button
+            disabled={!p.fontPath || !p.text || generatingGeometry}
+            style={{ ...S.input, cursor: (!p.fontPath || !p.text || generatingGeometry) ? 'default' : 'pointer', textAlign: 'center', opacity: (!p.fontPath || !p.text) ? 0.4 : 1 }}
+            onClick={generateTextGeometry}>
+            {generatingGeometry ? 'Generating…' : 'Generate Geometry'}
+          </button>
+        </Field>
+        <div style={S.section}>Placement</div>
+        {p.textBoundsRel && (
+          <div style={{ fontSize: 10, color: '#666688', padding: '0 0 4px 124px' }}>
+            {isInch
+              ? `${((p.textBoundsRel.width || 0) / MM_PER_INCH).toFixed(3)}" × ${((p.textBoundsRel.height || 0) / MM_PER_INCH).toFixed(3)}"`
+              : `${(p.textBoundsRel.width || 0).toFixed(1)} × ${(p.textBoundsRel.height || 0).toFixed(1)} mm`}
+          </div>
+        )}
+        <Field label="Position X" unit={distUnit}>
+          <NumInput value={toDisp(p.textX ?? 0)} onChange={v => set('textX', toMM(v))} step={dStep} />
+        </Field>
+        <Field label="Position Y" unit={distUnit}>
+          <NumInput value={toDisp(p.textY ?? 0)} onChange={v => set('textY', toMM(v))} step={dStep} />
+        </Field>
+        <Field label="">
+          <button
+            disabled={!p.textContoursRel}
+            style={{ ...S.input, cursor: !p.textContoursRel ? 'default' : 'pointer', textAlign: 'center', opacity: !p.textContoursRel ? 0.4 : 1,
+              background: (state.textPlacementActive && state.textPlacementOpId === op.id) ? '#1a3a2a' : '#0d0d20',
+              borderColor: (state.textPlacementActive && state.textPlacementOpId === op.id) ? '#44aa88' : '#2a2a50',
+              color: (state.textPlacementActive && state.textPlacementOpId === op.id) ? '#88cc99' : '#ccccee' }}
+            onClick={() => {
+              const isActive = state.textPlacementActive && state.textPlacementOpId === op.id;
+              dispatch({ type: 'SET_TEXT_PLACEMENT', payload: { active: !isActive, opId: isActive ? null : op.id } });
+            }}>
+            {(state.textPlacementActive && state.textPlacementOpId === op.id) ? 'Done Placing' : 'Place on Canvas'}
+          </button>
+        </Field>
+        {toolSelect}
+        {commonDepth}
         {commonSpeeds}
       </>}
 

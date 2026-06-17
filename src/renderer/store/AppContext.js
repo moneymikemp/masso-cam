@@ -125,6 +125,8 @@ const initialState = {
   tabPlacementOpId: null,
   dogboneSelectionActive: false,
   dogboneSelectionOpId: null,
+  textPlacementActive: false,
+  textPlacementOpId: null,
   activePanelTab: 'operations',  // operations | tools | machine | gcode
   gcodeOutput: '',
   statusMessage: '',
@@ -336,6 +338,9 @@ function reducer(state, action) {
     case 'SET_DOGBONE_SELECTION':
       return { ...state, dogboneSelectionActive: action.payload.active, dogboneSelectionOpId: action.payload.opId ?? null };
 
+    case 'SET_TEXT_PLACEMENT':
+      return { ...state, textPlacementActive: action.payload.active, textPlacementOpId: action.payload.opId ?? null };
+
     case 'UPDATE_DOGBONE_CORNERS': {
       const operations = state.operations.map(op =>
         op.id === action.payload.opId
@@ -451,6 +456,13 @@ export function getDefaultParams(type) {
       },
     };
     case 'dogbone': return { safeZ: 25, topZ: 0, feedRate: 1500, plungeRate: 500, spindleRpm: 18000, totalDepth: 10, depthPerPass: 3, toolDiameter: 6.35, cornerMode: 'auto', selectedCorners: [] };
+    case 'text':    return {
+      safeZ: 25, topZ: 0, feedRate: 1500, plungeRate: 500, spindleRpm: 18000,
+      totalDepth: 1.5, depthPerPass: 0.5, toolDiameter: 6.35, stepover: 0.45,
+      text: 'DMDCAM', fontFamily: '', fontPath: null,
+      fontSize: 10, textX: 0, textY: 0, outputMode: 'engraved',
+      textContoursRel: null, textBoundsRel: null,
+    };
     default:         return base;
   }
 }

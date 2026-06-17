@@ -20,6 +20,7 @@ const OP_TYPES = [
   { type: 'taperedplug',   label: 'Tapered Plug',   icon: '◇', desc: 'V-bit profile + endmill cleanup — plug half, fit raised' },
   { type: 'vcarve',        label: 'V-Carve',        icon: '◆', desc: 'Variable-depth V-bit carving for closed shapes' },
   { type: 'dogbone',       label: 'Dogbone Fillets', icon: '⊕', desc: 'Drill internal corners for square-fit pockets' },
+  { type: 'text',          label: 'Text Engraving',  icon: 'T',  desc: 'Engrave, outline, or pocket lettering' },
 ];
 
 const S = {

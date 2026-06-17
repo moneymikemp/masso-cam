@@ -96,6 +96,7 @@ export function generateToolpath(operation, entities, context = {}) {
     case 'taperedplug':   return generateTaperedPlug(operation, entities, context);
     case 'vcarve':        return generateVCarve(operation, entities, context);
     case 'dogbone':       return generateDogbone(operation, entities);
+    case 'text':          return generateText(operation, entities);
     default:             return { moves: [], warnings: ['Unknown operation: ' + type] };
   }
 }
@@ -1965,4 +1966,116 @@ function generateDogbone(op, entities) {
   }
 
   return { moves, warnings, candidateCorners, contours };
+}
+
+// ── Text Engraving ─────────────────────────────────────────────────────────────
+
+function generateText(op) {
+  const moves = [], warnings = [];
+  const p = op.params;
+
+  if (!p.textContoursRel?.length) {
+    return {
+      moves: [],
+      warnings: ['No text geometry — click "Generate Geometry" in the Text Engraving params'],
+      contours: [],
+    };
+  }
+
+  const safeZ    = p.safeZ || 25;
+  const topZ     = p.topZ ?? 0;
+  const feedRate = p.feedRate || 1500;
+  const plungeR  = p.plungeRate || 500;
+  const toolR    = (p.toolDiameter || 6.35) / 2;
+  const stepover = p.stepover || 0.45;
+  const tx       = p.textX || 0;
+  const ty       = p.textY || 0;
+  const mode     = p.outputMode || 'engraved';
+  const zPasses  = buildZPasses(topZ, Math.abs(p.totalDepth || 1.5), p.depthPerPass || 0.5);
+
+  // Apply text placement offset to all stored relative contours
+  const glyphGroups = p.textContoursRel.map(group =>
+    group.map(contour => contour.map(pt => ({ x: pt.x + tx, y: pt.y + ty })))
+  );
+  const allContours = glyphGroups.flat();
+
+  if (mode === 'filled') {
+    for (const group of glyphGroups) {
+      if (!group.length) continue;
+
+      // Sort by absolute area: largest = outer letter boundary, rest = counter holes
+      const sorted = [...group].sort((a, b) => Math.abs(polygonArea(b)) - Math.abs(polygonArea(a)));
+      const outer = sorted[0];
+      if (!outer || outer.length < 3) continue;
+
+      // Normalise outer to CCW (positive offset = shrink inward)
+      const outerCCW = isClockwise(outer) ? [...outer].reverse() : outer;
+
+      // Inset outer by toolR → tool-centre travel boundary
+      const boundary = offsetPolyline(outerCCW, toolR, true)[0];
+      if (!boundary || boundary.length < 3) {
+        warnings.push('Letter too small for this tool diameter');
+        continue;
+      }
+
+      // Expand each hole outward by toolR → exclusion zone for tool centre
+      const islandExclusions = sorted.slice(1)
+        .map(h => {
+          const hCCW = isClockwise(h) ? [...h].reverse() : h;
+          return offsetPolyline(hCCW, -toolR, true)[0];
+        })
+        .filter(e => e?.length >= 3);
+
+      const clearPasses = generatePocketOffsets(boundary, toolR, stepover, islandExclusions);
+      if (!clearPasses.length) {
+        warnings.push('Pocket area too small for this tool');
+        continue;
+      }
+
+      for (const z of zPasses) {
+        moves.push({ type: 'rapid', x: clearPasses[0][0].x, y: clearPasses[0][0].y, z: safeZ });
+        moves.push({ type: 'feed',  x: clearPasses[0][0].x, y: clearPasses[0][0].y, z, f: plungeR });
+        for (let pi = 0; pi < clearPasses.length; pi++) {
+          const pass = clearPasses[pi];
+          if (!pass || pass.length < 2) continue;
+          if (pi > 0) {
+            moves.push({ type: 'rapid', x: pass[0].x, y: pass[0].y, z: safeZ });
+            moves.push({ type: 'feed',  x: pass[0].x, y: pass[0].y, z, f: plungeR });
+          }
+          for (let i = 1; i < pass.length; i++) {
+            moves.push({ type: 'feed', x: pass[i].x, y: pass[i].y, z, f: feedRate });
+          }
+        }
+        const lastPass = clearPasses[clearPasses.length - 1];
+        moves.push({ type: 'rapid', x: lastPass[lastPass.length - 1].x, y: lastPass[lastPass.length - 1].y, z: safeZ });
+      }
+    }
+  } else {
+    // Engraved or Outlined: trace each closed contour at depth
+    for (const group of glyphGroups) {
+      for (const rawContour of group) {
+        if (rawContour.length < 3) continue;
+
+        let contour = rawContour;
+        if (mode === 'outlined') {
+          // Inset by toolR so cutting edge follows the letter boundary exactly
+          const ccw = isClockwise(rawContour) ? [...rawContour].reverse() : rawContour;
+          const offset = offsetPolyline(ccw, toolR, true)[0];
+          if (offset?.length >= 3) contour = offset;
+        }
+
+        moves.push({ type: 'rapid', x: contour[0].x, y: contour[0].y, z: safeZ });
+        for (const z of zPasses) {
+          moves.push({ type: 'feed', x: contour[0].x, y: contour[0].y, z, f: plungeR });
+          for (let i = 1; i < contour.length; i++) {
+            moves.push({ type: 'feed', x: contour[i].x, y: contour[i].y, z, f: feedRate });
+          }
+          moves.push({ type: 'feed', x: contour[0].x, y: contour[0].y, z, f: feedRate });
+        }
+        moves.push({ type: 'rapid', x: contour[0].x, y: contour[0].y, z: safeZ });
+      }
+    }
+  }
+
+  return { moves, warnings, contours: allContours };
 }

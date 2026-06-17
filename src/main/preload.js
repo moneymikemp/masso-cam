@@ -26,6 +26,10 @@ contextBridge.exposeInMainWorld('electron', {
     return () => ipcRenderer.removeListener('open-file', handler);
   },
 
+  // Font enumeration for Text Engraving
+  listSystemFonts: () => ipcRenderer.invoke('list-system-fonts'),
+  readFontFile: (fontPath) => ipcRenderer.invoke('read-font-file', fontPath),
+
   // Menu events
   onMenu: (callback) => {
     const events = [

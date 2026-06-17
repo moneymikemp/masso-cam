@@ -17,6 +17,7 @@
     "clipper-lib": "^6.4.2",
     "dxf-parser": "^1.1.2",
     "electron-store": "^8.1.0",
+    "opentype.js": "^2.0.0",
     "react": "^18.2.0",
     "react-dom": "^18.2.0",
     "react-scripts": "5.0.1",

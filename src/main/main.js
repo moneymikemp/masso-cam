@@ -417,3 +417,64 @@ ipcMain.handle('get-initial-file', () => {
     return null;
   }
 });
+
+// ── System font enumeration ────────────────────────────────────────────────────
+
+let systemFontsCache = null;
+
+function getSystemFonts() {
+  const { execSync } = require('child_process');
+  const windir = process.env.WINDIR || 'C:\\Windows';
+  const fontDir = path.join(windir, 'Fonts');
+  const fonts = [];
+  const seenNames = new Set();
+
+  try {
+    const output = execSync(
+      'reg query "HKLM\\SOFTWARE\\Microsoft\\Windows NT\\CurrentVersion\\Fonts"',
+      { encoding: 'utf8', timeout: 15000 }
+    );
+    for (const line of output.split('\n')) {
+      const match = line.trim().match(/^(.+?)\s+REG_SZ\s+(.+\.(?:ttf|otf))$/i);
+      if (!match) continue;
+      const family = match[1]
+        .replace(/\s*\(TrueType\)/i, '')
+        .replace(/\s*\(OpenType\)/i, '')
+        .trim();
+      const filename = match[2].trim();
+      const fontPath = filename.includes(':\\') ? filename : path.join(fontDir, filename);
+      if (!family || seenNames.has(family.toLowerCase())) continue;
+      if (!fs.existsSync(fontPath)) continue;
+      seenNames.add(family.toLowerCase());
+      fonts.push({ family, path: fontPath });
+    }
+  } catch {
+    try {
+      const files = fs.readdirSync(fontDir);
+      for (const file of files) {
+        if (!/\.(ttf|otf)$/i.test(file)) continue;
+        const family = file.replace(/\.(ttf|otf)$/i, '').replace(/[-_]/g, ' ');
+        const fontPath = path.join(fontDir, file);
+        if (!seenNames.has(family.toLowerCase())) {
+          seenNames.add(family.toLowerCase());
+          fonts.push({ family, path: fontPath });
+        }
+      }
+    } catch {}
+  }
+
+  return fonts.sort((a, b) => a.family.localeCompare(b.family));
+}
+
+ipcMain.handle('list-system-fonts', () => {
+  if (!systemFontsCache) systemFontsCache = getSystemFonts();
+  return systemFontsCache;
+});
+
+ipcMain.handle('read-font-file', (_, fontPath) => {
+  try {
+    return fs.readFileSync(fontPath);
+  } catch {
+    return null;
+  }
+});

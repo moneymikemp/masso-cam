@@ -35,7 +35,7 @@ export default function CAMCanvas() {
     statusTimerRef.current = setTimeout(() => setStatusMsg(''), 2000);
   }
 
-  const { viewport, entities, layers, operations, selectedEntityIds, hoveredEntityId, showToolpaths, showRapids, bounds, stockConfig, tabPlacementActive, tabPlacementOpId, dogboneSelectionActive, dogboneSelectionOpId, medialAxisPolylines } = state;
+  const { viewport, entities, layers, operations, selectedEntityIds, hoveredEntityId, showToolpaths, showRapids, bounds, stockConfig, tabPlacementActive, tabPlacementOpId, dogboneSelectionActive, dogboneSelectionOpId, textPlacementActive, textPlacementOpId, medialAxisPolylines } = state;
 
   const [zSliderPos, setZSliderPos] = useState(0); // 0 = all passes; 1..N = pass index
   const [isAnimating, setIsAnimating] = useState(false);
@@ -148,7 +148,10 @@ export default function CAMCanvas() {
     drawStock(ctx);
     drawOrigin(ctx);
     drawEntities(ctx);
-    if (showToolpaths) drawToolpaths(ctx);
+    if (showToolpaths) {
+      drawToolpaths(ctx);
+      drawTextPreviews(ctx);
+    }
     if (medialAxisPolylines?.length) drawMedialAxis(ctx);
     drawMouseCoords(ctx);
   }
@@ -509,6 +512,46 @@ export default function CAMCanvas() {
     }
   }
 
+  function drawTextPreviews(ctx) {
+    for (const op of operations) {
+      if (op.type !== 'text' || !op.enabled) continue;
+      const tp = op.params;
+      if (!tp.textContoursRel?.length) continue;
+      const tx = tp.textX || 0, ty = tp.textY || 0;
+      const isActive = textPlacementActive && textPlacementOpId === op.id;
+
+      ctx.strokeStyle = isActive ? 'rgba(68,255,136,0.85)' : 'rgba(80,160,255,0.75)';
+      ctx.lineWidth = 1.5;
+      ctx.setLineDash([]);
+
+      for (const group of tp.textContoursRel) {
+        for (const contour of group) {
+          if (contour.length < 2) continue;
+          ctx.beginPath();
+          const f = w2c(contour[0].x + tx, contour[0].y + ty);
+          ctx.moveTo(f.x, f.y);
+          for (let i = 1; i < contour.length; i++) {
+            const pt = w2c(contour[i].x + tx, contour[i].y + ty);
+            ctx.lineTo(pt.x, pt.y);
+          }
+          ctx.closePath();
+          ctx.stroke();
+        }
+      }
+
+      if (tp.textBoundsRel) {
+        const b = tp.textBoundsRel;
+        const tl = w2c(b.minX + tx, b.maxY + ty);
+        const br = w2c(b.maxX + tx, b.minY + ty);
+        ctx.strokeStyle = isActive ? 'rgba(68,255,136,0.35)' : 'rgba(80,160,255,0.25)';
+        ctx.lineWidth = 0.5;
+        ctx.setLineDash([5, 4]);
+        ctx.strokeRect(tl.x, tl.y, br.x - tl.x, br.y - tl.y);
+        ctx.setLineDash([]);
+      }
+    }
+  }
+
   function drawMedialAxis(ctx) {
     if (!medialAxisPolylines?.length) return;
     ctx.setLineDash([]);
@@ -539,7 +582,7 @@ export default function CAMCanvas() {
     ctx.fillText(`X: ${world.x.toFixed(3)}  Y: ${world.y.toFixed(3)}`, 14, ctx.canvas.height - 14);
   }
 
-  useEffect(() => { draw(); }, [entities, layers, operations, viewport, selectedEntityIds, hoveredEntityId, showToolpaths, showRapids, mousePos, stockConfig, zSliderPos, zLevels, tabPlacementActive, tabPlacementOpId, dogboneSelectionActive, dogboneSelectionOpId, medialAxisPolylines]);
+  useEffect(() => { draw(); }, [entities, layers, operations, viewport, selectedEntityIds, hoveredEntityId, showToolpaths, showRapids, mousePos, stockConfig, zSliderPos, zLevels, tabPlacementActive, tabPlacementOpId, dogboneSelectionActive, dogboneSelectionOpId, textPlacementActive, textPlacementOpId, medialAxisPolylines]);
 
   // Mouse events
   const onMouseDown = useCallback((e) => {
@@ -627,6 +670,20 @@ export default function CAMCanvas() {
       }
     }
 
+    // ── Text placement ─────────────────────────────────────────────────────
+    if (textPlacementActive && textPlacementOpId && e.button === 0) {
+      const textOp = operations.find(o => o.id === textPlacementOpId);
+      if (textOp) {
+        dispatch({ type: 'UPDATE_OPERATION', payload: {
+          id: textPlacementOpId,
+          changes: { params: { ...textOp.params, textX: world.x, textY: world.y } },
+        }});
+        dispatch({ type: 'SET_TEXT_PLACEMENT', payload: { active: false, opId: null } });
+        showStatus(`Text placed at (${world.x.toFixed(1)}, ${world.y.toFixed(1)})`);
+      }
+      return;
+    }
+
     // ── Normal entity selection ────────────────────────────────────────────
     if (e.button === 0) {
       const hit = findEntityAt(world, 10 / viewport.zoom);
@@ -640,7 +697,7 @@ export default function CAMCanvas() {
         dispatch({ type: 'SELECT_ENTITIES', payload: [] });
       }
     }
-  }, [viewport, c2w, dispatch, tabPlacementActive, tabPlacementOpId, dogboneSelectionActive, dogboneSelectionOpId, operations]);
+  }, [viewport, c2w, dispatch, tabPlacementActive, tabPlacementOpId, dogboneSelectionActive, dogboneSelectionOpId, textPlacementActive, textPlacementOpId, operations]);
 
   const onMouseMove = useCallback((e) => {
     const canvas = canvasRef.current;
@@ -776,13 +833,13 @@ export default function CAMCanvas() {
       <canvas
         ref={canvasRef}
         style={{ width: '100%', height: '100%', display: 'block',
-          cursor: isPanning ? 'grabbing' : (tabPlacementActive || dogboneSelectionActive) ? 'cell' : 'crosshair' }}
+          cursor: isPanning ? 'grabbing' : (tabPlacementActive || dogboneSelectionActive || textPlacementActive) ? 'cell' : 'crosshair' }}
         onMouseDown={onMouseDown}
         onMouseMove={onMouseMove}
         onMouseUp={onMouseUp}
         onMouseLeave={onMouseUp}
         onDoubleClick={onDoubleClick}
-        onContextMenu={e => { if (tabPlacementActive || dogboneSelectionActive) e.preventDefault(); }}
+        onContextMenu={e => { if (tabPlacementActive || dogboneSelectionActive || textPlacementActive) e.preventDefault(); }}
       />
       {/* Toolbar overlays */}
       <div style={{ position: 'absolute', top: 8, right: 8, display: 'flex', gap: 4 }}>
@@ -832,6 +889,11 @@ export default function CAMCanvas() {
       {dogboneSelectionActive && (
         <div style={{ position: 'absolute', top: 8, left: '50%', transform: 'translateX(-50%)', background: 'rgba(10,50,30,0.88)', color: '#44ff88', padding: '4px 14px', borderRadius: 4, fontSize: 11, pointerEvents: 'none', border: '1px solid rgba(68,255,136,0.4)', whiteSpace: 'nowrap' }}>
           Click corners to toggle dogbone fillets
+        </div>
+      )}
+      {textPlacementActive && (
+        <div style={{ position: 'absolute', top: 8, left: '50%', transform: 'translateX(-50%)', background: 'rgba(10,30,60,0.88)', color: '#88ccff', padding: '4px 14px', borderRadius: 4, fontSize: 11, pointerEvents: 'none', border: '1px solid rgba(80,160,255,0.4)', whiteSpace: 'nowrap' }}>
+          Click to place text origin (baseline of first line)
         </div>
       )}
     </div>
