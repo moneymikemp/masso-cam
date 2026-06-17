@@ -52,6 +52,7 @@ export default function ToolLibraryPanel() {
   const { tools } = state;
   const [selected, setSelected] = useState(null);
   const [editTool, setEditTool] = useState(null);
+  const [saveError, setSaveError] = useState('');
 
   const u = editTool?.units || 'mm';
   const ul = uLabel(u);
@@ -67,9 +68,13 @@ export default function ToolLibraryPanel() {
   useEffect(() => { loadTools(); }, []);
 
   async function loadTools() {
-    if (window.electron) {
+    if (!window.electron) return;
+    try {
       const t = await window.electron.getTools();
-      dispatch({ type: 'SET_TOOLS', payload: t });
+      console.log('[ToolLibrary] loaded', t?.length, 'tools');
+      dispatch({ type: 'SET_TOOLS', payload: t || [] });
+    } catch (err) {
+      console.error('[ToolLibrary] loadTools error:', err);
     }
   }
 
@@ -86,13 +91,31 @@ export default function ToolLibraryPanel() {
 
   async function saveTool() {
     if (!editTool) return;
-    if (window.electron) {
+    setSaveError('');
+    if (!editTool.name?.trim()) {
+      setSaveError('Tool name is required.');
+      return;
+    }
+    if (!window.electron) {
+      setSaveError('Electron bridge not available.');
+      return;
+    }
+    try {
+      console.log('[ToolLibrary] saving tool:', editTool);
       const saved = await window.electron.saveTool(editTool);
+      console.log('[ToolLibrary] save result:', saved);
       if (saved) {
+        // Preserve the units field which isn't stored in the DB
+        const restoredUnits = { units: editTool.units || 'mm', ...saved };
         await loadTools();
         setSelected(saved.id);
-        setEditTool(saved);
+        setEditTool(restoredUnits);
+      } else {
+        setSaveError('Save returned no result — the database may not be initialised. Check the main process console for details.');
       }
+    } catch (err) {
+      console.error('[ToolLibrary] save error:', err);
+      setSaveError(`Save failed: ${err?.message || String(err)}`);
     }
   }
 
@@ -232,6 +255,11 @@ export default function ToolLibraryPanel() {
             </div>
           ))}
 
+          {saveError && (
+            <div style={{ fontSize: 10, color: '#ff8888', background: '#3a1a1a', border: '1px solid #5a2a2a', borderRadius: 3, padding: '4px 6px', marginTop: 4, lineHeight: 1.4 }}>
+              ⚠ {saveError}
+            </div>
+          )}
           <button style={S.saveBtn} onClick={saveTool}>💾 Save Tool</button>
         </div>
       )}

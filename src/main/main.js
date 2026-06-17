@@ -15,6 +15,7 @@ function initDatabase() {
     const Database = require('better-sqlite3');
     const userDataPath = app.getPath('userData');
     const dbPath = path.join(userDataPath, 'dmdcam.db');
+    console.log('[DB] opening database at:', dbPath);
     // One-time migration: copy old MassoCAM DB if new one doesn't exist yet
     const oldDbSameDir = path.join(userDataPath, 'massocam.db');
     const oldDbProdDir = path.join(path.dirname(userDataPath), 'MassoCAM', 'massocam.db');
@@ -78,11 +79,13 @@ function initDatabase() {
     `).run();
 
     const toolCount = db.prepare('SELECT COUNT(*) as count FROM tools').get();
+    console.log('[DB] initialised, tool count:', toolCount.count);
     if (toolCount.count === 0) {
       insertDefaultTools();
+      console.log('[DB] inserted default tools');
     }
   } catch (err) {
-    console.error('Database init error:', err);
+    console.error('[DB] Database init error — tool library will be unavailable:', err);
   }
 }
 
@@ -372,27 +375,48 @@ ipcMain.handle('db-get-tools', () => {
 });
 
 ipcMain.handle('db-save-tool', (_, tool) => {
-  if (!db) return null;
+  if (!db) {
+    console.error('[db-save-tool] Database not initialised — tool save aborted');
+    return null;
+  }
+  console.log('[db-save-tool] saving:', tool?.name, 'id:', tool?.id);
   const { feeds, ...toolData } = tool;
   let toolId = toolData.id;
   const toolNum     = toolData.tool_number ?? 1;
   const tipDiameter = toolData.tipDiameter ?? 0;
   const taperAngle  = toolData.taperAngle  ?? 0;
+  const name        = toolData.name     || '';
+  const notes       = toolData.notes    || '';
+  const material    = toolData.material || 'Carbide';
+  const diameter    = Number(toolData.diameter)  || 0;
+  const flutes      = Number(toolData.flutes)    || 2;
   if (toolId) {
     db.prepare('UPDATE tools SET name=?, type=?, diameter=?, flutes=?, material=?, notes=?, tool_number=?, tip_diameter=?, taper_angle=? WHERE id=?')
-      .run(toolData.name, toolData.type, toolData.diameter, toolData.flutes, toolData.material, toolData.notes, toolNum, tipDiameter, taperAngle, toolId);
+      .run(name, toolData.type, diameter, flutes, material, notes, toolNum, tipDiameter, taperAngle, toolId);
     db.prepare('DELETE FROM feeds WHERE tool_id=?').run(toolId);
   } else {
     const result = db.prepare('INSERT INTO tools (name,type,diameter,flutes,material,notes,tool_number,tip_diameter,taper_angle) VALUES (?,?,?,?,?,?,?,?,?)')
-      .run(toolData.name, toolData.type, toolData.diameter, toolData.flutes, toolData.material, toolData.notes || '', toolNum, tipDiameter, taperAngle);
+      .run(name, toolData.type, diameter, flutes, material, notes, toolNum, tipDiameter, taperAngle);
     toolId = result.lastInsertRowid;
+    console.log('[db-save-tool] inserted new tool, id:', toolId);
   }
   const insertFeed = db.prepare('INSERT INTO feeds (tool_id,material,spindle_rpm,feed_rate,plunge_rate,depth_per_pass,stepover) VALUES (?,?,?,?,?,?,?)');
   for (const f of (feeds || [])) {
-    insertFeed.run(toolId, f.material, f.spindle_rpm, f.feed_rate, f.plunge_rate, f.depth_per_pass, f.stepover);
+    insertFeed.run(toolId, f.material, f.spindle_rpm, f.feed_rate, f.plunge_rate, f.depth_per_pass, f.stepover ?? 0.45);
   }
   const saved = db.prepare('SELECT * FROM tools WHERE id=?').get(toolId);
+  if (!saved) {
+    console.error('[db-save-tool] SELECT after insert returned nothing for id:', toolId);
+    return null;
+  }
   saved.feeds = db.prepare('SELECT * FROM feeds WHERE tool_id=?').all(toolId);
+  // Apply the same camelCase mapping used by db-get-tools so the renderer always
+  // receives a consistent shape regardless of which handler it called.
+  saved.tipDiameter = saved.tip_diameter ?? 0;
+  saved.taperAngle  = saved.taper_angle  ?? 0;
+  delete saved.tip_diameter;
+  delete saved.taper_angle;
+  console.log('[db-save-tool] returning saved tool id:', saved.id);
   return saved;
 });
 
