@@ -123,6 +123,8 @@ const initialState = {
   showRapids: true,
   tabPlacementActive: false,
   tabPlacementOpId: null,
+  dogboneSelectionActive: false,
+  dogboneSelectionOpId: null,
   activePanelTab: 'operations',  // operations | tools | machine | gcode
   gcodeOutput: '',
   statusMessage: '',
@@ -331,6 +333,18 @@ function reducer(state, action) {
       return { ...state, operations, dirty: true };
     }
 
+    case 'SET_DOGBONE_SELECTION':
+      return { ...state, dogboneSelectionActive: action.payload.active, dogboneSelectionOpId: action.payload.opId ?? null };
+
+    case 'UPDATE_DOGBONE_CORNERS': {
+      const operations = state.operations.map(op =>
+        op.id === action.payload.opId
+          ? { ...op, params: { ...op.params, selectedCorners: action.payload.corners } }
+          : op
+      );
+      return { ...state, operations, dirty: true };
+    }
+
     // Project
     case 'SET_PROJECT_PATH': return { ...state, projectPath: action.payload };
     case 'SET_DIRTY':        return { ...state, dirty: action.payload };
@@ -436,6 +450,7 @@ export function getDefaultParams(type) {
         bulkEndmill:   { enabled: true, toolId: null, diameter: 6.35,  rpm: 18000, feed: 1500, plunge: 500, wallStock: 0.254 },
       },
     };
+    case 'dogbone': return { safeZ: 25, topZ: 0, feedRate: 1500, plungeRate: 500, spindleRpm: 18000, totalDepth: 10, depthPerPass: 3, toolDiameter: 6.35, cornerMode: 'auto', selectedCorners: [] };
     default:         return base;
   }
 }

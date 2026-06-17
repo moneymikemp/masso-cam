@@ -95,6 +95,7 @@ export function generateToolpath(operation, entities, context = {}) {
     case 'taperedpocket': return generateTaperedPocket(operation, entities, context);
     case 'taperedplug':   return generateTaperedPlug(operation, entities, context);
     case 'vcarve':        return generateVCarve(operation, entities, context);
+    case 'dogbone':       return generateDogbone(operation, entities);
     default:             return { moves: [], warnings: ['Unknown operation: ' + type] };
   }
 }
@@ -1879,4 +1880,89 @@ function getEntityBounds(entities) {
     }
   }
   return { minX: isFinite(minX) ? minX : 0, minY: isFinite(minY) ? minY : 0, maxX: isFinite(maxX) ? maxX : 100, maxY: isFinite(maxY) ? maxY : 100 };
+}
+
+// ── Dogbone Fillets ──────────────────────────────────────────────────────────
+
+// Returns all concave (interior) corners of the selected closed geometry.
+// Each corner is { x, y, bisX, bisY } where bisX/bisY is the unit vector
+// pointing into the pocket interior (toward the dogbone center).
+export function detectConcaveCorners(entities, selectedIds) {
+  const selected = getSelectedEntities(entities, selectedIds);
+  if (!selected.length) return [];
+  const profiles = buildPocketProfiles(selected);
+  const corners = [];
+
+  for (const rawProfile of profiles) {
+    const poly = stripClose([...rawProfile]);
+    const n = poly.length;
+    if (n < 3) continue;
+    const cw = isClockwise(poly);
+
+    for (let i = 0; i < n; i++) {
+      const A = poly[(i - 1 + n) % n];
+      const V = poly[i];
+      const B = poly[(i + 1) % n];
+
+      const ux = V.x - A.x, uy = V.y - A.y;
+      const wx = B.x - V.x, wy = B.y - V.y;
+      const uLen = Math.hypot(ux, uy);
+      const wLen = Math.hypot(wx, wy);
+      if (uLen < 1e-6 || wLen < 1e-6) continue;
+
+      const cross = ux * wy - uy * wx;
+      if (Math.abs(cross) / (uLen * wLen) < 0.05) continue; // nearly collinear
+
+      // CW polygon: right turn (cross < 0) = interior corner needing dogbone
+      // CCW polygon: left turn (cross > 0) = interior corner needing dogbone
+      if (!(cw ? cross < 0 : cross > 0)) continue;
+
+      // Bisector toward interior: average of unit vectors pointing back toward A and forward toward B
+      const d1x = -ux / uLen, d1y = -uy / uLen;
+      const d2x =  wx / wLen, d2y =  wy / wLen;
+      const bx = d1x + d2x, by = d1y + d2y;
+      const bLen = Math.hypot(bx, by);
+      if (bLen < 1e-6) continue;
+
+      corners.push({ x: V.x, y: V.y, bisX: bx / bLen, bisY: by / bLen });
+    }
+  }
+  return corners;
+}
+
+function generateDogbone(op, entities) {
+  const moves = [];
+  const warnings = [];
+  const p = op.params;
+  const contours = buildPocketProfiles(entities);
+  const candidateCorners = detectConcaveCorners(entities, op.selectedIds);
+
+  if (!candidateCorners.length) {
+    const msg = op.selectedIds?.length ? 'No sharp internal corners detected' : 'No geometry assigned';
+    return { moves, warnings: [msg], candidateCorners, contours };
+  }
+
+  const toolR = (p.toolDiameter || 6.35) / 2;
+  const safeZ = p.safeZ || 25;
+  const passes = buildZPasses(p.topZ ?? 0, p.totalDepth || 10, p.depthPerPass || 3);
+  const corners = (p.cornerMode || 'auto') === 'auto'
+    ? candidateCorners
+    : (p.selectedCorners || []);
+
+  if (!corners.length) {
+    warnings.push('No corners selected. Use "Select on Canvas" to pick corners.');
+    return { moves, warnings, candidateCorners, contours };
+  }
+
+  for (const corner of corners) {
+    const cx = corner.x + toolR * corner.bisX;
+    const cy = corner.y + toolR * corner.bisY;
+    moves.push({ type: 'rapid', x: cx, y: cy, z: safeZ });
+    for (const z of passes) {
+      moves.push({ type: 'feed', x: cx, y: cy, z, f: p.plungeRate || 500 });
+    }
+    moves.push({ type: 'rapid', x: cx, y: cy, z: safeZ });
+  }
+
+  return { moves, warnings, candidateCorners, contours };
 }

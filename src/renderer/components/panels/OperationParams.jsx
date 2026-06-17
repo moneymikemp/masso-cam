@@ -724,6 +724,53 @@ export default function OperationParams({ op, tools, operations = [], onChange }
         </Field>
         {commonSpeeds}
       </>}
+
+      {/* ── Dogbone Fillets ── */}
+      {op.type === 'dogbone' && <>
+        {toolSelect}
+        <div style={S.section}>Corner Selection</div>
+        <Field label="Mode">
+          <Sel value={p.cornerMode || 'auto'} onChange={v => set('cornerMode', v)}
+               options={[['auto','Auto (all corners)'],['manual','Manual (pick on canvas)']]} />
+        </Field>
+        {(p.cornerMode || 'auto') === 'manual' && (() => {
+          const placed = (p.selectedCorners || []).length;
+          const isActive = state.dogboneSelectionActive && state.dogboneSelectionOpId === op.id;
+          const noContour = !op.toolpath?.candidateCorners?.length;
+          return <>
+            <div style={S.row}>
+              <span style={S.label}>Corners selected</span>
+              <span style={{ color: placed > 0 ? '#88ffaa' : '#666688', fontSize: 11 }}>{placed}</span>
+            </div>
+            {noContour && (
+              <div style={{ ...S.row, color: '#aa8844', fontSize: 10, paddingLeft: 4 }}>
+                Calculate toolpath first to enable selection
+              </div>
+            )}
+            <Field label="">
+              <button
+                disabled={noContour}
+                style={{ ...S.input, cursor: noContour ? 'default' : 'pointer', textAlign: 'center', opacity: noContour ? 0.4 : 1,
+                  background: isActive ? '#1a3a2a' : '#0d0d20',
+                  borderColor: isActive ? '#44aa88' : '#2a2a50',
+                  color: isActive ? '#88cc99' : '#ccccee' }}
+                onClick={() => dispatch({ type: 'SET_DOGBONE_SELECTION', payload: { active: !isActive, opId: isActive ? null : op.id } })}>
+                {isActive ? 'Done Selecting' : 'Select on Canvas'}
+              </button>
+            </Field>
+            {placed > 0 && (
+              <Field label="">
+                <button style={{ ...S.input, cursor: 'pointer', textAlign: 'center', color: '#ff8888' }}
+                  onClick={() => dispatch({ type: 'UPDATE_DOGBONE_CORNERS', payload: { opId: op.id, corners: [] } })}>
+                  Clear All
+                </button>
+              </Field>
+            )}
+          </>;
+        })()}
+        {commonDepth}
+        {commonSpeeds}
+      </>}
     </div>
   );
 }

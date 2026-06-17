@@ -35,7 +35,7 @@ export default function CAMCanvas() {
     statusTimerRef.current = setTimeout(() => setStatusMsg(''), 2000);
   }
 
-  const { viewport, entities, layers, operations, selectedEntityIds, hoveredEntityId, showToolpaths, showRapids, bounds, stockConfig, tabPlacementActive, tabPlacementOpId, medialAxisPolylines } = state;
+  const { viewport, entities, layers, operations, selectedEntityIds, hoveredEntityId, showToolpaths, showRapids, bounds, stockConfig, tabPlacementActive, tabPlacementOpId, dogboneSelectionActive, dogboneSelectionOpId, medialAxisPolylines } = state;
 
   const [zSliderPos, setZSliderPos] = useState(0); // 0 = all passes; 1..N = pass index
   const [isAnimating, setIsAnimating] = useState(false);
@@ -342,6 +342,10 @@ export default function CAMCanvas() {
       if (op.params?.tabs && op.toolpath.contours?.length) {
         drawTabMarkers(ctx, op);
       }
+      // Dogbone corner markers — always shown when toolpath has candidate corners
+      if (op.type === 'dogbone' && op.toolpath.candidateCorners?.length) {
+        drawDogboneCorners(ctx, op);
+      }
     }
     // When in manual placement mode, draw the active contour highlight even if
     // no tab markers exist yet (so the user can see what they're snapping to).
@@ -460,6 +464,51 @@ export default function CAMCanvas() {
     ctx.setLineDash([]);
   }
 
+  function drawDogboneCorners(ctx, op) {
+    const candidates = op.toolpath?.candidateCorners;
+    if (!candidates?.length) return;
+    const p = op.params || {};
+    const autoMode = (p.cornerMode || 'auto') === 'auto';
+    const selected = p.selectedCorners || [];
+    const toolR = (p.toolDiameter || 6.35) / 2;
+
+    if ((dogboneSelectionActive && dogboneSelectionOpId === op.id) || autoMode) {
+      if (op.toolpath?.contours?.length) drawContourHighlight(ctx, op.toolpath.contours);
+    }
+
+    for (const c of candidates) {
+      const sc = w2c(c.x, c.y);
+      const isActive = autoMode || selected.some(s => Math.hypot(s.x - c.x, s.y - c.y) < 0.1);
+
+      ctx.beginPath();
+      ctx.arc(sc.x, sc.y, 4, 0, Math.PI * 2);
+      if (isActive) {
+        ctx.fillStyle = '#44ff88';
+        ctx.fill();
+      } else {
+        ctx.strokeStyle = '#778899';
+        ctx.lineWidth = 1.5;
+        ctx.stroke();
+      }
+
+      if (isActive) {
+        const dc = w2c(c.x + toolR * c.bisX, c.y + toolR * c.bisY);
+        const screenR = Math.max(2, toolR * viewport.zoom);
+        ctx.strokeStyle = 'rgba(68, 255, 136, 0.45)';
+        ctx.lineWidth = 1;
+        ctx.setLineDash([3, 3]);
+        ctx.beginPath();
+        ctx.arc(dc.x, dc.y, screenR, 0, Math.PI * 2);
+        ctx.stroke();
+        ctx.setLineDash([]);
+        ctx.fillStyle = 'rgba(68, 255, 136, 0.6)';
+        ctx.beginPath();
+        ctx.arc(dc.x, dc.y, 2, 0, Math.PI * 2);
+        ctx.fill();
+      }
+    }
+  }
+
   function drawMedialAxis(ctx) {
     if (!medialAxisPolylines?.length) return;
     ctx.setLineDash([]);
@@ -490,7 +539,7 @@ export default function CAMCanvas() {
     ctx.fillText(`X: ${world.x.toFixed(3)}  Y: ${world.y.toFixed(3)}`, 14, ctx.canvas.height - 14);
   }
 
-  useEffect(() => { draw(); }, [entities, layers, operations, viewport, selectedEntityIds, hoveredEntityId, showToolpaths, showRapids, mousePos, stockConfig, zSliderPos, zLevels, tabPlacementActive, tabPlacementOpId, medialAxisPolylines]);
+  useEffect(() => { draw(); }, [entities, layers, operations, viewport, selectedEntityIds, hoveredEntityId, showToolpaths, showRapids, mousePos, stockConfig, zSliderPos, zLevels, tabPlacementActive, tabPlacementOpId, dogboneSelectionActive, dogboneSelectionOpId, medialAxisPolylines]);
 
   // Mouse events
   const onMouseDown = useCallback((e) => {
@@ -549,6 +598,35 @@ export default function CAMCanvas() {
       }
     }
 
+    // ── Dogbone corner selection ───────────────────────────────────────────
+    if (dogboneSelectionActive && dogboneSelectionOpId && e.button === 0) {
+      const op = operations.find(o => o.id === dogboneSelectionOpId);
+      const candidates = op?.toolpath?.candidateCorners;
+      if (candidates?.length) {
+        const snapR = 15 / viewport.zoom;
+        let nearestIdx = -1, nearestDist = Infinity;
+        for (let i = 0; i < candidates.length; i++) {
+          const d = Math.hypot(candidates[i].x - world.x, candidates[i].y - world.y);
+          if (d < nearestDist) { nearestDist = d; nearestIdx = i; }
+        }
+        if (nearestIdx >= 0 && nearestDist < snapR) {
+          const clicked = candidates[nearestIdx];
+          const existing = op.params.selectedCorners || [];
+          const alreadyIdx = existing.findIndex(s => Math.hypot(s.x - clicked.x, s.y - clicked.y) < 0.1);
+          let updated;
+          if (alreadyIdx >= 0) {
+            updated = existing.filter((_, i) => i !== alreadyIdx);
+            showStatus(`Corner deselected (${updated.length} selected)`);
+          } else {
+            updated = [...existing, { x: clicked.x, y: clicked.y, bisX: clicked.bisX, bisY: clicked.bisY }];
+            showStatus(`Corner selected (${updated.length} selected)`);
+          }
+          dispatch({ type: 'UPDATE_DOGBONE_CORNERS', payload: { opId: dogboneSelectionOpId, corners: updated } });
+        }
+        return;
+      }
+    }
+
     // ── Normal entity selection ────────────────────────────────────────────
     if (e.button === 0) {
       const hit = findEntityAt(world, 10 / viewport.zoom);
@@ -562,7 +640,7 @@ export default function CAMCanvas() {
         dispatch({ type: 'SELECT_ENTITIES', payload: [] });
       }
     }
-  }, [viewport, c2w, dispatch, tabPlacementActive, tabPlacementOpId, operations]);
+  }, [viewport, c2w, dispatch, tabPlacementActive, tabPlacementOpId, dogboneSelectionActive, dogboneSelectionOpId, operations]);
 
   const onMouseMove = useCallback((e) => {
     const canvas = canvasRef.current;
@@ -698,13 +776,13 @@ export default function CAMCanvas() {
       <canvas
         ref={canvasRef}
         style={{ width: '100%', height: '100%', display: 'block',
-          cursor: isPanning ? 'grabbing' : tabPlacementActive ? 'cell' : 'crosshair' }}
+          cursor: isPanning ? 'grabbing' : (tabPlacementActive || dogboneSelectionActive) ? 'cell' : 'crosshair' }}
         onMouseDown={onMouseDown}
         onMouseMove={onMouseMove}
         onMouseUp={onMouseUp}
         onMouseLeave={onMouseUp}
         onDoubleClick={onDoubleClick}
-        onContextMenu={e => { if (tabPlacementActive) e.preventDefault(); }}
+        onContextMenu={e => { if (tabPlacementActive || dogboneSelectionActive) e.preventDefault(); }}
       />
       {/* Toolbar overlays */}
       <div style={{ position: 'absolute', top: 8, right: 8, display: 'flex', gap: 4 }}>
@@ -749,6 +827,11 @@ export default function CAMCanvas() {
       {tabPlacementActive && (
         <div style={{ position: 'absolute', top: 8, left: '50%', transform: 'translateX(-50%)', background: 'rgba(80,20,120,0.88)', color: '#cc88ff', padding: '4px 14px', borderRadius: 4, fontSize: 11, pointerEvents: 'none', border: '1px solid rgba(153,68,255,0.5)', whiteSpace: 'nowrap' }}>
           Left-click to place tab · Right-click to remove · Drag to reposition
+        </div>
+      )}
+      {dogboneSelectionActive && (
+        <div style={{ position: 'absolute', top: 8, left: '50%', transform: 'translateX(-50%)', background: 'rgba(10,50,30,0.88)', color: '#44ff88', padding: '4px 14px', borderRadius: 4, fontSize: 11, pointerEvents: 'none', border: '1px solid rgba(68,255,136,0.4)', whiteSpace: 'nowrap' }}>
+          Click corners to toggle dogbone fillets
         </div>
       )}
     </div>
