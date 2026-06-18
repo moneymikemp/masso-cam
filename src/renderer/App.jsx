@@ -389,12 +389,12 @@ export default function App() {
     }
     dispatch({ type: 'SET_STATUS', payload: 'Tracing…' });
     try {
-      const chains = traceImage(refImageElRef.current, refImage, 0.5, 0.8);
+      const chains = traceImage(refImageElRef.current, refImage, 0.5, 0.5);
       if (!chains.length) { dispatch({ type: 'SET_STATUS', payload: 'Trace found no outlines (try adjusting threshold)' }); return; }
       const newEntities = [];
       let lineCount = 0, arcCount = 0;
       for (const verts of chains) {
-        const segs = fitArcsToChain(verts, 0.4, 20);
+        const segs = fitArcsToChain(verts, 0.5, 15);
         for (const seg of segs) {
           if (seg.type === 'line') {
             newEntities.push({ id: uuid(), type: 'line', layer: '0', start: seg.start, end: seg.end });

@@ -139,6 +139,24 @@ export function fitArcsToChain(vertices, arcTolerance = 1.0, minArcDeg = 15) {
   return result;
 }
 
+// Weighted moving-average smooth: blurs pixel-grid staircase artifacts before RDP.
+// Endpoints are held fixed so chain start/end don't drift.
+function smoothChain(pts, passes = 3) {
+  let cur = pts;
+  for (let p = 0; p < passes; p++) {
+    const out = [cur[0]];
+    for (let i = 1; i < cur.length - 1; i++) {
+      out.push({
+        x: (cur[i - 1].x + cur[i].x * 2 + cur[i + 1].x) / 4,
+        y: (cur[i - 1].y + cur[i].y * 2 + cur[i + 1].y) / 4,
+      });
+    }
+    out.push(cur[cur.length - 1]);
+    cur = out;
+  }
+  return cur;
+}
+
 // Edge midpoints in cell-local coords (x: 0=left 1=right, y: 0=top 1=bottom)
 const EDGE_MID = [[0.5,0],[1,0.5],[0.5,1],[0,0.5]];
 
@@ -261,7 +279,7 @@ export function traceImage(imgEl, refImage, threshold = 0.5, simplifyTolerance =
   const oy = refImage.y || 0;
   const result = [];
   for (const chain of chains) {
-    const simplified = rdp(chain, simplifyTolerance);
+    const simplified = rdp(smoothChain(chain, 3), simplifyTolerance);
     if (simplified.length < 2) continue;
     result.push(simplified.map(pt => ({
       x: ox + pt.x * mmPP,
