@@ -19,6 +19,12 @@ const TOOL_GROUPS = [
       { key: 'mirror',   label: '⇔',  title: 'Mirror — select entities, click two points for mirror axis' },
     ],
   },
+  {
+    label: 'Measure',
+    tools: [
+      { key: 'measure',  label: '⊢→', title: 'Measure — click two points for distance, third for angle' },
+    ],
+  },
 ];
 
 const btn = (active) => ({

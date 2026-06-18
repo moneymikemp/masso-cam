@@ -67,6 +67,26 @@ function applyXform(entity, xf) {
   }
 }
 
+// ── Measurement label helper ──────────────────────────────────────────────────
+
+function drawMeasureLabel(ctx, text, x, y) {
+  ctx.save();
+  ctx.setLineDash([]);
+  ctx.font = 'bold 11px monospace';
+  const tw = ctx.measureText(text).width;
+  const pw = tw + 10, ph = 17;
+  ctx.fillStyle = 'rgba(0,20,30,0.88)';
+  ctx.strokeStyle = '#00ccdd';
+  ctx.lineWidth = 0.8;
+  ctx.fillRect(x - pw/2, y - ph/2, pw, ph);
+  ctx.strokeRect(x - pw/2, y - ph/2, pw, ph);
+  ctx.fillStyle = '#aaffff';
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'middle';
+  ctx.fillText(text, x, y);
+  ctx.restore();
+}
+
 // ── Mirror helpers ────────────────────────────────────────────────────────────
 
 function mirrorPt(p, p1, p2) {
@@ -409,6 +429,8 @@ export default function CAMCanvas() {
         ? { tool: 'polygon', pts: [], sides: polygonSidesRef.current, dragging: false }
         : activeTool === 'mirror'
         ? { tool: 'mirror', pts: [] }
+        : activeTool === 'measure'
+        ? { tool: 'measure', pts: [] }
         : { tool: activeTool, pts: [], dragging: false };
     }
     previewRef.current = null;
@@ -1189,6 +1211,62 @@ export default function CAMCanvas() {
         }
         break;
       }
+      case 'measure': {
+        ctx.strokeStyle = '#00ccdd';
+        ctx.lineWidth = 1.2;
+        ctx.setLineDash([5, 3]);
+
+        // Draw locked segment(s) already placed
+        for (let i = 0; i < pts.length - 1; i++) {
+          const a = w2c(pts[i].x, pts[i].y), b = w2c(pts[i+1].x, pts[i+1].y);
+          ctx.beginPath(); ctx.moveTo(a.x, a.y); ctx.lineTo(b.x, b.y); ctx.stroke();
+        }
+
+        // Live arm: last locked point → cursor
+        if (pts.length >= 1) {
+          const last = pts[pts.length - 1];
+          const ls = w2c(last.x, last.y), cs = w2c(cur.x, cur.y);
+          ctx.beginPath(); ctx.moveTo(ls.x, ls.y); ctx.lineTo(cs.x, cs.y); ctx.stroke();
+
+          // Distance label from last locked → cursor
+          if (pts.length === 1) {
+            const dist = Math.hypot(cur.x - last.x, cur.y - last.y);
+            const label = isInch ? `${(dist / 25.4).toFixed(4)}"` : `${dist.toFixed(2)} mm`;
+            drawMeasureLabel(ctx, label, (ls.x + cs.x) / 2, (ls.y + cs.y) / 2 - 14);
+          }
+        }
+
+        // After 2 locked points: show locked distance + live angle
+        if (pts.length >= 2) {
+          // Locked distance label
+          const d = Math.hypot(pts[1].x - pts[0].x, pts[1].y - pts[0].y);
+          const distLabel = isInch ? `${(d / 25.4).toFixed(4)}"` : `${d.toFixed(2)} mm`;
+          const m0 = w2c((pts[0].x + pts[1].x) / 2, (pts[0].y + pts[1].y) / 2);
+          drawMeasureLabel(ctx, distLabel, m0.x, m0.y - 14);
+
+          // Angle between ray pts[0]→pts[1] and ray pts[1]→cursor (at vertex pts[1])
+          const dx1 = pts[0].x - pts[1].x, dy1 = pts[0].y - pts[1].y;
+          const dx2 = cur.x  - pts[1].x, dy2 = cur.y  - pts[1].y;
+          const len1 = Math.hypot(dx1, dy1), len2 = Math.hypot(dx2, dy2);
+          if (len1 > 0.001 && len2 > 0.001) {
+            const dot = (dx1*dx2 + dy1*dy2) / (len1 * len2);
+            const angleDeg = Math.acos(Math.max(-1, Math.min(1, dot))) * 180 / Math.PI;
+            const vs = w2c(pts[1].x, pts[1].y);
+            drawMeasureLabel(ctx, `${angleDeg.toFixed(2)}°`, vs.x + 18, vs.y - 18);
+            // Angle arc in screen space
+            const a1 = Math.atan2(w2c(pts[0].x, pts[0].y).y - vs.y, w2c(pts[0].x, pts[0].y).x - vs.x);
+            const a2 = Math.atan2(w2c(cur.x, cur.y).y     - vs.y, w2c(cur.x, cur.y).x     - vs.x);
+            let span = a2 - a1;
+            while (span >  Math.PI) span -= 2 * Math.PI;
+            while (span < -Math.PI) span += 2 * Math.PI;
+            ctx.setLineDash([3, 2]);
+            ctx.beginPath(); ctx.arc(vs.x, vs.y, 22, a1, a1 + span, span < 0); ctx.stroke();
+          }
+        }
+
+        ctx.setLineDash([]);
+        break;
+      }
       case 'mirror': {
         const p1 = pts[0];
         // Dashed axis line
@@ -1565,6 +1643,16 @@ export default function CAMCanvas() {
             dispatch({ type: 'ADD_ENTITIES', payload: mirrored });
           }
           drawStateRef.current = { tool: 'mirror', pts: [] };
+        }
+        break;
+      }
+      case 'measure': {
+        const newPts = [...ds.pts, snapped];
+        if (newPts.length >= 3) {
+          // Show angle then reset
+          drawStateRef.current = { tool: 'measure', pts: [] };
+        } else {
+          drawStateRef.current = { tool: 'measure', pts: newPts };
         }
         break;
       }
@@ -2184,8 +2272,9 @@ export default function CAMCanvas() {
             : (ds?.pts?.length === 0 ? 'Click to start · A = arc seg · Enter = finish · Dbl-click = finish' : 'Click to add point · A = arc · C = close · Enter = finish'),
           polygon:  ds?.pts?.length === 1 ? 'Click to set radius (or type Sides/Radius above)' : 'Click to set center',
           mirror:   ds?.pts?.length === 1 ? 'Click second point of mirror axis' : selectedEntityIds.length === 0 ? 'Select entities first, then click mirror axis start' : 'Click first point of mirror axis',
+          measure:  ds?.pts?.length === 2 ? 'Click third point to measure angle · Esc to reset' : ds?.pts?.length === 1 ? 'Click second point to lock distance' : 'Click first point',
         };
-        const labels = { line: 'Line', circle: 'Circle', arc: 'Arc', rect: 'Rectangle', polyline: 'Polyline', polygon: 'Polygon', mirror: 'Mirror' };
+        const labels = { line: 'Line', circle: 'Circle', arc: 'Arc', rect: 'Rectangle', polyline: 'Polyline', polygon: 'Polygon', mirror: 'Mirror', measure: 'Measure' };
         return (
           <div style={{ position: 'absolute', top: 8, left: '50%', transform: 'translateX(-50%)', background: 'rgba(10,30,10,0.9)', color: '#88ff88', padding: '4px 14px', borderRadius: 4, fontSize: 11, pointerEvents: 'none', border: '1px solid rgba(68,255,68,0.4)', whiteSpace: 'nowrap' }}>
             <strong>{labels[activeTool]}</strong> — {msgs[activeTool]} · Esc to cancel
