@@ -46,13 +46,24 @@ function fitCircleLS(pts) {
   return { cx, cy, r, residual: Math.sqrt(rms / n) };
 }
 
+// Unwrap atan2 angles so consecutive values differ by at most π (handles 0/2π crossings).
+function unwrapAngles(angles) {
+  const out = [angles[0]];
+  for (let k = 1; k < angles.length; k++) {
+    let diff = angles[k] - out[k - 1];
+    while (diff >  Math.PI) diff -= 2 * Math.PI;
+    while (diff < -Math.PI) diff += 2 * Math.PI;
+    out.push(out[k - 1] + diff);
+  }
+  return out;
+}
+
 // Convert an array of {x,y} vertices (world mm) into a mix of line and arc segments.
 // arcTolerance: max RMS deviation (mm) from a fitted circle to consider the segment an arc.
 // minArcDeg: minimum arc span in degrees to emit an arc entity (avoids trivial arcs).
 export function fitArcsToChain(vertices, arcTolerance = 1.0, minArcDeg = 15) {
   const n = vertices.length;
   if (n < 2) return [];
-  const norm = (a, ref) => { let x = a - ref; while (x < 0) x += Math.PI*2; return x; };
   const result = [];
   let i = 0;
 
@@ -60,30 +71,48 @@ export function fitArcsToChain(vertices, arcTolerance = 1.0, minArcDeg = 15) {
     let arcEmitted = false;
 
     if (i + 3 < n) {
-      // Need ≥4 points to distinguish arc from noise (3 points always define a circle trivially)
+      // Need >=4 points — 3 always define a circle, so residual is meaningless with exactly 3
       const initFit = fitCircleLS(vertices.slice(i, i + 4));
       if (initFit && initFit.residual < arcTolerance) {
-        // Greedily extend the arc window
         let arcEnd = i + 3;
         let bestFit = initFit;
         while (arcEnd + 1 < n) {
           const extFit = fitCircleLS(vertices.slice(i, arcEnd + 2));
-          if (extFit && extFit.residual < arcTolerance) { bestFit = extFit; arcEnd++; }
-          else break;
+          if (!extFit || extFit.residual >= arcTolerance) break;
+          bestFit = extFit;
+          arcEnd++;
         }
 
-        // Compute arc direction using a midpoint vertex
-        const sa = Math.atan2(vertices[i].y     - bestFit.cy, vertices[i].x     - bestFit.cx);
-        const ea = Math.atan2(vertices[arcEnd].y - bestFit.cy, vertices[arcEnd].x - bestFit.cx);
-        const midIdx = Math.round((i + arcEnd) / 2);
-        const ma = Math.atan2(vertices[midIdx].y - bestFit.cy, vertices[midIdx].x - bestFit.cx);
+        // Phase-unwrap the angle of each vertex around the fitted center.
+        // This reliably gives the true CW/CCW direction and span without
+        // the midpoint heuristic that misfires on near-full-circle windows.
+        const rawAngles = [];
+        for (let k = i; k <= arcEnd; k++) {
+          rawAngles.push(Math.atan2(vertices[k].y - bestFit.cy, vertices[k].x - bestFit.cx));
+        }
+        const unwrapped = unwrapAngles(rawAngles);
+        const totalAngle = unwrapped[unwrapped.length - 1] - unwrapped[0]; // + = CCW, - = CW
+        const spanDeg = Math.abs(totalAngle) * 180 / Math.PI;
 
-        let startA = sa, endA = ea;
-        if (norm(ma, startA) > norm(endA, startA)) { [startA, endA] = [endA, startA]; }
-        const spanDeg = norm(endA, startA) * 180 / Math.PI;
+        // Reject if the angular sequence reverses direction (5 deg slack per step)
+        const dir = totalAngle >= 0 ? 1 : -1;
+        const isMonotone = unwrapped.every((v, idx) =>
+          idx === 0 || dir * (v - unwrapped[idx - 1]) >= -0.087);
 
-        if (spanDeg >= minArcDeg) {
-          result.push({ type: 'arc', center: { x: bestFit.cx, y: bestFit.cy }, radius: bestFit.r, startAngle: startA, endAngle: endA });
+        // 270 deg cap: larger spans are almost always fitting artifacts
+        if (isMonotone && spanDeg >= minArcDeg && spanDeg <= 270) {
+          let startAngle, endAngle;
+          if (totalAngle >= 0) {
+            // CCW arc — endAngle may exceed 2pi; arcToPoints wraps it correctly
+            startAngle = rawAngles[0];
+            endAngle   = startAngle + totalAngle;
+          } else {
+            // CW arc — flip to CCW representation (swap and ensure endAngle > startAngle)
+            startAngle = rawAngles[rawAngles.length - 1];
+            endAngle   = rawAngles[0];
+            while (endAngle < startAngle) endAngle += 2 * Math.PI;
+          }
+          result.push({ type: 'arc', center: { x: bestFit.cx, y: bestFit.cy }, radius: bestFit.r, startAngle, endAngle });
           i = arcEnd;
           arcEmitted = true;
         }
