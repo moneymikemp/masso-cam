@@ -65,6 +65,8 @@ export function fitArcsToChain(vertices, arcTolerance = 1.0, minArcDeg = 15) {
   const n = vertices.length;
   if (n < 2) return [];
   const result = [];
+  const MAX_WINDOW  = 14;  // max vertices in one arc window (prevents spanning concave features)
+  const MAX_SPAN_DEG = 150; // cap arc span — wider arcs are almost always fitting artifacts
   let i = 0;
 
   while (i < n - 1) {
@@ -76,7 +78,7 @@ export function fitArcsToChain(vertices, arcTolerance = 1.0, minArcDeg = 15) {
       if (initFit && initFit.residual < arcTolerance) {
         let arcEnd = i + 3;
         let bestFit = initFit;
-        while (arcEnd + 1 < n) {
+        while (arcEnd + 1 < n && (arcEnd - i) < MAX_WINDOW) {
           const extFit = fitCircleLS(vertices.slice(i, arcEnd + 2));
           if (!extFit || extFit.residual >= arcTolerance) break;
           bestFit = extFit;
@@ -94,27 +96,36 @@ export function fitArcsToChain(vertices, arcTolerance = 1.0, minArcDeg = 15) {
         const totalAngle = unwrapped[unwrapped.length - 1] - unwrapped[0]; // + = CCW, - = CW
         const spanDeg = Math.abs(totalAngle) * 180 / Math.PI;
 
-        // Reject if the angular sequence reverses direction (5 deg slack per step)
+        // Reject if the angular sequence reverses direction (3 deg slack per step)
         const dir = totalAngle >= 0 ? 1 : -1;
         const isMonotone = unwrapped.every((v, idx) =>
-          idx === 0 || dir * (v - unwrapped[idx - 1]) >= -0.087);
+          idx === 0 || dir * (v - unwrapped[idx - 1]) >= -0.052);
 
-        // 270 deg cap: larger spans are almost always fitting artifacts
-        if (isMonotone && spanDeg >= minArcDeg && spanDeg <= 270) {
-          let startAngle, endAngle;
-          if (totalAngle >= 0) {
-            // CCW arc — endAngle may exceed 2pi; arcToPoints wraps it correctly
-            startAngle = rawAngles[0];
-            endAngle   = startAngle + totalAngle;
-          } else {
-            // CW arc — flip to CCW representation (swap and ensure endAngle > startAngle)
-            startAngle = rawAngles[rawAngles.length - 1];
-            endAngle   = rawAngles[0];
-            while (endAngle < startAngle) endAngle += 2 * Math.PI;
+        if (isMonotone && spanDeg >= minArcDeg && spanDeg <= MAX_SPAN_DEG) {
+          // Verify the arc actually passes near the geometric midpoint of the data.
+          // If it doesn't, the fitted circle is concave-side-up and the arc would
+          // cut through the interior of the shape instead of following the boundary.
+          const midAngle = rawAngles[0] + totalAngle / 2;
+          const arcMidX  = bestFit.cx + bestFit.r * Math.cos(midAngle);
+          const arcMidY  = bestFit.cy + bestFit.r * Math.sin(midAngle);
+          const midIdx   = Math.round((i + arcEnd) / 2);
+          const midDist  = Math.hypot(vertices[midIdx].x - arcMidX, vertices[midIdx].y - arcMidY);
+
+          if (midDist <= arcTolerance * 4) {
+            let startAngle, endAngle;
+            if (totalAngle >= 0) {
+              startAngle = rawAngles[0];
+              endAngle   = startAngle + totalAngle;
+            } else {
+              // CW arc — flip to CCW representation (swap and ensure endAngle > startAngle)
+              startAngle = rawAngles[rawAngles.length - 1];
+              endAngle   = rawAngles[0];
+              while (endAngle < startAngle) endAngle += 2 * Math.PI;
+            }
+            result.push({ type: 'arc', center: { x: bestFit.cx, y: bestFit.cy }, radius: bestFit.r, startAngle, endAngle });
+            i = arcEnd;
+            arcEmitted = true;
           }
-          result.push({ type: 'arc', center: { x: bestFit.cx, y: bestFit.cy }, radius: bestFit.r, startAngle, endAngle });
-          i = arcEnd;
-          arcEmitted = true;
         }
       }
     }

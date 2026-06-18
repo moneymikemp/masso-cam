@@ -394,7 +394,7 @@ export default function App() {
       const newEntities = [];
       let lineCount = 0, arcCount = 0;
       for (const verts of chains) {
-        const segs = fitArcsToChain(verts, 1.0, 15);
+        const segs = fitArcsToChain(verts, 0.4, 20);
         for (const seg of segs) {
           if (seg.type === 'line') {
             newEntities.push({ id: uuid(), type: 'line', layer: '0', start: seg.start, end: seg.end });
