@@ -307,6 +307,22 @@ function reducer(state, action) {
     case 'SET_TOOLS': return { ...state, tools: action.payload };
     case 'SELECT_TOOL':  return { ...state, selectedToolId: action.payload };
 
+    // Entity editing
+    case 'TRANSFORM_ENTITIES': {
+      const map = {};
+      for (const e of action.payload) map[e.id] = e;
+      return { ...state, entities: state.entities.map(e => map[e.id] ? { ...e, ...map[e.id] } : e), dirty: true };
+    }
+    case 'DELETE_ENTITIES': {
+      const ids = new Set(action.payload);
+      return {
+        ...state,
+        entities: state.entities.filter(e => !ids.has(e.id)),
+        selectedEntityIds: state.selectedEntityIds.filter(id => !ids.has(id)),
+        dirty: true,
+      };
+    }
+
     // Machine
     case 'SET_MACHINE_CONFIG': return { ...state, machineConfig: { ...state.machineConfig, ...action.payload }, dirty: true };
     case 'SET_POST_CONFIG':    return { ...state, postConfig: { ...state.postConfig, ...action.payload }, dirty: true };

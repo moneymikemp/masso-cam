@@ -20,6 +20,54 @@ const COLORS = {
   medialAxis: '#ff00ff',
 };
 
+// ── Entity editing helpers (pure functions, no React) ─────────────────────────
+
+function entityBounds(e) {
+  switch (e.type) {
+    case 'line':     return { minX: Math.min(e.start.x, e.end.x), maxX: Math.max(e.start.x, e.end.x), minY: Math.min(e.start.y, e.end.y), maxY: Math.max(e.start.y, e.end.y) };
+    case 'circle':   return { minX: e.center.x - e.radius, maxX: e.center.x + e.radius, minY: e.center.y - e.radius, maxY: e.center.y + e.radius };
+    case 'arc':      return { minX: e.center.x - e.radius, maxX: e.center.x + e.radius, minY: e.center.y - e.radius, maxY: e.center.y + e.radius };
+    case 'polyline': { const xs = (e.vertices||[]).map(v=>v.x), ys = (e.vertices||[]).map(v=>v.y); return { minX: Math.min(...xs), maxX: Math.max(...xs), minY: Math.min(...ys), maxY: Math.max(...ys) }; }
+    default: return null;
+  }
+}
+
+function selBoundsOf(entities, ids) {
+  let minX=Infinity, maxX=-Infinity, minY=Infinity, maxY=-Infinity, found=false;
+  for (const e of entities) {
+    if (!ids.includes(e.id)) continue;
+    const b = entityBounds(e); if (!b) continue;
+    found = true;
+    if (b.minX < minX) minX = b.minX; if (b.maxX > maxX) maxX = b.maxX;
+    if (b.minY < minY) minY = b.minY; if (b.maxY > maxY) maxY = b.maxY;
+  }
+  return found ? { minX, maxX, minY, maxY } : null;
+}
+
+function applyXform(entity, xf) {
+  function pt(p) {
+    if (xf.type === 'move')   return { x: p.x + xf.dx, y: p.y + xf.dy };
+    if (xf.type === 'scale')  return { x: xf.cx + (p.x - xf.cx) * xf.s, y: xf.cy + (p.y - xf.cy) * xf.s };
+    if (xf.type === 'rotate') {
+      const cos = Math.cos(xf.a), sin = Math.sin(xf.a), rx = p.x - xf.cx, ry = p.y - xf.cy;
+      return { x: xf.cx + rx*cos - ry*sin, y: xf.cy + rx*sin + ry*cos };
+    }
+    return p;
+  }
+  const r = (xf.type === 'scale') ? entity.radius * xf.s : entity.radius;
+  switch (entity.type) {
+    case 'line':     return { ...entity, start: pt(entity.start), end: pt(entity.end) };
+    case 'circle':   return { ...entity, center: pt(entity.center), radius: r };
+    case 'arc':      return { ...entity, center: pt(entity.center), radius: r,
+      startAngle: xf.type==='rotate' ? entity.startAngle + xf.a : entity.startAngle,
+      endAngle:   xf.type==='rotate' ? entity.endAngle   + xf.a : entity.endAngle };
+    case 'polyline': return { ...entity, vertices: (entity.vertices||[]).map(pt) };
+    default: return entity;
+  }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+
 export default function CAMCanvas() {
   const canvasRef = useRef(null);
   const { state, dispatch } = useApp();
@@ -37,6 +85,13 @@ export default function CAMCanvas() {
 
   const { viewport, entities, layers, operations, selectedEntityIds, hoveredEntityId, showToolpaths, showRapids, bounds, stockConfig, tabPlacementActive, tabPlacementOpId, dogboneSelectionActive, dogboneSelectionOpId, textPlacementActive, textPlacementOpId, medialAxisPolylines, postConfig } = state;
   const isInch = postConfig?.units === 'inch';
+
+  const [canvasDims, setCanvasDims] = useState({ w: 0, h: 0 });
+  const [liveXf, setLiveXf] = useState(null); // drives overlay position during drag
+  const dragRef = useRef(null); // { type, startWorld, cx, cy, startAngle } — stable drag state
+  const xfRef  = useRef(null); // current live transform applied in drawEntities
+  const onDragMoveRef = useRef(null);
+  const onDragUpRef   = useRef(null);
 
   const [zSliderPos, setZSliderPos] = useState(0); // 0 = all passes; 1..N = pass index
   const [isAnimating, setIsAnimating] = useState(false);
@@ -127,11 +182,13 @@ export default function CAMCanvas() {
     const ro = new ResizeObserver(() => {
       canvas.width = canvas.offsetWidth;
       canvas.height = canvas.offsetHeight;
+      setCanvasDims({ w: canvas.width, h: canvas.height });
       draw();
     });
     ro.observe(canvas);
     canvas.width = canvas.offsetWidth;
     canvas.height = canvas.offsetHeight;
+    setCanvasDims({ w: canvas.width, h: canvas.height });
     return () => ro.disconnect();
   }, []);
 
@@ -227,6 +284,7 @@ export default function CAMCanvas() {
   }
 
   function drawEntities(ctx) {
+    const xf = xfRef.current;
     for (const entity of entities) {
       const layer = layers[entity.layer];
       if (layer && !layer.visible) continue;
@@ -238,7 +296,8 @@ export default function CAMCanvas() {
       ctx.lineWidth = isSelected ? 2 : 1;
       ctx.setLineDash([]);
 
-      drawEntity(ctx, entity);
+      const drawn = (xf && isSelected) ? applyXform(entity, xf) : entity;
+      drawEntity(ctx, drawn);
     }
   }
 
@@ -588,7 +647,7 @@ export default function CAMCanvas() {
     ctx.fillText(`X: ${cx.toFixed(decimals)}  Y: ${cy.toFixed(decimals)} ${unit}`, 14, ctx.canvas.height - 14);
   }
 
-  useEffect(() => { draw(); }, [entities, layers, operations, viewport, selectedEntityIds, hoveredEntityId, showToolpaths, showRapids, mousePos, stockConfig, zSliderPos, zLevels, tabPlacementActive, tabPlacementOpId, dogboneSelectionActive, dogboneSelectionOpId, textPlacementActive, textPlacementOpId, medialAxisPolylines]);
+  useEffect(() => { draw(); }, [entities, layers, operations, viewport, selectedEntityIds, hoveredEntityId, showToolpaths, showRapids, mousePos, stockConfig, zSliderPos, zLevels, tabPlacementActive, tabPlacementOpId, dogboneSelectionActive, dogboneSelectionOpId, textPlacementActive, textPlacementOpId, medialAxisPolylines, liveXf]);
 
   // Mouse events
   const onMouseDown = useCallback((e) => {
@@ -690,12 +749,15 @@ export default function CAMCanvas() {
       return;
     }
 
-    // ── Normal entity selection ────────────────────────────────────────────
+    // ── Normal entity selection / move drag ───────────────────────────────
     if (e.button === 0) {
       const hit = findEntityAt(world, 10 / viewport.zoom);
       if (hit) {
         if (e.ctrlKey || e.shiftKey) {
           dispatch({ type: 'TOGGLE_ENTITY_SELECT', payload: hit.id });
+        } else if (selectedEntityIds.includes(hit.id) && selectedEntityIds.length > 0) {
+          // Click on already-selected entity → start move drag
+          startDrag(e, 'move', {});
         } else {
           dispatch({ type: 'SELECT_ENTITIES', payload: [hit.id] });
         }
@@ -703,7 +765,7 @@ export default function CAMCanvas() {
         dispatch({ type: 'SELECT_ENTITIES', payload: [] });
       }
     }
-  }, [viewport, c2w, dispatch, tabPlacementActive, tabPlacementOpId, dogboneSelectionActive, dogboneSelectionOpId, textPlacementActive, textPlacementOpId, operations]);
+  }, [viewport, c2w, dispatch, tabPlacementActive, tabPlacementOpId, dogboneSelectionActive, dogboneSelectionOpId, textPlacementActive, textPlacementOpId, operations, selectedEntityIds]);
 
   const onMouseMove = useCallback((e) => {
     const canvas = canvasRef.current;
@@ -780,6 +842,70 @@ export default function CAMCanvas() {
     return () => canvas.removeEventListener('wheel', handler);
   }, []);
 
+  // Window-level drag handlers (move / scale / rotate)
+  onDragMoveRef.current = (e) => {
+    const dr = dragRef.current;
+    if (!dr) return;
+    const canvas = canvasRef.current;
+    const rect = canvas.getBoundingClientRect();
+    const cur = c2w(e.clientX - rect.left, e.clientY - rect.top);
+    let xf;
+    if (dr.type === 'move') {
+      xf = { type: 'move', dx: cur.x - dr.startWorld.x, dy: cur.y - dr.startWorld.y };
+    } else if (dr.type === 'scale') {
+      const orig = Math.hypot(dr.startWorld.x - dr.cx, dr.startWorld.y - dr.cy) || 1;
+      const now  = Math.hypot(cur.x - dr.cx, cur.y - dr.cy);
+      xf = { type: 'scale', cx: dr.cx, cy: dr.cy, s: now / orig };
+    } else if (dr.type === 'rotate') {
+      const a = Math.atan2(cur.y - dr.cy, cur.x - dr.cx) - dr.startAngle;
+      xf = { type: 'rotate', cx: dr.cx, cy: dr.cy, a };
+    }
+    xfRef.current = xf;
+    setLiveXf(xf); // triggers overlay re-render
+  };
+
+  onDragUpRef.current = () => {
+    const dr = dragRef.current;
+    if (!dr) return;
+    dragRef.current = null;
+    const xf = xfRef.current;
+    xfRef.current = null;
+    setLiveXf(null);
+    if (!xf) return;
+    const updated = entities
+      .filter(e => selectedEntityIds.includes(e.id))
+      .map(e => applyXform(e, xf));
+    dispatch({ type: 'TRANSFORM_ENTITIES', payload: updated });
+  };
+
+  useEffect(() => {
+    const mm = (e) => onDragMoveRef.current && onDragMoveRef.current(e);
+    const mu = ()  => onDragUpRef.current  && onDragUpRef.current();
+    window.addEventListener('mousemove', mm);
+    window.addEventListener('mouseup', mu);
+    return () => { window.removeEventListener('mousemove', mm); window.removeEventListener('mouseup', mu); };
+  }, []);
+
+  // Delete key removes selected entities
+  useEffect(() => {
+    const onKey = (e) => {
+      if (e.key === 'Delete' && selectedEntityIds.length > 0) {
+        dispatch({ type: 'DELETE_ENTITIES', payload: selectedEntityIds });
+      }
+    };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, [selectedEntityIds, dispatch]);
+
+  function startDrag(e, type, extra) {
+    const canvas = canvasRef.current;
+    const rect = canvas.getBoundingClientRect();
+    const world = c2w(e.clientX - rect.left, e.clientY - rect.top);
+    dragRef.current = { type, startWorld: world, ...extra };
+    e.preventDefault();
+    e.stopPropagation();
+  }
+
   function findEntityAt(world, tolerance) {
     for (let i = entities.length - 1; i >= 0; i--) {
       const e = entities[i];
@@ -833,6 +959,35 @@ export default function CAMCanvas() {
       default: return false;
     }
   }
+
+  // Selection bounding box in world space, updated live during drag
+  const selBnds = useMemo(() => {
+    const raw = selBoundsOf(entities, selectedEntityIds);
+    if (!raw || !liveXf) return raw;
+    const corners = [
+      { x: raw.minX, y: raw.minY }, { x: raw.maxX, y: raw.minY },
+      { x: raw.maxX, y: raw.maxY }, { x: raw.minX, y: raw.maxY },
+    ].map(p => {
+      const ap = applyXform({ type: 'line', start: p, end: p }, liveXf);
+      return ap.start;
+    });
+    return { minX: Math.min(...corners.map(c=>c.x)), maxX: Math.max(...corners.map(c=>c.x)), minY: Math.min(...corners.map(c=>c.y)), maxY: Math.max(...corners.map(c=>c.y)) };
+  }, [entities, selectedEntityIds, liveXf, canvasDims]);
+
+  // Convert world bbox → screen pixels for the overlay div
+  const overlayScreen = useMemo(() => {
+    if (!selBnds) return null;
+    const tl = w2c(selBnds.minX, selBnds.maxY);
+    const br = w2c(selBnds.maxX, selBnds.minY);
+    return { left: tl.x, top: tl.y, width: br.x - tl.x, height: br.y - tl.y,
+      cx: (tl.x + br.x) / 2, cy: (tl.y + br.y) / 2 };
+  }, [selBnds, viewport]);
+
+  // World-space centre of the selection bbox (for rotate/scale pivot)
+  const selCentre = useMemo(() => {
+    if (!selBnds) return null;
+    return { x: (selBnds.minX + selBnds.maxX) / 2, y: (selBnds.minY + selBnds.maxY) / 2 };
+  }, [selBnds]);
 
   return (
     <div style={{ position: 'relative', width: '100%', height: '100%', background: COLORS.background }}>
@@ -902,6 +1057,52 @@ export default function CAMCanvas() {
           Click to place text origin (baseline of first line)
         </div>
       )}
+
+      {/* ── Entity transform overlay ─────────────────────────────────────────── */}
+      {overlayScreen && selectedEntityIds.length > 0 && !tabPlacementActive && !dogboneSelectionActive && !textPlacementActive && (() => {
+        const { left, top, width, height, cx, cy } = overlayScreen;
+        const handleSize = 10;
+        const hs = handleSize / 2;
+        const rotHandleY = top - 24;
+        const scaleCorners = [
+          { key: 'tl', x: left,         y: top },
+          { key: 'tr', x: left + width, y: top },
+          { key: 'bl', x: left,         y: top + height },
+          { key: 'br', x: left + width, y: top + height },
+        ];
+        return (
+          <>
+            {/* Dashed selection bbox */}
+            <div style={{ position: 'absolute', left, top, width, height, border: '1.5px dashed rgba(255,204,68,0.7)', pointerEvents: 'none', boxSizing: 'border-box' }} />
+
+            {/* Rotate handle */}
+            <div
+              title="Rotate"
+              style={{ position: 'absolute', left: cx - hs, top: rotHandleY - hs, width: handleSize, height: handleSize, borderRadius: '50%', background: '#88ccff', border: '1.5px solid #fff', cursor: 'grab', boxSizing: 'border-box' }}
+              onMouseDown={e => { if (selCentre) startDrag(e, 'rotate', { cx: selCentre.x, cy: selCentre.y, startAngle: Math.atan2(c2w(e.clientX - canvasRef.current.getBoundingClientRect().left, e.clientY - canvasRef.current.getBoundingClientRect().top).y - selCentre.y, c2w(e.clientX - canvasRef.current.getBoundingClientRect().left, e.clientY - canvasRef.current.getBoundingClientRect().top).x - selCentre.x) }); }}
+            />
+
+            {/* Scale corner handles */}
+            {scaleCorners.map(({ key, x, y }) => (
+              <div
+                key={key}
+                title="Scale"
+                style={{ position: 'absolute', left: x - hs, top: y - hs, width: handleSize, height: handleSize, background: '#ffcc44', border: '1.5px solid #fff', cursor: 'nwse-resize', boxSizing: 'border-box' }}
+                onMouseDown={e => { if (selCentre) startDrag(e, 'scale', { cx: selCentre.x, cy: selCentre.y }); }}
+              />
+            ))}
+
+            {/* Delete button */}
+            <div
+              title="Delete (Del)"
+              style={{ position: 'absolute', left: left + width + 4, top: top - 2, background: '#cc2222', color: '#fff', border: 'none', borderRadius: 3, width: 18, height: 18, fontSize: 11, cursor: 'pointer', display: 'flex', alignItems: 'center', justifyContent: 'center', lineHeight: 1 }}
+              onMouseDown={e => { e.stopPropagation(); dispatch({ type: 'DELETE_ENTITIES', payload: selectedEntityIds }); }}
+            >
+              ✕
+            </div>
+          </>
+        );
+      })()}
     </div>
   );
 }

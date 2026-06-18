@@ -323,17 +323,20 @@ ipcMain.handle('dialog-open-tool-library', async () => {
   return { path: filePath, ext };
 });
 
-// VCarve .vtdb import — reads SQLite database using better-sqlite3 (read-only)
+// VCarve .vtdb import — reads SQLite database using sql.js (pure JS, no native compilation).
 // Returns { ok, rows, columns, table } on success or { ok: false, error } on failure.
 ipcMain.handle('import-vtdb', async (_, filePath) => {
   let db;
   try {
-    const Database = require('better-sqlite3');
-    db = new Database(filePath, { readonly: true, fileMustExist: true });
+    // sql-asm.js is pure JavaScript (no WASM file), works in any Electron context without rebuilding.
+    const initSqlJs = require('sql.js/dist/sql-asm.js');
+    const SQL = await initSqlJs();
+    const fileBuffer = fs.readFileSync(filePath);
+    db = new SQL.Database(fileBuffer);
 
-    const tables = db.prepare(
+    const tables = db.exec(
       "SELECT name FROM sqlite_master WHERE type='table' ORDER BY name"
-    ).all().map(r => r.name);
+    )[0]?.values.map(r => r[0]) ?? [];
     console.log('[VTDB] All tables:', tables);
 
     const candidates = ['Tools', 'tools', 'TOOLS', 'ToolLibrary', 'VCarveToolLibrary', 'CncToolLibrary'];
@@ -341,12 +344,20 @@ ipcMain.handle('import-vtdb', async (_, filePath) => {
     let usedTable = null;
     let columns = [];
 
+    function tableToObjects(result) {
+      if (!result || !result.columns || !result.values) return [];
+      return result.values.map(row =>
+        Object.fromEntries(result.columns.map((col, i) => [col, row[i]]))
+      );
+    }
+
     for (const tbl of candidates) {
       if (tables.includes(tbl)) {
-        const info = db.prepare(`PRAGMA table_info("${tbl}")`).all();
-        columns = info.map(c => c.name);
+        const infoResult = db.exec(`PRAGMA table_info("${tbl}")`);
+        columns = (infoResult[0]?.values ?? []).map(r => r[1]);
         console.log(`[VTDB] Table "${tbl}" columns:`, columns);
-        rows = db.prepare(`SELECT * FROM "${tbl}"`).all();
+        const dataResult = db.exec(`SELECT * FROM "${tbl}"`);
+        rows = tableToObjects(dataResult[0]);
         console.log(`[VTDB] Row count: ${rows.length}`);
         console.log('[VTDB] First 3 rows:', JSON.stringify(rows.slice(0, 3), null, 2));
         usedTable = tbl;
@@ -354,20 +365,18 @@ ipcMain.handle('import-vtdb', async (_, filePath) => {
       }
     }
 
-    // Fallback: inspect every table, pick first with any tool-like column
+    // Fallback: pick first table with any tool-like column
     if (!rows) {
       for (const tbl of tables) {
         try {
-          const info = db.prepare(`PRAGMA table_info("${tbl}")`).all();
-          const colNames = info.map(c => c.name);
+          const infoResult = db.exec(`PRAGMA table_info("${tbl}")`);
+          const colNames = (infoResult[0]?.values ?? []).map(r => r[1]);
           const colLower = colNames.map(c => c.toLowerCase());
           console.log(`[VTDB] Inspecting fallback table "${tbl}":`, colNames);
-          const looksLikeTools = colLower.some(c =>
-            ['name', 'toolname', 'diameter', 'tooltype', 'type'].includes(c)
-          );
-          if (looksLikeTools) {
+          if (colLower.some(c => ['name', 'toolname', 'diameter', 'tooltype', 'type'].includes(c))) {
             columns = colNames;
-            rows = db.prepare(`SELECT * FROM "${tbl}"`).all();
+            const dataResult = db.exec(`SELECT * FROM "${tbl}"`);
+            rows = tableToObjects(dataResult[0]);
             console.log(`[VTDB] Using fallback table "${tbl}", ${rows.length} rows`);
             console.log('[VTDB] First 3 rows:', JSON.stringify(rows.slice(0, 3), null, 2));
             usedTable = tbl;
@@ -391,14 +400,6 @@ ipcMain.handle('import-vtdb', async (_, filePath) => {
     return { ok: true, rows, table: usedTable, columns };
   } catch (err) {
     if (db) { try { db.close(); } catch {} }
-    const isABI = /NODE_MODULE_VERSION|was compiled against|binding/i.test(err.message || '');
-    if (isABI) {
-      return {
-        ok: false,
-        error: 'better-sqlite3 needs to be rebuilt for this version of Electron.\n' +
-               'Run in the project folder:  npx @electron/rebuild -f -w better-sqlite3',
-      };
-    }
     return { ok: false, error: err.message || String(err) };
   }
 });
