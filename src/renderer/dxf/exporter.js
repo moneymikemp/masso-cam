@@ -37,7 +37,24 @@ function hexToAci(hex) {
   return best;
 }
 
-export function exportDxf(entities, layers) {
+// Flatten text operation contours into a list of absolute-coordinate polyline records.
+function collectTextContours(operations) {
+  const contours = [];
+  for (const op of (operations || [])) {
+    if (op.type !== 'text' || !op.enabled) continue;
+    const { textContoursRel, textX = 0, textY = 0 } = op.params || {};
+    if (!textContoursRel?.length) continue;
+    for (const group of textContoursRel) {
+      for (const contour of group) {
+        if (!contour?.length) continue;
+        contours.push(contour.map(pt => ({ x: pt.x + textX, y: pt.y + textY })));
+      }
+    }
+  }
+  return contours;
+}
+
+export function exportDxf(entities, layers, operations) {
   const lines = [];
   const w = (code, val) => { lines.push(String(code), String(val)); };
 
@@ -49,8 +66,11 @@ export function exportDxf(entities, layers) {
   w(0, 'ENDSEC');
 
   // ── TABLES ────────────────────────────────────────────────────────────────
+  const textContours = collectTextContours(operations);
+
   const usedLayerNames = [...new Set(entities.map(e => e.layer || '0'))];
   if (!usedLayerNames.includes('0')) usedLayerNames.unshift('0');
+  if (textContours.length > 0 && !usedLayerNames.includes('TEXT')) usedLayerNames.push('TEXT');
 
   w(0, 'SECTION'); w(2, 'TABLES');
 
@@ -64,7 +84,8 @@ export function exportDxf(entities, layers) {
   w(0, 'TABLE'); w(2, 'LAYER'); w(70, usedLayerNames.length);
   for (const name of usedLayerNames) {
     const layer = layers?.[name];
-    const color = layer ? hexToAci(layer.color) : 7;
+    // TEXT layer has no entry in layers{} — use cyan (4) to distinguish it
+    const color = name === 'TEXT' ? 4 : layer ? hexToAci(layer.color) : 7;
     w(0, 'LAYER');
     w(2, name);
     w(70, 0);       // flags: on, not frozen, not locked
@@ -117,6 +138,19 @@ export function exportDxf(entities, layers) {
 
       default: break;
     }
+  }
+
+  // Text engraving contours (absolute coordinates, closed polylines on layer TEXT)
+  for (const contour of textContours) {
+    w(0, 'POLYLINE'); w(8, 'TEXT');
+    w(66, 1); // vertices follow
+    w(10, '0.0'); w(20, '0.0'); w(30, '0.0');
+    w(70, 1); // closed
+    for (const pt of contour) {
+      w(0, 'VERTEX'); w(8, 'TEXT');
+      w(10, fmt(pt.x)); w(20, fmt(pt.y)); w(30, '0.0');
+    }
+    w(0, 'SEQEND'); w(8, 'TEXT');
   }
 
   w(0, 'ENDSEC');

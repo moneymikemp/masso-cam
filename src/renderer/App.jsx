@@ -244,7 +244,7 @@ export default function App() {
       dispatch({ type: 'SET_STATUS', payload: 'No entities to export' });
       return;
     }
-    const dxfContent = generateDxf(entities, state.layers);
+    const dxfContent = generateDxf(entities, state.layers, operations);
     if (window.electron) {
       const savePath = await window.electron.saveDxf('export.dxf');
       if (savePath) {
@@ -260,7 +260,7 @@ export default function App() {
       URL.revokeObjectURL(a.href);
       dispatch({ type: 'SET_STATUS', payload: 'DXF exported' });
     }
-  }, [entities, state.layers, dispatch]);
+  }, [entities, state.layers, operations, dispatch]);
 
   const exportGcode = useCallback(async () => {
     const enabled = operations.filter(op => op.enabled && op.toolpath?.moves?.length > 0);
