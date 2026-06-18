@@ -136,7 +136,9 @@ export function fitArcsToChain(vertices, arcTolerance = 1.0, minArcDeg = 15) {
     }
   }
 
-  // Snap consecutive arc/line junction endpoints to eliminate fitting-residual gaps.
+  // Snap consecutive arc/line junction endpoints to close tiny fitting-residual gaps.
+  // Only snaps when the gap is small and the angle adjustment is small, to avoid
+  // creating near-full-circle arcs when the unwrapped angle crosses a 2π boundary.
   for (let k = 0; k < result.length - 1; k++) {
     const curr = result[k], next = result[k + 1];
     if (curr.type === 'line' && next.type === 'line') continue;
@@ -146,16 +148,22 @@ export function fitArcsToChain(vertices, arcTolerance = 1.0, minArcDeg = 15) {
     const nextStart = next.type === 'line'
       ? next.start
       : { x: next.center.x + next.radius * Math.cos(next.startAngle), y: next.center.y + next.radius * Math.sin(next.startAngle) };
+    const gapDist = Math.hypot(currEnd.x - nextStart.x, currEnd.y - nextStart.y);
+    if (gapDist > arcTolerance * 3) continue; // skip large gaps — fitting error, not rounding
     const jx = (currEnd.x + nextStart.x) / 2, jy = (currEnd.y + nextStart.y) / 2;
     if (curr.type === 'arc') {
       let ea = Math.atan2(jy - curr.center.y, jx - curr.center.x);
       while (ea <= curr.startAngle) ea += 2 * Math.PI;
-      result[k] = { ...curr, endAngle: ea };
+      if (Math.abs(ea - curr.endAngle) < 0.12) result[k] = { ...curr, endAngle: ea }; // <~7° only
     } else {
       result[k] = { ...curr, end: { x: jx, y: jy } };
     }
     if (next.type === 'arc') {
-      result[k + 1] = { ...next, startAngle: Math.atan2(jy - next.center.y, jx - next.center.x) };
+      let sa = Math.atan2(jy - next.center.y, jx - next.center.x);
+      // Normalize sa to be within π of the original startAngle to avoid wrapping artifacts
+      while (sa < next.startAngle - Math.PI) sa += 2 * Math.PI;
+      while (sa > next.startAngle + Math.PI) sa -= 2 * Math.PI;
+      if (Math.abs(sa - next.startAngle) < 0.12) result[k + 1] = { ...next, startAngle: sa };
     } else {
       result[k + 1] = { ...next, start: { x: jx, y: jy } };
     }

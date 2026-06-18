@@ -124,7 +124,9 @@ function getEntityGrips(entity) {
   }
 }
 
-function applyGrip(entity, gripType, vertexIdx, newPos) {
+// arcMid: geometric midpoint of arc at drag start (kept fixed during arc-endpoint drag)
+// arcOther: the other endpoint of the arc (kept fixed during arc-endpoint drag)
+function applyGrip(entity, gripType, vertexIdx, newPos, arcMid, arcOther) {
   switch (entity.type) {
     case 'line':
       if (gripType === 'start') return { ...entity, start: { x: newPos.x, y: newPos.y } };
@@ -134,13 +136,14 @@ function applyGrip(entity, gripType, vertexIdx, newPos) {
       if (gripType === 'center') return { ...entity, center: { x: newPos.x, y: newPos.y } };
       break;
     case 'arc':
-      if (gripType === 'start') {
-        return { ...entity, startAngle: Math.atan2(newPos.y - entity.center.y, newPos.x - entity.center.x) };
-      }
-      if (gripType === 'end') {
-        let ea = Math.atan2(newPos.y - entity.center.y, newPos.x - entity.center.x);
-        while (ea <= entity.startAngle) ea += 2 * Math.PI;
-        return { ...entity, endAngle: ea };
+      if (gripType === 'start' || gripType === 'end') {
+        if (arcMid && arcOther) {
+          // Recompute full arc geometry: dragged endpoint + fixed midpoint + fixed other endpoint
+          const p1 = gripType === 'start' ? newPos   : arcOther;
+          const p2 = gripType === 'start' ? arcOther : newPos;
+          const arc = arcFrom3Pts(p1, p2, arcMid);
+          if (arc) return { ...entity, center: arc.center, radius: arc.radius, startAngle: arc.startAngle, endAngle: arc.endAngle };
+        }
       }
       break;
     case 'polyline':
@@ -558,7 +561,7 @@ export default function CAMCanvas() {
 
       let drawn = entity;
       if (gd && entity.id === gd.entityId && gd.curWorld) {
-        drawn = applyGrip(entity, gd.gripType, gd.vertexIdx, gd.curWorld);
+        drawn = applyGrip(entity, gd.gripType, gd.vertexIdx, gd.curWorld, gd.arcMid, gd.arcOther);
       } else if (xf && isSelected) {
         drawn = applyXform(entity, xf);
       }
@@ -1207,7 +1210,17 @@ export default function CAMCanvas() {
         if (!selectedEntityIds.includes(entity.id)) continue;
         for (const grip of getEntityGrips(entity)) {
           if (Math.hypot(grip.x - world.x, grip.y - world.y) < snapR) {
-            gripDragRef.current = { entityId: entity.id, gripType: grip.gripType, vertexIdx: grip.vertexIdx ?? null, curWorld: null, snapType: null };
+            let arcMid = null, arcOther = null;
+            if (entity.type === 'arc' && (grip.gripType === 'start' || grip.gripType === 'end')) {
+              let span = entity.endAngle - entity.startAngle;
+              if (span < 0) span += 2 * Math.PI;
+              const ma = entity.startAngle + span / 2;
+              arcMid = { x: entity.center.x + entity.radius * Math.cos(ma), y: entity.center.y + entity.radius * Math.sin(ma) };
+              arcOther = grip.gripType === 'start'
+                ? { x: entity.center.x + entity.radius * Math.cos(entity.endAngle),   y: entity.center.y + entity.radius * Math.sin(entity.endAngle) }
+                : { x: entity.center.x + entity.radius * Math.cos(entity.startAngle), y: entity.center.y + entity.radius * Math.sin(entity.startAngle) };
+            }
+            gripDragRef.current = { entityId: entity.id, gripType: grip.gripType, vertexIdx: grip.vertexIdx ?? null, curWorld: null, snapType: null, arcMid, arcOther };
             e.preventDefault();
             e.stopPropagation();
             return;
@@ -1564,7 +1577,7 @@ export default function CAMCanvas() {
       if (gd.curWorld) {
         const entity = entities.find(e => e.id === gd.entityId);
         if (entity) {
-          const updated = applyGrip(entity, gd.gripType, gd.vertexIdx, gd.curWorld);
+          const updated = applyGrip(entity, gd.gripType, gd.vertexIdx, gd.curWorld, gd.arcMid, gd.arcOther);
           dispatch({ type: 'TRANSFORM_ENTITIES', payload: [updated] });
         }
       }
@@ -1927,8 +1940,8 @@ export default function CAMCanvas() {
               onMouseDown={e => { if (selCentre) startDrag(e, 'rotate', { cx: selCentre.x, cy: selCentre.y, startAngle: Math.atan2(c2w(e.clientX - canvasRef.current.getBoundingClientRect().left, e.clientY - canvasRef.current.getBoundingClientRect().top).y - selCentre.y, c2w(e.clientX - canvasRef.current.getBoundingClientRect().left, e.clientY - canvasRef.current.getBoundingClientRect().top).x - selCentre.x) }); }}
             />
 
-            {/* Scale corner handles */}
-            {scaleCorners.map(({ key, x, y }) => (
+            {/* Scale corner handles — hidden for single-entity selection (grips handle editing) */}
+            {selectedEntityIds.length > 1 && scaleCorners.map(({ key, x, y }) => (
               <div
                 key={key}
                 title="Scale"
