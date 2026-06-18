@@ -67,6 +67,42 @@ function applyXform(entity, xf) {
   }
 }
 
+// ── Mirror helpers ────────────────────────────────────────────────────────────
+
+function mirrorPt(p, p1, p2) {
+  const dx = p2.x - p1.x, dy = p2.y - p1.y;
+  const len = Math.hypot(dx, dy);
+  if (len < 1e-9) return { ...p };
+  const ux = dx / len, uy = dy / len;
+  const vx = p.x - p1.x, vy = p.y - p1.y;
+  const proj = vx * ux + vy * uy;
+  return { x: p1.x + 2 * proj * ux - vx, y: p1.y + 2 * proj * uy - vy };
+}
+
+function mirrorEntity(entity, p1, p2) {
+  const mp = p => mirrorPt(p, p1, p2);
+  switch (entity.type) {
+    case 'line':
+      return { ...entity, id: uuid(), start: mp(entity.start), end: mp(entity.end) };
+    case 'circle':
+      return { ...entity, id: uuid(), center: mp(entity.center) };
+    case 'arc': {
+      const newCenter = mp(entity.center);
+      const sp = { x: entity.center.x + entity.radius * Math.cos(entity.startAngle), y: entity.center.y + entity.radius * Math.sin(entity.startAngle) };
+      const ep = { x: entity.center.x + entity.radius * Math.cos(entity.endAngle),   y: entity.center.y + entity.radius * Math.sin(entity.endAngle) };
+      const newSp = mp(sp), newEp = mp(ep);
+      // Winding reverses across a mirror — swap start/end
+      return { ...entity, id: uuid(), center: newCenter,
+        startAngle: Math.atan2(newEp.y - newCenter.y, newEp.x - newCenter.x),
+        endAngle:   Math.atan2(newSp.y - newCenter.y, newSp.x - newCenter.x) };
+    }
+    case 'polyline':
+      return { ...entity, id: uuid(), vertices: entity.vertices.map(mp) };
+    default:
+      return { ...entity, id: uuid() };
+  }
+}
+
 // ── Drawing tool helpers ──────────────────────────────────────────────────────
 
 function getEntitySnapPoints(e) {
@@ -302,6 +338,18 @@ export default function CAMCanvas() {
   const [nearGrip, setNearGrip] = useState(false);
   const polygonSidesRef = useRef(6); // persists across polygon draws
 
+  // Context menu + clipboard
+  const [contextMenu, setContextMenu] = useState(null); // { x, y } screen pixels
+  const clipboardRef  = useRef([]);   // copied entity objects
+  const clipBasePtRef = useRef(null); // base point for "copy with base point"
+  // Command mode for two-point operations triggered from context menu
+  // { type: 'moveBase'|'moveDest'|'pasteBase'|'pasteDest', ids?, base? }
+  const cmdModeRef = useRef(null);
+  const [cmdMode, setCmdMode] = useState(null);
+  const setCmdModeSync = (v) => { cmdModeRef.current = v; setCmdMode(v); };
+  // Transform input overlay (scale / rotate from context menu)
+  const [transformInput, setTransformInput] = useState(null); // { type: 'scale'|'rotate', vals }
+
   // Unique Z levels where cutting happens, sorted shallowest → deepest.
   const zLevels = useMemo(() => {
     const zSet = new Set();
@@ -359,6 +407,8 @@ export default function CAMCanvas() {
         ? { tool: 'polyline', pts: [], segs: [], nextSegType: 'line', arcMid: null, dragging: false }
         : activeTool === 'polygon'
         ? { tool: 'polygon', pts: [], sides: polygonSidesRef.current, dragging: false }
+        : activeTool === 'mirror'
+        ? { tool: 'mirror', pts: [] }
         : { tool: activeTool, pts: [], dragging: false };
     }
     previewRef.current = null;
@@ -1139,6 +1189,27 @@ export default function CAMCanvas() {
         }
         break;
       }
+      case 'mirror': {
+        const p1 = pts[0];
+        // Dashed axis line
+        ctx.setLineDash([6, 4]);
+        const a = w2c(p1.x, p1.y), b = w2c(cur.x, cur.y);
+        ctx.beginPath(); ctx.moveTo(a.x, a.y); ctx.lineTo(b.x, b.y); ctx.stroke();
+        ctx.setLineDash([]);
+        // Ghost of mirrored selected entities
+        const selEnts = entities.filter(e => selectedEntityIds.includes(e.id));
+        if (selEnts.length > 0) {
+          ctx.save();
+          ctx.globalAlpha = 0.45;
+          ctx.strokeStyle = '#88ccff';
+          ctx.lineWidth = 1.2;
+          for (const ent of selEnts) {
+            drawEntity(ctx, mirrorEntity(ent, p1, cur));
+          }
+          ctx.restore();
+        }
+        break;
+      }
     }
     ctx.setLineDash([]);
     drawSnapIndicator(ctx, cur, snapType);
@@ -1159,6 +1230,21 @@ export default function CAMCanvas() {
     const cx     = e.clientX - rect.left;
     const cy     = e.clientY - rect.top;
     const world  = c2w(cx, cy);
+
+    // ── Close context menu on any click ───────────────────────────────────
+    if (contextMenu) { setContextMenu(null); }
+
+    // ── Command mode intercept (move/paste two-point operations) ──────────
+    if (e.button === 0 && cmdModeRef.current) {
+      const snapped = (() => {
+        const snapRadius = 14 / viewport.zoom;
+        const es = snapEntities(world, entities, layers, snapRadius);
+        if (es) return es;
+        if (gridSnap) return { x: Math.round(world.x / 10) * 10, y: Math.round(world.y / 10) * 10 };
+        return world;
+      })();
+      if (handleCmdModeClick(snapped)) return;
+    }
 
     // ── Tab placement / drag mode ──────────────────────────────────────────
     if (tabPlacementActive && tabPlacementOpId) {
@@ -1468,6 +1554,20 @@ export default function CAMCanvas() {
         }
         break;
       }
+      case 'mirror': {
+        if (ds.pts.length === 0) {
+          drawStateRef.current = { tool: 'mirror', pts: [snapped] };
+        } else {
+          const p1 = ds.pts[0], p2 = snapped;
+          const selEnts = entities.filter(e => selectedEntityIds.includes(e.id));
+          if (selEnts.length > 0) {
+            const mirrored = selEnts.map(e => mirrorEntity(e, p1, p2));
+            dispatch({ type: 'ADD_ENTITIES', payload: mirrored });
+          }
+          drawStateRef.current = { tool: 'mirror', pts: [] };
+        }
+        break;
+      }
       case 'polyline': {
         const segs = ds.segs || [];
         if (ds.pts.length === 0) {
@@ -1740,6 +1840,9 @@ export default function CAMCanvas() {
       if (inputFocused) return;
 
       if (e.key === 'Escape') {
+        if (contextMenu) { setContextMenu(null); return; }
+        if (transformInput) { setTransformInput(null); return; }
+        if (cmdModeRef.current) { setCmdModeSync(null); return; }
         if (coordInput) { setCoordInput(null); return; }
         if (dimInputRef.current) { dimInputRef.current = null; setDimInput(null); return; }
         if (drawStateRef.current) {
@@ -1767,7 +1870,134 @@ export default function CAMCanvas() {
     };
     window.addEventListener('keydown', onKey);
     return () => window.removeEventListener('keydown', onKey);
-  }, [selectedEntityIds, dispatch, coordInput]);
+  }, [selectedEntityIds, dispatch, coordInput, contextMenu, transformInput]);
+
+  // ── Context menu actions ─────────────────────────────────────────────────────
+
+  function ctxCopy() {
+    const sel = entities.filter(e => selectedEntityIds.includes(e.id));
+    clipboardRef.current = sel.map(e => ({ ...e }));
+    clipBasePtRef.current = null;
+    setContextMenu(null);
+    showStatus(`Copied ${sel.length} entit${sel.length === 1 ? 'y' : 'ies'}`);
+  }
+
+  function ctxCut() {
+    const sel = entities.filter(e => selectedEntityIds.includes(e.id));
+    clipboardRef.current = sel.map(e => ({ ...e }));
+    clipBasePtRef.current = null;
+    dispatch({ type: 'DELETE_ENTITIES', payload: selectedEntityIds });
+    setContextMenu(null);
+    showStatus(`Cut ${sel.length} entit${sel.length === 1 ? 'y' : 'ies'}`);
+  }
+
+  function ctxErase() {
+    dispatch({ type: 'DELETE_ENTITIES', payload: selectedEntityIds });
+    setContextMenu(null);
+  }
+
+  function ctxPaste() {
+    const cb = clipboardRef.current;
+    if (!cb.length) return;
+    setContextMenu(null);
+    if (clipBasePtRef.current) {
+      // Enter paste-at-point mode: user clicks placement → paste relative to stored base
+      setCmdModeSync({ type: 'pasteDest', base: clipBasePtRef.current, entities: cb });
+      showStatus('Paste — click to place');
+    } else {
+      const offset = 10;
+      const pasted = cb.map(e => {
+        const shifted = applyXform(e, { type: 'move', dx: offset, dy: offset });
+        return { ...shifted, id: uuid() };
+      });
+      dispatch({ type: 'ADD_ENTITIES', payload: pasted });
+      dispatch({ type: 'SELECT_ENTITIES', payload: pasted.map(e => e.id) });
+      showStatus(`Pasted ${pasted.length} entit${pasted.length === 1 ? 'y' : 'ies'}`);
+    }
+  }
+
+  function ctxCopyWithBase() {
+    const sel = entities.filter(e => selectedEntityIds.includes(e.id));
+    clipboardRef.current = sel.map(e => ({ ...e }));
+    clipBasePtRef.current = null;
+    setContextMenu(null);
+    setCmdModeSync({ type: 'pasteBase', entities: sel });
+    showStatus('Copy with Base Point — click to set base point');
+  }
+
+  function ctxMove() {
+    setContextMenu(null);
+    setCmdModeSync({ type: 'moveBase', ids: [...selectedEntityIds] });
+    showStatus('Move — click base point');
+  }
+
+  function ctxScale() {
+    setContextMenu(null);
+    setTransformInput({ type: 'scale', vals: { factor: '' } });
+  }
+
+  function ctxRotate() {
+    setContextMenu(null);
+    setTransformInput({ type: 'rotate', vals: { angle: '' } });
+  }
+
+  function commitTransformInput() {
+    if (!transformInput) return;
+    const { type, vals } = transformInput;
+    const sel = entities.filter(e => selectedEntityIds.includes(e.id));
+    if (!sel.length) { setTransformInput(null); return; }
+    const bounds = selBoundsOf(entities, selectedEntityIds);
+    const cx = bounds ? (bounds.minX + bounds.maxX) / 2 : 0;
+    const cy = bounds ? (bounds.minY + bounds.maxY) / 2 : 0;
+    let xf = null;
+    if (type === 'scale') {
+      const s = parseFloat(vals.factor);
+      if (!isNaN(s) && s > 0) xf = { type: 'scale', cx, cy, s };
+    } else if (type === 'rotate') {
+      const deg = parseFloat(vals.angle);
+      if (!isNaN(deg)) xf = { type: 'rotate', cx, cy, a: deg * Math.PI / 180 };
+    }
+    if (xf) dispatch({ type: 'TRANSFORM_ENTITIES', payload: sel.map(e => applyXform(e, xf)) });
+    setTransformInput(null);
+  }
+
+  // Intercept canvas clicks when a command mode is active
+  function handleCmdModeClick(world) {
+    const cm = cmdModeRef.current;
+    if (!cm) return false;
+    if (cm.type === 'moveBase') {
+      setCmdModeSync({ ...cm, type: 'moveDest', base: world });
+      showStatus('Move — click destination');
+      return true;
+    }
+    if (cm.type === 'moveDest') {
+      const dx = world.x - cm.base.x, dy = world.y - cm.base.y;
+      const sel = entities.filter(e => cm.ids.includes(e.id));
+      const updated = sel.map(e => applyXform(e, { type: 'move', dx, dy }));
+      dispatch({ type: 'TRANSFORM_ENTITIES', payload: updated });
+      setCmdModeSync(null);
+      return true;
+    }
+    if (cm.type === 'pasteBase') {
+      clipBasePtRef.current = world;
+      setCmdModeSync({ type: 'pasteDest', base: world, entities: cm.entities });
+      showStatus('Copy with Base Point — click to place');
+      return true;
+    }
+    if (cm.type === 'pasteDest') {
+      const dx = world.x - cm.base.x, dy = world.y - cm.base.y;
+      const pasted = cm.entities.map(e => {
+        const shifted = applyXform(e, { type: 'move', dx, dy });
+        return { ...shifted, id: uuid() };
+      });
+      dispatch({ type: 'ADD_ENTITIES', payload: pasted });
+      dispatch({ type: 'SELECT_ENTITIES', payload: pasted.map(e => e.id) });
+      setCmdModeSync(null);
+      showStatus(`Pasted ${pasted.length} entit${pasted.length === 1 ? 'y' : 'ies'}`);
+      return true;
+    }
+    return false;
+  }
 
   function startDrag(e, type, extra) {
     const canvas = canvasRef.current;
@@ -1872,7 +2102,18 @@ export default function CAMCanvas() {
         onMouseUp={onMouseUp}
         onMouseLeave={onMouseUp}
         onDoubleClick={onDoubleClick}
-        onContextMenu={e => { if (tabPlacementActive || dogboneSelectionActive || textPlacementActive) e.preventDefault(); }}
+        onContextMenu={e => {
+          e.preventDefault();
+          if (tabPlacementActive || dogboneSelectionActive || textPlacementActive) return;
+          const canvas = canvasRef.current;
+          const rect = canvas.getBoundingClientRect();
+          const cx = e.clientX - rect.left, cy = e.clientY - rect.top;
+          // Clamp menu so it doesn't overflow canvas
+          const menuW = 200, menuH = 240;
+          const x = Math.min(cx, rect.width  - menuW - 4);
+          const y = Math.min(cy, rect.height - menuH - 4);
+          setContextMenu({ x: Math.max(0, x), y: Math.max(0, y) });
+        }}
       />
       {/* Toolbar overlays */}
       <div style={{ position: 'absolute', top: 8, right: 8, display: 'flex', gap: 4 }}>
@@ -1942,8 +2183,9 @@ export default function CAMCanvas() {
             ? (ds?.arcMid ? 'Click arc end point · L = line mode · Enter = finish' : 'Click arc midpoint · L = line mode')
             : (ds?.pts?.length === 0 ? 'Click to start · A = arc seg · Enter = finish · Dbl-click = finish' : 'Click to add point · A = arc · C = close · Enter = finish'),
           polygon:  ds?.pts?.length === 1 ? 'Click to set radius (or type Sides/Radius above)' : 'Click to set center',
+          mirror:   ds?.pts?.length === 1 ? 'Click second point of mirror axis' : selectedEntityIds.length === 0 ? 'Select entities first, then click mirror axis start' : 'Click first point of mirror axis',
         };
-        const labels = { line: 'Line', circle: 'Circle', arc: 'Arc', rect: 'Rectangle', polyline: 'Polyline', polygon: 'Polygon' };
+        const labels = { line: 'Line', circle: 'Circle', arc: 'Arc', rect: 'Rectangle', polyline: 'Polyline', polygon: 'Polygon', mirror: 'Mirror' };
         return (
           <div style={{ position: 'absolute', top: 8, left: '50%', transform: 'translateX(-50%)', background: 'rgba(10,30,10,0.9)', color: '#88ff88', padding: '4px 14px', borderRadius: 4, fontSize: 11, pointerEvents: 'none', border: '1px solid rgba(68,255,68,0.4)', whiteSpace: 'nowrap' }}>
             <strong>{labels[activeTool]}</strong> — {msgs[activeTool]} · Esc to cancel
@@ -2050,6 +2292,78 @@ export default function CAMCanvas() {
               ✕
             </div>
           </>
+        );
+      })()}
+
+      {/* ── Command mode banner ───────────────────────────────────────────── */}
+      {cmdMode && !transformInput && (
+        <div style={{ position:'absolute', top:8, left:'50%', transform:'translateX(-50%)', background:'rgba(30,10,30,0.92)', color:'#ff88ff', padding:'4px 14px', borderRadius:4, fontSize:11, pointerEvents:'none', border:'1px solid rgba(255,68,255,0.4)', whiteSpace:'nowrap' }}>
+          {cmdMode.type === 'moveBase'  && <><strong>Move</strong> — click base point · Esc to cancel</>}
+          {cmdMode.type === 'moveDest'  && <><strong>Move</strong> — click destination · Esc to cancel</>}
+          {cmdMode.type === 'pasteBase' && <><strong>Copy with Base Point</strong> — click to set base · Esc to cancel</>}
+          {cmdMode.type === 'pasteDest' && <><strong>Paste</strong> — click to place · Esc to cancel</>}
+        </div>
+      )}
+
+      {/* ── Transform input overlay (scale / rotate) ─────────────────────── */}
+      {transformInput && (() => {
+        const { type, vals } = transformInput;
+        const inputSt = { background:'#0d0d20', border:'1px solid #3344aa', color:'#cce', borderRadius:3, padding:'3px 6px', fontSize:11, width:90, fontFamily:'monospace' };
+        const rowSt = { display:'flex', alignItems:'center', gap:6, marginBottom:4 };
+        const lblSt = { fontSize:10, color:'#8888bb', width:60, textAlign:'right', flexShrink:0 };
+        const updTI = (k, v) => setTransformInput(ti => ({ ...ti, vals: { ...ti.vals, [k]: v } }));
+        const onKey = (e) => { if (e.key === 'Enter') commitTransformInput(); else if (e.key === 'Escape') setTransformInput(null); };
+        return (
+          <div style={{ position:'absolute', left:'50%', top:'50%', transform:'translate(-50%,-50%)', background:'rgba(8,8,28,0.97)', border:'1px solid #3344aa', borderRadius:5, padding:'10px 14px', zIndex:20, fontSize:11, color:'#aab', boxShadow:'0 2px 12px rgba(0,0,0,0.7)', minWidth:200 }}>
+            <div style={{ fontSize:11, color:'#8888bb', marginBottom:8 }}>{type === 'scale' ? 'Scale Selected' : 'Rotate Selected'}</div>
+            {type === 'scale' && (
+              <div style={rowSt}><span style={lblSt}>Factor</span><input autoFocus style={inputSt} type="text" placeholder="e.g. 2 or 0.5" value={vals.factor} onChange={e=>updTI('factor',e.target.value)} onKeyDown={onKey} /></div>
+            )}
+            {type === 'rotate' && (
+              <div style={rowSt}><span style={lblSt}>Degrees</span><input autoFocus style={inputSt} type="text" placeholder="e.g. 45 or -90" value={vals.angle} onChange={e=>updTI('angle',e.target.value)} onKeyDown={onKey} /></div>
+            )}
+            <div style={{ display:'flex', gap:6, marginTop:4 }}>
+              <button onClick={commitTransformInput} style={{ flex:1, background:'#1a3a1a', border:'1px solid #44aa44', color:'#88ff88', borderRadius:3, padding:'3px 0', fontSize:11, cursor:'pointer' }}>Apply</button>
+              <button onClick={() => setTransformInput(null)} style={{ flex:1, background:'#1a1a3a', border:'1px solid #3344aa', color:'#8888cc', borderRadius:3, padding:'3px 0', fontSize:11, cursor:'pointer' }}>Cancel</button>
+            </div>
+          </div>
+        );
+      })()}
+
+      {/* ── Right-click context menu ──────────────────────────────────────── */}
+      {contextMenu && (() => {
+        const hasSel = selectedEntityIds.length > 0;
+        const hasCB  = clipboardRef.current.length > 0;
+        const mnuSt = { position:'absolute', left:contextMenu.x, top:contextMenu.y, background:'#151528', border:'1px solid #3344aa', borderRadius:5, zIndex:25, minWidth:190, boxShadow:'0 4px 16px rgba(0,0,0,0.7)', overflow:'hidden', fontSize:12 };
+        const itemSt = (disabled) => ({ padding:'6px 14px', cursor:disabled?'default':'pointer', color:disabled?'#444466':'#ccccee', background:'transparent', display:'block', width:'100%', textAlign:'left', border:'none', fontSize:12 });
+        const divSt = { borderTop:'1px solid #2a2a50', margin:'2px 0' };
+        const Item = ({ label, onClick, disabled }) => (
+          <button style={itemSt(disabled)} disabled={disabled}
+            onMouseEnter={e => { if (!disabled) e.target.style.background='#1e1e40'; }}
+            onMouseLeave={e => { e.target.style.background='transparent'; }}
+            onClick={onClick}>{label}</button>
+        );
+        return (
+          <div style={mnuSt}>
+            {hasSel && <>
+              <Item label="Cut"                 onClick={ctxCut} />
+              <Item label="Copy"                onClick={ctxCopy} />
+              <Item label="Copy with Base Point" onClick={ctxCopyWithBase} />
+              <div style={divSt} />
+              <Item label="Move"                onClick={ctxMove} />
+              <Item label="Scale…"              onClick={ctxScale} />
+              <Item label="Rotate…"             onClick={ctxRotate} />
+              <div style={divSt} />
+              <Item label="Erase"               onClick={ctxErase} />
+            </>}
+            {hasCB && <>
+              {hasSel && <div style={divSt} />}
+              <Item label="Paste" onClick={ctxPaste} />
+            </>}
+            {!hasSel && !hasCB && (
+              <div style={{ padding:'8px 14px', color:'#555577', fontSize:11 }}>Nothing selected</div>
+            )}
+          </div>
         );
       })()}
     </div>

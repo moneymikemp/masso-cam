@@ -16,6 +16,7 @@ const TOOL_GROUPS = [
       { key: 'rect',     label: '□',   title: 'Rectangle — click corner, click opposite' },
       { key: 'polyline', label: '⌒╱', title: 'Polyline — A=arc seg · C=close · Enter=finish' },
       { key: 'polygon',  label: '⬡',  title: 'Polygon — click center, set sides, click radius' },
+      { key: 'mirror',   label: '⇔',  title: 'Mirror — select entities, click two points for mirror axis' },
     ],
   },
 ];
