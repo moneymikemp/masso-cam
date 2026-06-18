@@ -1,4 +1,103 @@
 // Marching-squares auto-trace: converts a reference image to polyline entities.
+// Also exports fitArcsToChain() which post-processes vertex chains into line/arc segments.
+
+// ── Kasa least-squares circle fit ────────────────────────────────────────────
+
+function solve3x3(A, b) {
+  const M = A.map((row, i) => [...row, b[i]]);
+  for (let col = 0; col < 3; col++) {
+    let maxRow = col;
+    for (let row = col + 1; row < 3; row++) if (Math.abs(M[row][col]) > Math.abs(M[maxRow][col])) maxRow = row;
+    [M[col], M[maxRow]] = [M[maxRow], M[col]];
+    if (Math.abs(M[col][col]) < 1e-12) return null;
+    for (let row = col + 1; row < 3; row++) {
+      const f = M[row][col] / M[col][col];
+      for (let j = col; j <= 3; j++) M[row][j] -= f * M[col][j];
+    }
+  }
+  const x = [0, 0, 0];
+  for (let i = 2; i >= 0; i--) {
+    x[i] = M[i][3];
+    for (let j = i + 1; j < 3; j++) x[i] -= M[i][j] * x[j];
+    x[i] /= M[i][i];
+  }
+  return x;
+}
+
+function fitCircleLS(pts) {
+  const n = pts.length;
+  if (n < 3) return null;
+  let sxx=0, sxy=0, sx=0, syy=0, sy=0;
+  let sx3=0, sxy2=0, sx2y=0, sy3=0;
+  for (const { x, y } of pts) {
+    const x2 = x*x, y2 = y*y;
+    sxx+=x2; sxy+=x*y; sx+=x; syy+=y2; sy+=y;
+    sx3+=x2*x; sxy2+=x*y2; sx2y+=x2*y; sy3+=y2*y;
+  }
+  const sol = solve3x3([[sxx,sxy,sx],[sxy,syy,sy],[sx,sy,n]], [sx3+sxy2, sx2y+sy3, sxx+syy]);
+  if (!sol) return null;
+  const [B, C, D] = sol;
+  const cx = B/2, cy = C/2;
+  const r2 = cx*cx + cy*cy + D;
+  if (r2 <= 0) return null;
+  const r = Math.sqrt(r2);
+  let rms = 0;
+  for (const { x, y } of pts) { const d = Math.hypot(x-cx, y-cy) - r; rms += d*d; }
+  return { cx, cy, r, residual: Math.sqrt(rms / n) };
+}
+
+// Convert an array of {x,y} vertices (world mm) into a mix of line and arc segments.
+// arcTolerance: max RMS deviation (mm) from a fitted circle to consider the segment an arc.
+// minArcDeg: minimum arc span in degrees to emit an arc entity (avoids trivial arcs).
+export function fitArcsToChain(vertices, arcTolerance = 1.0, minArcDeg = 15) {
+  const n = vertices.length;
+  if (n < 2) return [];
+  const norm = (a, ref) => { let x = a - ref; while (x < 0) x += Math.PI*2; return x; };
+  const result = [];
+  let i = 0;
+
+  while (i < n - 1) {
+    let arcEmitted = false;
+
+    if (i + 3 < n) {
+      // Need ≥4 points to distinguish arc from noise (3 points always define a circle trivially)
+      const initFit = fitCircleLS(vertices.slice(i, i + 4));
+      if (initFit && initFit.residual < arcTolerance) {
+        // Greedily extend the arc window
+        let arcEnd = i + 3;
+        let bestFit = initFit;
+        while (arcEnd + 1 < n) {
+          const extFit = fitCircleLS(vertices.slice(i, arcEnd + 2));
+          if (extFit && extFit.residual < arcTolerance) { bestFit = extFit; arcEnd++; }
+          else break;
+        }
+
+        // Compute arc direction using a midpoint vertex
+        const sa = Math.atan2(vertices[i].y     - bestFit.cy, vertices[i].x     - bestFit.cx);
+        const ea = Math.atan2(vertices[arcEnd].y - bestFit.cy, vertices[arcEnd].x - bestFit.cx);
+        const midIdx = Math.round((i + arcEnd) / 2);
+        const ma = Math.atan2(vertices[midIdx].y - bestFit.cy, vertices[midIdx].x - bestFit.cx);
+
+        let startA = sa, endA = ea;
+        if (norm(ma, startA) > norm(endA, startA)) { [startA, endA] = [endA, startA]; }
+        const spanDeg = norm(endA, startA) * 180 / Math.PI;
+
+        if (spanDeg >= minArcDeg) {
+          result.push({ type: 'arc', center: { x: bestFit.cx, y: bestFit.cy }, radius: bestFit.r, startAngle: startA, endAngle: endA });
+          i = arcEnd;
+          arcEmitted = true;
+        }
+      }
+    }
+
+    if (!arcEmitted) {
+      result.push({ type: 'line', start: vertices[i], end: vertices[i + 1] });
+      i++;
+    }
+  }
+
+  return result;
+}
 
 // Edge midpoints in cell-local coords (x: 0=left 1=right, y: 0=top 1=bottom)
 const EDGE_MID = [[0.5,0],[1,0.5],[0.5,1],[0,0.5]];

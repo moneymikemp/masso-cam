@@ -13,7 +13,7 @@ import { parseDxf, getBounds } from './dxf/parser';
 import { exportDxf as generateDxf } from './dxf/exporter';
 import { generateGcode, generateGcodeByTool } from './gcode/postprocessor';
 import { offsetEntity } from './cam/offsetEngine';
-import { traceImage } from './cam/traceEngine';
+import { traceImage, fitArcsToChain } from './cam/traceEngine';
 import InlayWizard from './components/panels/InlayWizard';
 import ToolLibraryModal from './components/panels/ToolLibraryModal';
 import MachineProfilesModal from './components/panels/MachineProfilesModal';
@@ -389,11 +389,24 @@ export default function App() {
     }
     dispatch({ type: 'SET_STATUS', payload: 'Tracing…' });
     try {
-      const polylines = traceImage(refImageElRef.current, refImage, 0.5, 1.5);
-      if (!polylines.length) { dispatch({ type: 'SET_STATUS', payload: 'Trace found no outlines (try adjusting threshold)' }); return; }
-      const newEntities = polylines.map(verts => ({ id: uuid(), type: 'polyline', layer: '0', vertices: verts, closed: true }));
+      const chains = traceImage(refImageElRef.current, refImage, 0.5, 0.8);
+      if (!chains.length) { dispatch({ type: 'SET_STATUS', payload: 'Trace found no outlines (try adjusting threshold)' }); return; }
+      const newEntities = [];
+      let lineCount = 0, arcCount = 0;
+      for (const verts of chains) {
+        const segs = fitArcsToChain(verts, 1.0, 15);
+        for (const seg of segs) {
+          if (seg.type === 'line') {
+            newEntities.push({ id: uuid(), type: 'line', layer: '0', start: seg.start, end: seg.end });
+            lineCount++;
+          } else if (seg.type === 'arc') {
+            newEntities.push({ id: uuid(), type: 'arc', layer: '0', center: seg.center, radius: seg.radius, startAngle: seg.startAngle, endAngle: seg.endAngle });
+            arcCount++;
+          }
+        }
+      }
       dispatch({ type: 'ADD_ENTITIES', payload: newEntities });
-      dispatch({ type: 'SET_STATUS', payload: `Traced ${polylines.length} outline${polylines.length > 1 ? 's' : ''}` });
+      dispatch({ type: 'SET_STATUS', payload: `Traced ${chains.length} outline${chains.length > 1 ? 's' : ''}: ${lineCount} lines, ${arcCount} arcs` });
     } catch (err) {
       dispatch({ type: 'SET_STATUS', payload: 'Trace failed: ' + err.message });
     }
@@ -518,11 +531,12 @@ export default function App() {
         <div style={{ display:'flex', gap:4, flex:1, overflow:'hidden' }}>
           {/* Drawing tools — always visible */}
           {[
-            { key: 'select', label: '▲',  title: 'Select / Move / Scale / Rotate' },
-            { key: 'line',   label: '/',   title: 'Line (Space=coord, Enter=dim)' },
-            { key: 'circle', label: '○',   title: 'Circle — click center, drag or type diameter' },
-            { key: 'arc',    label: '⌒',  title: 'Arc — 3-point: start, end, midpoint' },
-            { key: 'rect',   label: '□',   title: 'Rectangle — drag or type W/H' },
+            { key: 'select',   label: '▲',   title: 'Select / Move / Scale / Rotate' },
+            { key: 'line',     label: '/',    title: 'Line (Space=coord, Enter=dim)' },
+            { key: 'circle',   label: '○',    title: 'Circle — click center, click radius' },
+            { key: 'arc',      label: '⌒',   title: 'Arc — 3 clicks: start, midpoint, end' },
+            { key: 'rect',     label: '□',    title: 'Rectangle — click corner, click opposite' },
+            { key: 'polyline', label: '⌒╱',  title: 'Polyline — chain lines & arcs · A=arc · C=close · Enter=finish' },
           ].map(({ key, label, title }) => (
             <button key={key} title={title}
               style={{ ...S.tbBtn, ...(activeTool === key ? { background:'#1a3a1a', border:'1px solid #44aa44', color:'#88ff88' } : {}) }}

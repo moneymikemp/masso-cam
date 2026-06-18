@@ -226,6 +226,7 @@ export default function CAMCanvas() {
   const [zSliderPos, setZSliderPos] = useState(0); // 0 = all passes; 1..N = pass index
   const [isAnimating, setIsAnimating] = useState(false);
   const draggingTabRef = useRef(null); // { opId, tabIdx } when dragging a manual tab marker
+  const commitPolylineRef = useRef(null);
 
   // Unique Z levels where cutting happens, sorted shallowest → deepest.
   const zLevels = useMemo(() => {
@@ -280,7 +281,9 @@ export default function CAMCanvas() {
     if (activeTool === 'select') {
       drawStateRef.current = null;
     } else {
-      drawStateRef.current = { tool: activeTool, pts: [], dragging: false };
+      drawStateRef.current = activeTool === 'polyline'
+        ? { tool: 'polyline', pts: [], segs: [], nextSegType: 'line', arcMid: null, dragging: false }
+        : { tool: activeTool, pts: [], dragging: false };
     }
     previewRef.current = null;
     lastSnapRef.current = null;
@@ -931,7 +934,8 @@ export default function CAMCanvas() {
           const s0 = w2c(pts[0].x, pts[0].y), sc = w2c(cur.x, cur.y);
           ctx.beginPath(); ctx.moveTo(s0.x, s0.y); ctx.lineTo(sc.x, sc.y); ctx.stroke();
         } else if (pts.length === 2) {
-          const arc = arcFrom3Pts(pts[0], pts[1], cur);
+          // pts[0]=start, pts[1]=midpoint, cur=end candidate
+          const arc = arcFrom3Pts(pts[0], cur, pts[1]);
           if (arc) {
             const arcPts = arcToPoints(arc.center, arc.radius, arc.startAngle, arc.endAngle, 64);
             if (arcPts.length > 1) {
@@ -955,6 +959,48 @@ export default function CAMCanvas() {
         const tl = w2c(Math.min(pts[0].x, x2), Math.max(pts[0].y, y2));
         const br = w2c(Math.max(pts[0].x, x2), Math.min(pts[0].y, y2));
         ctx.beginPath(); ctx.strokeRect(tl.x, tl.y, br.x - tl.x, br.y - tl.y); ctx.stroke();
+        break;
+      }
+      case 'polyline': {
+        if (ds.pts.length === 0) break;
+        const plPts = ds.pts, plSegs = ds.segs || [];
+        // Draw committed segments
+        for (let i = 0; i < plSegs.length && i < plPts.length - 1; i++) {
+          const seg = plSegs[i];
+          if (seg.type === 'line') {
+            const s0 = w2c(plPts[i].x, plPts[i].y), se = w2c(plPts[i+1].x, plPts[i+1].y);
+            ctx.beginPath(); ctx.moveTo(s0.x, s0.y); ctx.lineTo(se.x, se.y); ctx.stroke();
+          } else if (seg.type === 'arc') {
+            const arc = arcFrom3Pts(plPts[i], plPts[i+1], seg.mid);
+            if (arc) {
+              const aPts = arcToPoints(arc.center, arc.radius, arc.startAngle, arc.endAngle, 48);
+              if (aPts.length > 1) {
+                const f = w2c(aPts[0].x, aPts[0].y);
+                ctx.beginPath(); ctx.moveTo(f.x, f.y);
+                for (let j = 1; j < aPts.length; j++) { const p = w2c(aPts[j].x, aPts[j].y); ctx.lineTo(p.x, p.y); }
+                ctx.stroke();
+              }
+            }
+          }
+        }
+        // Draw next-segment preview to cursor
+        const lastPt = plPts[plPts.length - 1];
+        if (ds.nextSegType === 'arc' && ds.arcMid !== null) {
+          // Have arc midpoint, preview arc from lastPt through arcMid to cursor
+          const arc = arcFrom3Pts(lastPt, cur, ds.arcMid);
+          if (arc) {
+            const aPts = arcToPoints(arc.center, arc.radius, arc.startAngle, arc.endAngle, 48);
+            if (aPts.length > 1) {
+              const f = w2c(aPts[0].x, aPts[0].y);
+              ctx.beginPath(); ctx.moveTo(f.x, f.y);
+              for (let j = 1; j < aPts.length; j++) { const p = w2c(aPts[j].x, aPts[j].y); ctx.lineTo(p.x, p.y); }
+              ctx.stroke();
+            }
+          }
+        } else {
+          const s0 = w2c(lastPt.x, lastPt.y), se = w2c(cur.x, cur.y);
+          ctx.beginPath(); ctx.moveTo(s0.x, s0.y); ctx.lineTo(se.x, se.y); ctx.stroke();
+        }
         break;
       }
     }
@@ -1130,6 +1176,12 @@ export default function CAMCanvas() {
   }, []);
 
   const onDoubleClick = useCallback((e) => {
+    // Double-click finishes polyline drawing
+    if (drawStateRef.current?.tool === 'polyline') {
+      commitPolylineRef.current?.(false);
+      return;
+    }
+
     const canvas = canvasRef.current;
     const rect = canvas.getBoundingClientRect();
     const world = c2w(e.clientX - rect.left, e.clientY - rect.top);
@@ -1178,26 +1230,58 @@ export default function CAMCanvas() {
         }
         break;
       case 'circle':
-        if (!ds.dragging) {
+        if (ds.pts.length === 0) {
           lastClickScr.current = { x: screenX ?? 0, y: screenY ?? 0 };
-          drawStateRef.current = { ...ds, pts: [snapped], dragging: true };
+          drawStateRef.current = { ...ds, pts: [snapped] };
+        } else {
+          const r = Math.hypot(snapped.x - ds.pts[0].x, snapped.y - ds.pts[0].y);
+          if (r > 0.01) dispatch({ type: 'ADD_ENTITIES', payload: [{ id: uuid(), type: 'circle', layer: '0', center: { ...ds.pts[0] }, radius: r }] });
+          drawStateRef.current = { tool: 'circle', pts: [], dragging: false };
         }
         break;
       case 'arc':
         if (ds.pts.length < 2) {
           drawStateRef.current = { ...ds, pts: [...ds.pts, snapped] };
         } else {
-          const arc = arcFrom3Pts(ds.pts[0], ds.pts[1], snapped);
+          // pts[0]=start, pts[1]=midpoint on arc, snapped=end
+          const arc = arcFrom3Pts(ds.pts[0], snapped, ds.pts[1]);
           if (arc) dispatch({ type: 'ADD_ENTITIES', payload: [{ id: uuid(), type: 'arc', layer: '0', ...arc }] });
           drawStateRef.current = { tool: 'arc', pts: [], dragging: false };
         }
         break;
       case 'rect':
-        if (!ds.dragging) {
+        if (ds.pts.length === 0) {
           lastClickScr.current = { x: screenX ?? 0, y: screenY ?? 0 };
-          drawStateRef.current = { ...ds, pts: [snapped], dragging: true };
+          drawStateRef.current = { ...ds, pts: [snapped] };
+        } else {
+          let dx = snapped.x - ds.pts[0].x, dy = snapped.y - ds.pts[0].y;
+          if (shiftHeld) { const s = Math.max(Math.abs(dx), Math.abs(dy)); dx = Math.sign(dx)*s; dy = Math.sign(dy)*s; }
+          const x2 = ds.pts[0].x + dx, y2 = ds.pts[0].y + dy;
+          if (Math.abs(dx) > 0.01 && Math.abs(dy) > 0.01) {
+            const minX = Math.min(ds.pts[0].x, x2), maxX = Math.max(ds.pts[0].x, x2);
+            const minY = Math.min(ds.pts[0].y, y2), maxY = Math.max(ds.pts[0].y, y2);
+            dispatch({ type: 'ADD_ENTITIES', payload: [{ id: uuid(), type: 'polyline', layer: '0',
+              vertices: [{ x: minX, y: minY }, { x: maxX, y: minY }, { x: maxX, y: maxY }, { x: minX, y: maxY }],
+              closed: true }] });
+          }
+          drawStateRef.current = { tool: 'rect', pts: [], dragging: false };
         }
         break;
+      case 'polyline': {
+        const segs = ds.segs || [];
+        if (ds.pts.length === 0) {
+          drawStateRef.current = { ...ds, pts: [snapped] };
+        } else if (ds.nextSegType === 'arc' && ds.arcMid === null) {
+          // First arc click: store midpoint, don't advance pts yet
+          drawStateRef.current = { ...ds, arcMid: snapped };
+        } else if (ds.nextSegType === 'arc' && ds.arcMid !== null) {
+          // Second arc click: snapped = end, arcMid already stored
+          drawStateRef.current = { ...ds, pts: [...ds.pts, snapped], segs: [...segs, { type: 'arc', mid: ds.arcMid }], arcMid: null, nextSegType: 'line' };
+        } else {
+          drawStateRef.current = { ...ds, pts: [...ds.pts, snapped], segs: [...segs, { type: 'line' }] };
+        }
+        break;
+      }
     }
     setDrawPhase(p => p + 1);
   };
@@ -1244,6 +1328,33 @@ export default function CAMCanvas() {
     setDimInput(null);
     setDrawPhase(p => p + 1);
   }
+
+  // Commit all pending polyline segments as individual line/arc entities
+  function commitPolyline(close = false) {
+    const ds = drawStateRef.current;
+    if (!ds || ds.tool !== 'polyline') return;
+    const pts = ds.pts, segs = ds.segs || [];
+    if (pts.length >= 2 && segs.length >= 1) {
+      const finalPts = close ? [...pts, pts[0]] : pts;
+      const finalSegs = close ? [...segs, { type: 'line' }] : segs;
+      const newEntities = [];
+      for (let i = 0; i < finalSegs.length && i < finalPts.length - 1; i++) {
+        const seg = finalSegs[i];
+        if (seg.type === 'line') {
+          newEntities.push({ id: uuid(), type: 'line', layer: '0', start: { ...finalPts[i] }, end: { ...finalPts[i + 1] } });
+        } else if (seg.type === 'arc') {
+          const arc = arcFrom3Pts(finalPts[i], finalPts[i + 1], seg.mid);
+          if (arc) newEntities.push({ id: uuid(), type: 'arc', layer: '0', ...arc });
+        }
+      }
+      if (newEntities.length > 0) dispatch({ type: 'ADD_ENTITIES', payload: newEntities });
+    }
+    drawStateRef.current = { tool: 'polyline', pts: [], segs: [], nextSegType: 'line', arcMid: null, dragging: false };
+    previewRef.current = null;
+    lastSnapRef.current = null;
+    setDrawPhase(p => p + 1);
+  }
+  commitPolylineRef.current = commitPolyline;
 
   // Commit coordinate input (Space dialog) as a draw click
   function commitCoordInput() {
@@ -1333,33 +1444,8 @@ export default function CAMCanvas() {
       return;
     }
 
-    // Drawing drag commit (circle, rect)
-    const ds = drawStateRef.current;
-    if (!ds?.dragging || !lastSnapRef.current) {
-      if (ds) drawStateRef.current = { ...ds, dragging: false };
-      return;
-    }
-    const { pos, shift } = lastSnapRef.current;
-
-    if (ds.tool === 'circle') {
-      const r = Math.hypot(pos.x - ds.pts[0].x, pos.y - ds.pts[0].y);
-      if (r > 0.01) dispatch({ type: 'ADD_ENTITIES', payload: [{ id: uuid(), type: 'circle', layer: '0', center: { ...ds.pts[0] }, radius: r }] });
-      drawStateRef.current = { tool: 'circle', pts: [], dragging: false };
-    } else if (ds.tool === 'rect') {
-      let dx = pos.x - ds.pts[0].x, dy = pos.y - ds.pts[0].y;
-      if (shift) { const s = Math.max(Math.abs(dx), Math.abs(dy)); dx = Math.sign(dx)*s; dy = Math.sign(dy)*s; }
-      const x2 = ds.pts[0].x + dx, y2 = ds.pts[0].y + dy;
-      if (Math.abs(dx) > 0.01 && Math.abs(dy) > 0.01) {
-        const minX = Math.min(ds.pts[0].x, x2), maxX = Math.max(ds.pts[0].x, x2);
-        const minY = Math.min(ds.pts[0].y, y2), maxY = Math.max(ds.pts[0].y, y2);
-        dispatch({ type: 'ADD_ENTITIES', payload: [{ id: uuid(), type: 'polyline', layer: '0',
-          vertices: [{ x: minX, y: minY }, { x: maxX, y: minY }, { x: maxX, y: maxY }, { x: minX, y: maxY }],
-          closed: true }] });
-      }
-      drawStateRef.current = { tool: 'rect', pts: [], dragging: false };
-    }
+    // No draw-drag commit needed (circle/rect are now click-click, not drag)
     previewRef.current = null;
-    lastSnapRef.current = null;
     setDrawPhase(p => p + 1);
   };
 
@@ -1382,6 +1468,32 @@ export default function CAMCanvas() {
         e.preventDefault();
         setCoordInput({ x: '', y: '' });
         return;
+      }
+
+      // Polyline: Enter = finish, A = arc segment, L = line segment, C = close
+      if (!inputFocused && drawStateRef.current?.tool === 'polyline') {
+        if (e.key === 'Enter') {
+          e.preventDefault();
+          commitPolylineRef.current?.(false);
+          return;
+        }
+        if (e.key.toLowerCase() === 'c') {
+          e.preventDefault();
+          commitPolylineRef.current?.(true);
+          return;
+        }
+        if (e.key.toLowerCase() === 'a') {
+          e.preventDefault();
+          drawStateRef.current = { ...drawStateRef.current, nextSegType: 'arc', arcMid: null };
+          setDrawPhase(p => p + 1);
+          return;
+        }
+        if (e.key.toLowerCase() === 'l') {
+          e.preventDefault();
+          drawStateRef.current = { ...drawStateRef.current, nextSegType: 'line', arcMid: null };
+          setDrawPhase(p => p + 1);
+          return;
+        }
       }
 
       if (inputFocused) return;
@@ -1581,12 +1693,15 @@ export default function CAMCanvas() {
       {activeTool !== 'select' && !tabPlacementActive && !dogboneSelectionActive && !textPlacementActive && (() => {
         const ds = drawStateRef.current;
         const msgs = {
-          line: ds?.pts?.length === 1 ? 'Click to set endpoint (Shift = 45°)' : 'Click to set start point',
-          circle: ds?.dragging ? 'Release to set radius' : 'Click to set center, drag to set radius',
-          arc: ds?.pts?.length === 2 ? 'Click a point on the arc' : ds?.pts?.length === 1 ? 'Click to set end point' : 'Click to set start point',
-          rect: ds?.dragging ? 'Release to set opposite corner (Shift = square)' : 'Click and drag to draw rectangle',
+          line:     ds?.pts?.length === 1 ? 'Click to set endpoint (Shift = 45°)' : 'Click to set start point',
+          circle:   ds?.pts?.length === 1 ? 'Click to set radius point (or type diameter above)' : 'Click to set center',
+          arc:      ds?.pts?.length === 2 ? 'Click to set end point' : ds?.pts?.length === 1 ? 'Click midpoint on arc' : 'Click to set start point',
+          rect:     ds?.pts?.length === 1 ? 'Click opposite corner (Shift = square, or type W/H above)' : 'Click first corner',
+          polyline: ds?.nextSegType === 'arc'
+            ? (ds?.arcMid ? 'Click arc end point · L = line mode · Enter = finish' : 'Click arc midpoint · L = line mode')
+            : (ds?.pts?.length === 0 ? 'Click to start · A = arc seg · Enter = finish · Dbl-click = finish' : 'Click to add point · A = arc · C = close · Enter = finish'),
         };
-        const labels = { line: 'Line', circle: 'Circle', arc: 'Arc', rect: 'Rectangle' };
+        const labels = { line: 'Line', circle: 'Circle', arc: 'Arc', rect: 'Rectangle', polyline: 'Polyline' };
         return (
           <div style={{ position: 'absolute', top: 8, left: '50%', transform: 'translateX(-50%)', background: 'rgba(10,30,10,0.9)', color: '#88ff88', padding: '4px 14px', borderRadius: 4, fontSize: 11, pointerEvents: 'none', border: '1px solid rgba(68,255,68,0.4)', whiteSpace: 'nowrap' }}>
             <strong>{labels[activeTool]}</strong> — {msgs[activeTool]} · Esc to cancel
