@@ -300,6 +300,7 @@ export default function CAMCanvas() {
   const commitPolylineRef = useRef(null);
   const gripDragRef = useRef(null); // { entityId, gripType, vertexIdx, curWorld, snapType }
   const [nearGrip, setNearGrip] = useState(false);
+  const polygonSidesRef = useRef(6); // persists across polygon draws
 
   // Unique Z levels where cutting happens, sorted shallowest → deepest.
   const zLevels = useMemo(() => {
@@ -356,6 +357,8 @@ export default function CAMCanvas() {
     } else {
       drawStateRef.current = activeTool === 'polyline'
         ? { tool: 'polyline', pts: [], segs: [], nextSegType: 'line', arcMid: null, dragging: false }
+        : activeTool === 'polygon'
+        ? { tool: 'polygon', pts: [], sides: polygonSidesRef.current, dragging: false }
         : { tool: activeTool, pts: [], dragging: false };
     }
     previewRef.current = null;
@@ -370,7 +373,7 @@ export default function CAMCanvas() {
   // Show/hide dim input overlay based on draw state phase
   useEffect(() => {
     const ds = drawStateRef.current;
-    const shouldShow = ds && ds.pts.length === 1 && ['line', 'circle', 'rect'].includes(ds.tool);
+    const shouldShow = ds && ds.pts.length === 1 && ['line', 'circle', 'rect', 'polygon'].includes(ds.tool);
     if (!shouldShow) {
       if (dimInputRef.current) { dimInputRef.current = null; setDimInput(null); }
       return;
@@ -383,7 +386,10 @@ export default function CAMCanvas() {
       const defaultAngle = (ds.tool === 'line' && mouse)
         ? (Math.atan2(mouse.y - anchor.y, mouse.x - anchor.x) * 180 / Math.PI).toFixed(1)
         : '0';
-      const newDI = { tool: ds.tool, anchor, screen, vals: { angle: defaultAngle } };
+      const defaultVals = ds.tool === 'polygon'
+        ? { sides: String(polygonSidesRef.current), radius: '' }
+        : { angle: defaultAngle };
+      const newDI = { tool: ds.tool, anchor, screen, vals: defaultVals };
       dimInputRef.current = newDI;
       setDimInput(newDI);
     }
@@ -1072,6 +1078,25 @@ export default function CAMCanvas() {
         ctx.beginPath(); ctx.strokeRect(tl.x, tl.y, br.x - tl.x, br.y - tl.y); ctx.stroke();
         break;
       }
+      case 'polygon': {
+        if (pts.length < 1) break;
+        const r = Math.hypot(cur.x - pts[0].x, cur.y - pts[0].y);
+        if (r < 0.01) break;
+        const n = ds.sides || polygonSidesRef.current;
+        const angle = Math.atan2(cur.y - pts[0].y, cur.x - pts[0].x);
+        ctx.beginPath();
+        for (let i = 0; i <= n; i++) {
+          const a = angle + i * 2 * Math.PI / n;
+          const p = w2c(pts[0].x + r * Math.cos(a), pts[0].y + r * Math.sin(a));
+          if (i === 0) ctx.moveTo(p.x, p.y); else ctx.lineTo(p.x, p.y);
+        }
+        ctx.stroke();
+        // Radius line
+        const rp = w2c(cur.x, cur.y);
+        const cp = w2c(pts[0].x, pts[0].y);
+        ctx.beginPath(); ctx.moveTo(cp.x, cp.y); ctx.lineTo(rp.x, rp.y); ctx.stroke();
+        break;
+      }
       case 'polyline': {
         if (ds.pts.length === 0) break;
         const plPts = ds.pts, plSegs = ds.segs || [];
@@ -1423,6 +1448,26 @@ export default function CAMCanvas() {
           drawStateRef.current = { tool: 'rect', pts: [], dragging: false };
         }
         break;
+      case 'polygon': {
+        if (ds.pts.length === 0) {
+          lastClickScr.current = { x: screenX ?? 0, y: screenY ?? 0 };
+          drawStateRef.current = { ...ds, pts: [snapped] };
+        } else {
+          const center = ds.pts[0];
+          const r = Math.hypot(snapped.x - center.x, snapped.y - center.y);
+          if (r > 0.01) {
+            const n = ds.sides || polygonSidesRef.current;
+            const angle = Math.atan2(snapped.y - center.y, snapped.x - center.x);
+            const vertices = Array.from({ length: n }, (_, i) => {
+              const a = angle + i * 2 * Math.PI / n;
+              return { x: center.x + r * Math.cos(a), y: center.y + r * Math.sin(a) };
+            });
+            dispatch({ type: 'ADD_ENTITIES', payload: [{ id: uuid(), type: 'polyline', layer: '0', vertices, closed: true }] });
+          }
+          drawStateRef.current = { tool: 'polygon', pts: [], sides: ds.sides || polygonSidesRef.current, dragging: false };
+        }
+        break;
+      }
       case 'polyline': {
         const segs = ds.segs || [];
         if (ds.pts.length === 0) {
@@ -1472,11 +1517,24 @@ export default function CAMCanvas() {
         newEntity = { id: uuid(), type: 'polyline', layer: '0', closed: true,
           vertices: [{ x: minX, y: minY }, { x: maxX, y: minY }, { x: maxX, y: maxY }, { x: minX, y: maxY }] };
       }
+    } else if (tool === 'polygon') {
+      const n = Math.round(parseFloat(vals.sides ?? '6'));
+      const r = conv(vals.radius ?? '');
+      if (!isNaN(n) && n >= 3 && !isNaN(r) && r > 0.001) {
+        polygonSidesRef.current = n;
+        const vertices = Array.from({ length: n }, (_, i) => {
+          const a = i * 2 * Math.PI / n;
+          return { x: anchor.x + r * Math.cos(a), y: anchor.y + r * Math.sin(a) };
+        });
+        newEntity = { id: uuid(), type: 'polyline', layer: '0', closed: true, vertices };
+      }
     }
 
     if (newEntity) dispatch({ type: 'ADD_ENTITIES', payload: [newEntity] });
 
-    drawStateRef.current = { tool, pts: [], dragging: false };
+    drawStateRef.current = tool === 'polygon'
+      ? { tool, pts: [], sides: polygonSidesRef.current, dragging: false }
+      : { tool, pts: [], dragging: false };
     previewRef.current = null;
     lastSnapRef.current = null;
     lastClickScr.current = null;
@@ -1883,8 +1941,9 @@ export default function CAMCanvas() {
           polyline: ds?.nextSegType === 'arc'
             ? (ds?.arcMid ? 'Click arc end point · L = line mode · Enter = finish' : 'Click arc midpoint · L = line mode')
             : (ds?.pts?.length === 0 ? 'Click to start · A = arc seg · Enter = finish · Dbl-click = finish' : 'Click to add point · A = arc · C = close · Enter = finish'),
+          polygon:  ds?.pts?.length === 1 ? 'Click to set radius (or type Sides/Radius above)' : 'Click to set center',
         };
-        const labels = { line: 'Line', circle: 'Circle', arc: 'Arc', rect: 'Rectangle', polyline: 'Polyline' };
+        const labels = { line: 'Line', circle: 'Circle', arc: 'Arc', rect: 'Rectangle', polyline: 'Polyline', polygon: 'Polygon' };
         return (
           <div style={{ position: 'absolute', top: 8, left: '50%', transform: 'translateX(-50%)', background: 'rgba(10,30,10,0.9)', color: '#88ff88', padding: '4px 14px', borderRadius: 4, fontSize: 11, pointerEvents: 'none', border: '1px solid rgba(68,255,68,0.4)', whiteSpace: 'nowrap' }}>
             <strong>{labels[activeTool]}</strong> — {msgs[activeTool]} · Esc to cancel
@@ -1917,6 +1976,10 @@ export default function CAMCanvas() {
             {tool === 'rect' && <>
               <div style={rowSt}><span style={lblSt}>Width ({unit})</span><input autoFocus style={inputSt} type="text" value={vals.width??''} onChange={e=>updateVal('width',e.target.value)} onKeyDown={onEnter} /></div>
               <div style={rowSt}><span style={lblSt}>Height ({unit})</span><input style={inputSt} type="text" value={vals.height??''} onChange={e=>updateVal('height',e.target.value)} onKeyDown={onEnter} /></div>
+            </>}
+            {tool === 'polygon' && <>
+              <div style={rowSt}><span style={lblSt}>Sides</span><input autoFocus style={inputSt} type="text" value={vals.sides??'6'} onChange={e=>updateVal('sides',e.target.value)} onKeyDown={onEnter} /></div>
+              <div style={rowSt}><span style={lblSt}>Radius ({unit})</span><input style={inputSt} type="text" value={vals.radius??''} onChange={e=>updateVal('radius',e.target.value)} onKeyDown={onEnter} /></div>
             </>}
             <div style={{ fontSize:9, color:'#445566', marginTop:3 }}>Enter to commit · Esc to freehand</div>
           </div>

@@ -15,6 +15,7 @@ const TOOL_GROUPS = [
       { key: 'arc',      label: '⌒',  title: 'Arc — start, midpoint, end' },
       { key: 'rect',     label: '□',   title: 'Rectangle — click corner, click opposite' },
       { key: 'polyline', label: '⌒╱', title: 'Polyline — A=arc seg · C=close · Enter=finish' },
+      { key: 'polygon',  label: '⬡',  title: 'Polygon — click center, set sides, click radius' },
     ],
   },
 ];
