@@ -17,6 +17,7 @@ import { traceImage, fitArcsToChain } from './cam/traceEngine';
 import InlayWizard from './components/panels/InlayWizard';
 import ToolLibraryModal from './components/panels/ToolLibraryModal';
 import MachineProfilesModal from './components/panels/MachineProfilesModal';
+import CADToolsPanel from './components/panels/CADToolsPanel';
 
 // ── Modal styles ──────────────────────────────────────────────────────────────
 const MS = {
@@ -151,7 +152,7 @@ const S = {
 
 export default function App() {
   const { state, dispatch, getProject } = useApp();
-  const { activePanelTab, statusMessage, selectedEntityIds, entities, operations, postConfig, activeTool, gridSnap, cadMode, refImage } = state;
+  const { activePanelTab, statusMessage, selectedEntityIds, entities, operations, postConfig, activeTool, cadMode, refImage } = state;
   const isInch = postConfig.units === 'inch';
   const MM_PER_INCH = 25.4;
   const [modal, setModal] = useState(null); // 'profiles' | 'tool-library' | 'about' | 'inlay-wizard'
@@ -529,22 +530,6 @@ export default function App() {
         >{cadMode ? '✏ CAD' : '⚙ CAM'}</button>
         <div style={{ width:1, background:'#2a2a50', margin:'0 4px' }} />
         <div style={{ display:'flex', gap:4, flex:1, overflow:'hidden' }}>
-          {/* Drawing tools — always visible */}
-          {[
-            { key: 'select',   label: '▲',   title: 'Select / Move / Scale / Rotate' },
-            { key: 'line',     label: '/',    title: 'Line (Space=coord, Enter=dim)' },
-            { key: 'circle',   label: '○',    title: 'Circle — click center, click radius' },
-            { key: 'arc',      label: '⌒',   title: 'Arc — 3 clicks: start, midpoint, end' },
-            { key: 'rect',     label: '□',    title: 'Rectangle — click corner, click opposite' },
-            { key: 'polyline', label: '⌒╱',  title: 'Polyline — chain lines & arcs · A=arc · C=close · Enter=finish' },
-          ].map(({ key, label, title }) => (
-            <button key={key} title={title}
-              style={{ ...S.tbBtn, ...(activeTool === key ? { background:'#1a3a1a', border:'1px solid #44aa44', color:'#88ff88' } : {}) }}
-              onClick={() => dispatch({ type: 'SET_ACTIVE_TOOL', payload: key })}
-            >{label}</button>
-          ))}
-          <button title="Grid snap (10mm grid)" style={{ ...S.tbBtn, ...(gridSnap ? { background:'#1a2a3a', border:'1px solid #4488aa', color:'#88ccff' } : {}) }} onClick={() => dispatch({ type: 'TOGGLE_GRID_SNAP' })}>⊞</button>
-
           {/* CAD-mode-only tools */}
           {cadMode && <>
             <div style={{ width:1, background:'#2a2a50', margin:'0 2px' }} />
@@ -593,7 +578,12 @@ export default function App() {
       </div>
 
       <div style={S.main}>
-        <div style={S.leftPanel}><LayersPanel /></div>
+        <div style={S.leftPanel}>
+          <div style={{ flex: 1, overflow: 'hidden', display: 'flex', flexDirection: 'column' }}>
+            <LayersPanel />
+          </div>
+          <CADToolsPanel />
+        </div>
         <div style={S.canvas}><CAMCanvas /></div>
         <div style={S.rightPanel}>
           <div style={S.tabBar}>

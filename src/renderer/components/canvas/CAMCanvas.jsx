@@ -105,17 +105,27 @@ function getEntitySnapPoints(e) {
 
 function getEntityGrips(entity) {
   switch (entity.type) {
-    case 'line':
+    case 'line': {
+      const mx = (entity.start.x + entity.end.x) / 2, my = (entity.start.y + entity.end.y) / 2;
       return [
         { x: entity.start.x, y: entity.start.y, gripType: 'start' },
         { x: entity.end.x,   y: entity.end.y,   gripType: 'end'   },
+        { x: mx, y: my, gripType: 'mid' },
       ];
+    }
     case 'circle':
       return [{ x: entity.center.x, y: entity.center.y, gripType: 'center' }];
     case 'arc': {
       const sp = { x: entity.center.x + entity.radius * Math.cos(entity.startAngle), y: entity.center.y + entity.radius * Math.sin(entity.startAngle) };
       const ep = { x: entity.center.x + entity.radius * Math.cos(entity.endAngle),   y: entity.center.y + entity.radius * Math.sin(entity.endAngle) };
-      return [{ ...sp, gripType: 'start' }, { ...ep, gripType: 'end' }];
+      let span = entity.endAngle - entity.startAngle; while (span < 0) span += 2 * Math.PI;
+      const ma = entity.startAngle + span / 2;
+      const mp = { x: entity.center.x + entity.radius * Math.cos(ma), y: entity.center.y + entity.radius * Math.sin(ma) };
+      return [
+        { ...sp, gripType: 'start' },
+        { ...ep, gripType: 'end'   },
+        { ...mp, gripType: 'mid'   },
+      ];
     }
     case 'polyline':
       return (entity.vertices || []).map((v, i) => ({ x: v.x, y: v.y, gripType: 'vertex', vertexIdx: i }));
@@ -124,26 +134,34 @@ function getEntityGrips(entity) {
   }
 }
 
-// arcMid: geometric midpoint of arc at drag start (kept fixed during arc-endpoint drag)
-// arcOther: the other endpoint of the arc (kept fixed during arc-endpoint drag)
+// arcMid/arcOther: saved at drag start for arc-endpoint drags (see onMouseDown)
 function applyGrip(entity, gripType, vertexIdx, newPos, arcMid, arcOther) {
   switch (entity.type) {
     case 'line':
       if (gripType === 'start') return { ...entity, start: { x: newPos.x, y: newPos.y } };
       if (gripType === 'end')   return { ...entity, end:   { x: newPos.x, y: newPos.y } };
+      if (gripType === 'mid') {
+        // Translate the whole line by the delta from its current midpoint
+        const mx = (entity.start.x + entity.end.x) / 2, my = (entity.start.y + entity.end.y) / 2;
+        const dx = newPos.x - mx, dy = newPos.y - my;
+        return { ...entity, start: { x: entity.start.x + dx, y: entity.start.y + dy }, end: { x: entity.end.x + dx, y: entity.end.y + dy } };
+      }
       break;
     case 'circle':
       if (gripType === 'center') return { ...entity, center: { x: newPos.x, y: newPos.y } };
       break;
     case 'arc':
-      if (gripType === 'start' || gripType === 'end') {
-        if (arcMid && arcOther) {
-          // Recompute full arc geometry: dragged endpoint + fixed midpoint + fixed other endpoint
-          const p1 = gripType === 'start' ? newPos   : arcOther;
-          const p2 = gripType === 'start' ? arcOther : newPos;
-          const arc = arcFrom3Pts(p1, p2, arcMid);
-          if (arc) return { ...entity, center: arc.center, radius: arc.radius, startAngle: arc.startAngle, endAngle: arc.endAngle };
-        }
+      if ((gripType === 'start' || gripType === 'end') && arcMid && arcOther) {
+        const p1 = gripType === 'start' ? newPos   : arcOther;
+        const p2 = gripType === 'start' ? arcOther : newPos;
+        const arc = arcFrom3Pts(p1, p2, arcMid);
+        if (arc) return { ...entity, center: arc.center, radius: arc.radius, startAngle: arc.startAngle, endAngle: arc.endAngle };
+      }
+      if (gripType === 'mid' && arcMid && arcOther) {
+        // arcOther here is the arc's start point; arcMid is the arc's end point
+        // Pull arc through new midpoint, keeping start and end endpoints fixed
+        const arc = arcFrom3Pts(arcOther, arcMid, newPos);
+        if (arc) return { ...entity, center: arc.center, radius: arc.radius, startAngle: arc.startAngle, endAngle: arc.endAngle };
       }
       break;
     case 'polyline':
@@ -573,17 +591,23 @@ export default function CAMCanvas() {
         const sz = 7;
         for (const grip of grips) {
           const s = w2c(grip.x, grip.y);
-          const isCenter = grip.gripType === 'center';
-          ctx.fillStyle = isCenter ? '#44ff88' : '#ffcc44';
           ctx.strokeStyle = '#0a0a20';
           ctx.lineWidth = 1;
           ctx.setLineDash([]);
-          if (isCenter) {
+          if (grip.gripType === 'center') {
+            ctx.fillStyle = '#44ff88'; // green diamond — circle/arc center
+            ctx.beginPath();
+            ctx.moveTo(s.x, s.y - sz / 2); ctx.lineTo(s.x + sz / 2, s.y);
+            ctx.lineTo(s.x, s.y + sz / 2); ctx.lineTo(s.x - sz / 2, s.y);
+            ctx.closePath(); ctx.fill(); ctx.stroke();
+          } else if (grip.gripType === 'mid') {
+            ctx.fillStyle = '#44ddff'; // cyan diamond — midpoint (move line / pull arc)
             ctx.beginPath();
             ctx.moveTo(s.x, s.y - sz / 2); ctx.lineTo(s.x + sz / 2, s.y);
             ctx.lineTo(s.x, s.y + sz / 2); ctx.lineTo(s.x - sz / 2, s.y);
             ctx.closePath(); ctx.fill(); ctx.stroke();
           } else {
+            ctx.fillStyle = '#ffcc44'; // yellow square — endpoints
             ctx.fillRect(s.x - sz / 2, s.y - sz / 2, sz, sz);
             ctx.strokeRect(s.x - sz / 2, s.y - sz / 2, sz, sz);
           }
@@ -1211,14 +1235,18 @@ export default function CAMCanvas() {
         for (const grip of getEntityGrips(entity)) {
           if (Math.hypot(grip.x - world.x, grip.y - world.y) < snapR) {
             let arcMid = null, arcOther = null;
-            if (entity.type === 'arc' && (grip.gripType === 'start' || grip.gripType === 'end')) {
-              let span = entity.endAngle - entity.startAngle;
-              if (span < 0) span += 2 * Math.PI;
+            if (entity.type === 'arc') {
+              const sp = { x: entity.center.x + entity.radius * Math.cos(entity.startAngle), y: entity.center.y + entity.radius * Math.sin(entity.startAngle) };
+              const ep = { x: entity.center.x + entity.radius * Math.cos(entity.endAngle),   y: entity.center.y + entity.radius * Math.sin(entity.endAngle) };
+              let span = entity.endAngle - entity.startAngle; if (span < 0) span += 2 * Math.PI;
               const ma = entity.startAngle + span / 2;
-              arcMid = { x: entity.center.x + entity.radius * Math.cos(ma), y: entity.center.y + entity.radius * Math.sin(ma) };
-              arcOther = grip.gripType === 'start'
-                ? { x: entity.center.x + entity.radius * Math.cos(entity.endAngle),   y: entity.center.y + entity.radius * Math.sin(entity.endAngle) }
-                : { x: entity.center.x + entity.radius * Math.cos(entity.startAngle), y: entity.center.y + entity.radius * Math.sin(entity.startAngle) };
+              const mp = { x: entity.center.x + entity.radius * Math.cos(ma), y: entity.center.y + entity.radius * Math.sin(ma) };
+              if (grip.gripType === 'start') { arcMid = mp; arcOther = ep; }
+              else if (grip.gripType === 'end') { arcMid = mp; arcOther = sp; }
+              else if (grip.gripType === 'mid') {
+                // reuse arcOther=start, arcMid=end so applyGrip can call arcFrom3Pts(start, end, newMid)
+                arcOther = sp; arcMid = ep;
+              }
             }
             gripDragRef.current = { entityId: entity.id, gripType: grip.gripType, vertexIdx: grip.vertexIdx ?? null, curWorld: null, snapType: null, arcMid, arcOther };
             e.preventDefault();

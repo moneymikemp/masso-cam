@@ -2,7 +2,7 @@ import React from 'react';
 import { useApp } from '../../store/AppContext';
 
 const S = {
-  panel: { height: '100%', display: 'flex', flexDirection: 'column', background: '#13132a', color: '#ccc' },
+  panel: { flex: 1, minHeight: 0, display: 'flex', flexDirection: 'column', background: '#13132a', color: '#ccc', overflow: 'hidden' },
   header: { padding: '8px 10px', borderBottom: '1px solid #2a2a50', fontSize: 12, fontWeight: 600, color: '#8888bb', textTransform: 'uppercase', letterSpacing: 1 },
   list: { flex: 1, overflow: 'auto' },
   row: { padding: '5px 8px', display: 'flex', alignItems: 'center', gap: 6, cursor: 'pointer' },
