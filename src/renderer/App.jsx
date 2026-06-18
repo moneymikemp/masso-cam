@@ -7,6 +7,7 @@ import LayersPanel from './components/panels/LayersPanel';
 import GcodePanel from './components/panels/GcodePanel';
 import StockPanel from './components/panels/StockPanel';
 import { parseDxf, getBounds } from './dxf/parser';
+import { exportDxf as generateDxf } from './dxf/exporter';
 import { generateGcode, generateGcodeByTool } from './gcode/postprocessor';
 import InlayWizard from './components/panels/InlayWizard';
 import ToolLibraryModal from './components/panels/ToolLibraryModal';
@@ -183,6 +184,7 @@ export default function App() {
     return window.electron.onMenu(async (event, ...args) => {
       switch (event) {
         case 'menu-import-dxf':       importDxf(); break;
+        case 'menu-export-dxf':       exportDxfFile(); break;
         case 'menu-export-gcode':     exportGcode(); break;
         case 'menu-zoom-fit':         dispatch({ type: 'RESET_VIEWPORT' }); break;
         case 'menu-toggle-toolpaths': dispatch({ type: 'TOGGLE_TOOLPATHS' }); break;
@@ -236,6 +238,29 @@ export default function App() {
       dispatch({ type: 'SET_STATUS', payload: 'DXF import failed: ' + err.message });
     }
   }, [dispatch]);
+
+  const exportDxfFile = useCallback(async () => {
+    if (entities.length === 0) {
+      dispatch({ type: 'SET_STATUS', payload: 'No entities to export' });
+      return;
+    }
+    const dxfContent = generateDxf(entities, state.layers);
+    if (window.electron) {
+      const savePath = await window.electron.saveDxf('export.dxf');
+      if (savePath) {
+        await window.electron.writeFile(savePath, dxfContent);
+        dispatch({ type: 'SET_STATUS', payload: `DXF exported: ${savePath.split(/[\\/]/).pop()}` });
+      }
+    } else {
+      const blob = new Blob([dxfContent], { type: 'application/dxf' });
+      const a = document.createElement('a');
+      a.href = URL.createObjectURL(blob);
+      a.download = 'export.dxf';
+      a.click();
+      URL.revokeObjectURL(a.href);
+      dispatch({ type: 'SET_STATUS', payload: 'DXF exported' });
+    }
+  }, [entities, state.layers, dispatch]);
 
   const exportGcode = useCallback(async () => {
     const enabled = operations.filter(op => op.enabled && op.toolpath?.moves?.length > 0);
@@ -372,6 +397,7 @@ export default function App() {
         <img src={`${process.env.PUBLIC_URL}/dmdcam-logo.png`} alt="DMDCAM" style={{ height:22, objectFit:'contain', marginRight:8, flexShrink:0 }} />
         <div style={{ display:'flex', gap:4, flex:1 }}>
           <button style={S.tbBtn} onClick={importDxf}>📐 Import DXF</button>
+          <button style={S.tbBtn} onClick={exportDxfFile} title="Export all entities as DXF (Ctrl+Shift+D)">⬡ Export DXF</button>
           <button style={S.tbBtn} onClick={exportGcode}>💾 Export G-code</button>
           <button style={{ ...S.tbBtn, borderColor:'#3a4a2a', color:'#99cc88' }} onClick={() => setModal('inlay-wizard')}>⬡ Inlay Wizard</button>
           <div style={{ width:1, background:'#2a2a50', margin:'0 4px' }} />
