@@ -99,7 +99,7 @@ export default function OperationParams({ op, tools, operations = [], onChange }
       if (!fontBytes) { setGeneratingGeometry(false); return; }
       const ab = fontBytes.buffer.slice(fontBytes.byteOffset, fontBytes.byteOffset + fontBytes.byteLength);
       const font = loadFontFromArrayBuffer(ab);
-      const capHeightMm = isInch ? (p.fontSize ?? 10) * MM_PER_INCH : (p.fontSize ?? 10);
+      const capHeightMm = p.fontSize ?? 10; // always stored in mm via toMM()
       const glyphGroups = textToGlyphContours(font, p.text, capHeightMm);
       const bounds = getTextBounds(glyphGroups);
       onChange({ params: { ...p, textContoursRel: glyphGroups, textBoundsRel: bounds } });
