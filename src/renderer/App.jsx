@@ -1,4 +1,5 @@
-import React, { useEffect, useCallback, useState } from 'react';
+import React, { useEffect, useCallback, useState, useRef } from 'react';
+import { v4 as uuid } from 'uuid';
 import { useApp } from './store/AppContext';
 import CAMCanvas from './components/canvas/CAMCanvas';
 import OperationsPanel from './components/panels/OperationsPanel';
@@ -6,9 +7,13 @@ import ToolLibraryPanel from './components/panels/ToolLibraryPanel';
 import LayersPanel from './components/panels/LayersPanel';
 import GcodePanel from './components/panels/GcodePanel';
 import StockPanel from './components/panels/StockPanel';
+import CADPropertiesPanel from './components/panels/CADPropertiesPanel';
+import ArrayModal from './components/modals/ArrayModal';
 import { parseDxf, getBounds } from './dxf/parser';
 import { exportDxf as generateDxf } from './dxf/exporter';
 import { generateGcode, generateGcodeByTool } from './gcode/postprocessor';
+import { offsetEntity } from './cam/offsetEngine';
+import { traceImage } from './cam/traceEngine';
 import InlayWizard from './components/panels/InlayWizard';
 import ToolLibraryModal from './components/panels/ToolLibraryModal';
 import MachineProfilesModal from './components/panels/MachineProfilesModal';
@@ -146,8 +151,13 @@ const S = {
 
 export default function App() {
   const { state, dispatch, getProject } = useApp();
-  const { activePanelTab, statusMessage, selectedEntityIds, entities, operations, postConfig, activeTool, gridSnap } = state;
+  const { activePanelTab, statusMessage, selectedEntityIds, entities, operations, postConfig, activeTool, gridSnap, cadMode, refImage } = state;
+  const isInch = postConfig.units === 'inch';
+  const MM_PER_INCH = 25.4;
   const [modal, setModal] = useState(null); // 'profiles' | 'tool-library' | 'about' | 'inlay-wizard'
+  const [showArrayModal, setShowArrayModal] = useState(false);
+  const [offsetModal, setOffsetModal] = useState(null); // null | { distance: '', direction: 'both' }
+  const refImageElRef = useRef(null); // cached HTMLImageElement for tracing
 
   useEffect(() => {
     if (window.electron) {
@@ -199,6 +209,7 @@ export default function App() {
         case 'menu-save-project':     saveProject(false); break;
         case 'menu-save-project-as':  saveProject(true); break;
         case 'menu-select-all':       dispatch({ type: 'SELECT_ENTITIES', payload: entities.map(e => e.id) }); break;
+        case 'menu-import-image':     importRefImage(); break;
       }
     });
   }, [state, entities, operations]);
@@ -341,6 +352,71 @@ export default function App() {
     dispatch({ type: 'SET_STATUS', payload: `Exported: ${saved.join(', ')}` });
   }, [operations, state.postConfig, state.stockConfig, state.tools, dispatch]);
 
+  const importRefImage = useCallback(async () => {
+    let dataUrl;
+    if (window.electron) {
+      dataUrl = await window.electron.openImage();
+    } else {
+      dataUrl = await new Promise((res, rej) => {
+        const inp = document.createElement('input');
+        inp.type = 'file'; inp.accept = 'image/*';
+        inp.onchange = ev => {
+          const f = ev.target.files[0]; if (!f) return rej();
+          const r = new FileReader();
+          r.onload = e => res(e.target.result);
+          r.readAsDataURL(f);
+        };
+        inp.click();
+      });
+    }
+    if (!dataUrl) return;
+    // Load the image to get natural dimensions
+    const img = new Image();
+    img.onload = () => {
+      refImageElRef.current = img;
+      // Default scale: fit the image into ~200mm wide area
+      const mmPerPixel = Math.min(0.5, 200 / (img.naturalWidth || 1));
+      dispatch({ type: 'SET_REF_IMAGE', payload: { dataUrl, x: 0, y: 0, mmPerPixel, opacity: 0.35 } });
+      dispatch({ type: 'SET_STATUS', payload: `Reference image loaded (${img.naturalWidth}×${img.naturalHeight}px)` });
+    };
+    img.src = dataUrl;
+  }, [dispatch]);
+
+  const runAutoTrace = useCallback(async () => {
+    if (!refImage || !refImageElRef.current) {
+      dispatch({ type: 'SET_STATUS', payload: 'Load a reference image first' });
+      return;
+    }
+    dispatch({ type: 'SET_STATUS', payload: 'Tracing…' });
+    try {
+      const polylines = traceImage(refImageElRef.current, refImage, 0.5, 1.5);
+      if (!polylines.length) { dispatch({ type: 'SET_STATUS', payload: 'Trace found no outlines (try adjusting threshold)' }); return; }
+      const newEntities = polylines.map(verts => ({ id: uuid(), type: 'polyline', layer: '0', vertices: verts, closed: true }));
+      dispatch({ type: 'ADD_ENTITIES', payload: newEntities });
+      dispatch({ type: 'SET_STATUS', payload: `Traced ${polylines.length} outline${polylines.length > 1 ? 's' : ''}` });
+    } catch (err) {
+      dispatch({ type: 'SET_STATUS', payload: 'Trace failed: ' + err.message });
+    }
+  }, [refImage, dispatch]);
+
+  function runOffset(distance, direction) {
+    const sel = entities.filter(e => selectedEntityIds.includes(e.id));
+    if (!sel.length) return;
+    const newEnts = [];
+    const dirs = direction === 'both' ? [distance, -distance] : direction === 'expand' ? [distance] : [-distance];
+    for (const d of dirs) {
+      for (const e of sel) {
+        const o = offsetEntity(e, d);
+        if (o) newEnts.push({ ...o, id: uuid() });
+      }
+    }
+    if (newEnts.length) {
+      dispatch({ type: 'ADD_ENTITIES', payload: newEnts });
+      dispatch({ type: 'SET_STATUS', payload: `Offset created ${newEnts.length} entit${newEnts.length > 1 ? 'ies' : 'y'}` });
+    }
+    setOffsetModal(null);
+  }
+
   const newProject = useCallback(() => {
     if (state.dirty && !window.confirm('Discard unsaved changes?')) return;
     dispatch({ type: 'LOAD_PROJECT', payload: {} });
@@ -381,6 +457,43 @@ export default function App() {
       {modal === 'profiles' && <MachineProfilesModal onClose={() => setModal(null)} />}
       {modal === 'about' && <AboutModal onClose={() => setModal(null)} />}
       {modal === 'tool-library' && <ToolLibraryModal onClose={() => setModal(null)} />}
+      {showArrayModal && selectedEntityIds.length > 0 && (
+        <ArrayModal
+          selectedEntityIds={selectedEntityIds}
+          entities={entities}
+          isInch={isInch}
+          dispatch={dispatch}
+          onClose={() => setShowArrayModal(false)}
+        />
+      )}
+      {offsetModal && (
+        <div style={MS.overlay} onClick={() => { dispatch({ type:'SET_PREVIEW_ENTITIES', payload:[] }); setOffsetModal(null); }}>
+          <div style={{ ...MS.box, minWidth:320 }} onClick={e => e.stopPropagation()}>
+            <div style={MS.title}>Offset Entities</div>
+            <div style={MS.grid}>
+              <Field label={`Distance (${isInch?'in':'mm'})`}>
+                <input style={MS.input} type="number" step={isInch?0.001:0.1} min={0} value={offsetModal.distance}
+                  onChange={e => setOffsetModal(m => ({ ...m, distance: e.target.value }))} />
+              </Field>
+              <Field label="Direction">
+                <select style={MS.select} value={offsetModal.direction} onChange={e => setOffsetModal(m => ({ ...m, direction: e.target.value }))}>
+                  <option value="expand">Expand (+)</option>
+                  <option value="shrink">Shrink (−)</option>
+                  <option value="both">Both sides</option>
+                </select>
+              </Field>
+            </div>
+            <div style={{ fontSize:10, color:'#555577', marginBottom:10 }}>
+              {selectedEntityIds.length} entit{selectedEntityIds.length>1?'ies':'y'} selected.
+              Lines offset perpendicular; circles/arcs offset radially.
+            </div>
+            <div style={MS.btnRow}>
+              <button style={{ ...MS.btn, ...MS.btnSecondary }} onClick={() => { dispatch({ type:'SET_PREVIEW_ENTITIES', payload:[] }); setOffsetModal(null); }}>Cancel</button>
+              <button style={{ ...MS.btn, ...MS.btnPrimary }} onClick={() => runOffset(isInch ? parseFloat(offsetModal.distance)*MM_PER_INCH : parseFloat(offsetModal.distance), offsetModal.direction)}>Apply</button>
+            </div>
+          </div>
+        </div>
+      )}
       {modal === 'inlay-wizard' && (
         <InlayWizard
           onClose={() => setModal(null)}
@@ -394,44 +507,73 @@ export default function App() {
 
       {/* Top Toolbar */}
       <div style={S.topbar}>
-        <img src={`${process.env.PUBLIC_URL}/dmdcam-logo.png`} alt="DMDCAM" style={{ height:22, objectFit:'contain', marginRight:8, flexShrink:0 }} />
-        <div style={{ display:'flex', gap:4, flex:1 }}>
-          <button style={S.tbBtn} onClick={importDxf}>📐 Import DXF</button>
-          <button style={S.tbBtn} onClick={exportDxfFile} title="Export all entities as DXF (Ctrl+Shift+D)">⬡ Export DXF</button>
-          <button style={S.tbBtn} onClick={exportGcode}>💾 Export G-code</button>
-          <button style={{ ...S.tbBtn, borderColor:'#3a4a2a', color:'#99cc88' }} onClick={() => setModal('inlay-wizard')}>⬡ Inlay Wizard</button>
-          <div style={{ width:1, background:'#2a2a50', margin:'0 4px' }} />
-          {/* Drawing tools */}
+        <img src={`${process.env.PUBLIC_URL}/dmdcam-logo.png`} alt="DMDCAM" style={{ height:22, objectFit:'contain', marginRight:4, flexShrink:0 }} />
+        {/* CAD / CAM mode toggle */}
+        <button
+          title="Toggle CAD / CAM mode"
+          style={{ ...S.tbBtn, ...(cadMode ? { background:'#1a2a3a', border:'1px solid #4488cc', color:'#88ccff', fontWeight:700 } : { border:'1px solid #2a4a2a', color:'#88aa88' }) }}
+          onClick={() => dispatch({ type: 'TOGGLE_CAD_MODE' })}
+        >{cadMode ? '✏ CAD' : '⚙ CAM'}</button>
+        <div style={{ width:1, background:'#2a2a50', margin:'0 4px' }} />
+        <div style={{ display:'flex', gap:4, flex:1, overflow:'hidden' }}>
+          {/* Drawing tools — always visible */}
           {[
-            { key: 'select',   label: '▲ Select',  title: 'Select / Move / Scale / Rotate' },
-            { key: 'line',     label: '/ Line',    title: 'Line tool — click start, click end (Shift=45°)' },
-            { key: 'circle',   label: '○ Circle',  title: 'Circle tool — click center, drag radius' },
-            { key: 'arc',      label: '⌒ Arc',     title: 'Arc tool — 3-point arc: start, end, midpoint' },
-            { key: 'rect',     label: '□ Rect',    title: 'Rectangle tool — click and drag (Shift=square)' },
+            { key: 'select', label: '▲',  title: 'Select / Move / Scale / Rotate' },
+            { key: 'line',   label: '/',   title: 'Line (Space=coord, Enter=dim)' },
+            { key: 'circle', label: '○',   title: 'Circle — click center, drag or type diameter' },
+            { key: 'arc',    label: '⌒',  title: 'Arc — 3-point: start, end, midpoint' },
+            { key: 'rect',   label: '□',   title: 'Rectangle — drag or type W/H' },
           ].map(({ key, label, title }) => (
-            <button
-              key={key}
-              title={title}
+            <button key={key} title={title}
               style={{ ...S.tbBtn, ...(activeTool === key ? { background:'#1a3a1a', border:'1px solid #44aa44', color:'#88ff88' } : {}) }}
               onClick={() => dispatch({ type: 'SET_ACTIVE_TOOL', payload: key })}
             >{label}</button>
           ))}
-          <button
-            title="Grid snap (10mm grid)"
-            style={{ ...S.tbBtn, ...(gridSnap ? { background:'#1a2a3a', border:'1px solid #4488aa', color:'#88ccff' } : {}) }}
-            onClick={() => dispatch({ type: 'TOGGLE_GRID_SNAP' })}
-          >⊞ Snap</button>
-          <div style={{ width:1, background:'#2a2a50', margin:'0 4px' }} />
-          <button style={{ ...S.tbBtn, ...(state.showToolpaths ? S.tbBtnActive : {}) }} onClick={() => dispatch({ type: 'TOGGLE_TOOLPATHS' })}>⬡ Paths</button>
-          <button style={{ ...S.tbBtn, ...(state.showRapids ? S.tbBtnActive : {}) }} onClick={() => dispatch({ type: 'TOGGLE_RAPIDS' })}>↗ Rapids</button>
-          <div style={{ width:1, background:'#2a2a50', margin:'0 4px' }} />
-          <button style={S.tbBtn} onClick={() => setModal('profiles')} title="Machine profiles &amp; post processor settings">
-            Post <span style={S.unitBadge}>{unitsLabel}</span>
-          </button>
-          <button style={S.tbBtn} onClick={() => setModal('profiles')}>Machine</button>
+          <button title="Grid snap (10mm grid)" style={{ ...S.tbBtn, ...(gridSnap ? { background:'#1a2a3a', border:'1px solid #4488aa', color:'#88ccff' } : {}) }} onClick={() => dispatch({ type: 'TOGGLE_GRID_SNAP' })}>⊞</button>
+
+          {/* CAD-mode-only tools */}
+          {cadMode && <>
+            <div style={{ width:1, background:'#2a2a50', margin:'0 2px' }} />
+            <button title="Offset selected entities (O)" style={{ ...S.tbBtn, ...(selectedEntityIds.length === 0 ? { opacity:0.4 } : {}) }}
+              onClick={() => selectedEntityIds.length > 0 && setOffsetModal({ distance: isInch ? '0.1' : '2', direction: 'expand' })}>± Offset</button>
+            <button title="Array (rectangular or circular)" style={{ ...S.tbBtn, ...(selectedEntityIds.length === 0 ? { opacity:0.4 } : {}) }}
+              onClick={() => selectedEntityIds.length > 0 && setShowArrayModal(true)}>⊞ Array</button>
+            <div style={{ width:1, background:'#2a2a50', margin:'0 2px' }} />
+            <button title="Import reference image (JPG/PNG)" style={S.tbBtn} onClick={importRefImage}>🖼 Ref Img</button>
+            {refImage && <>
+              <button title="Auto-trace reference image to polylines" style={{ ...S.tbBtn, borderColor:'#3a5a3a', color:'#88cc88' }} onClick={runAutoTrace}>⟳ Trace</button>
+              <button title="Clear reference image" style={{ ...S.tbBtn, borderColor:'#5a3a3a', color:'#cc8888' }} onClick={() => { dispatch({ type:'SET_REF_IMAGE', payload:null }); refImageElRef.current = null; }}>✕ Img</button>
+              <span style={{ fontSize:10, color:'#556688', display:'flex', alignItems:'center', gap:4 }}>
+                <span>Opacity</span>
+                <input type="range" min={5} max={80} value={Math.round((refImage.opacity??0.35)*100)} style={{ width:60, accentColor:'#5566aa' }}
+                  onChange={e => dispatch({ type:'UPDATE_REF_IMAGE', payload:{ opacity: +e.target.value/100 } })} />
+                <span>Scale</span>
+                <input type="range" min={1} max={200} value={Math.round((refImage.mmPerPixel||0.1)*100)} style={{ width:60, accentColor:'#5566aa' }}
+                  onChange={e => dispatch({ type:'UPDATE_REF_IMAGE', payload:{ mmPerPixel: +e.target.value/100 } })} />
+              </span>
+            </>}
+          </>}
+
+          {/* CAM-mode-only tools */}
+          {!cadMode && <>
+            <div style={{ width:1, background:'#2a2a50', margin:'0 4px' }} />
+            <button style={S.tbBtn} onClick={importDxf}>📐 Import DXF</button>
+            <button style={S.tbBtn} onClick={exportDxfFile} title="Export all entities as DXF (Ctrl+Shift+D)">⬡ Export DXF</button>
+            <button style={S.tbBtn} onClick={exportGcode}>💾 G-code</button>
+            <button style={{ ...S.tbBtn, borderColor:'#3a4a2a', color:'#99cc88' }} onClick={() => setModal('inlay-wizard')}>⬡ Inlay</button>
+            <div style={{ width:1, background:'#2a2a50', margin:'0 4px' }} />
+            <button style={{ ...S.tbBtn, ...(state.showToolpaths ? S.tbBtnActive : {}) }} onClick={() => dispatch({ type: 'TOGGLE_TOOLPATHS' })}>⬡ Paths</button>
+            <button style={{ ...S.tbBtn, ...(state.showRapids ? S.tbBtnActive : {}) }} onClick={() => dispatch({ type: 'TOGGLE_RAPIDS' })}>↗ Rapids</button>
+            <div style={{ width:1, background:'#2a2a50', margin:'0 4px' }} />
+            <button style={S.tbBtn} onClick={() => setModal('profiles')} title="Machine profiles &amp; post processor settings">
+              Post <span style={S.unitBadge}>{unitsLabel}</span>
+            </button>
+            <button style={S.tbBtn} onClick={() => setModal('profiles')}>Machine</button>
+          </>}
+
           <div style={{ flex:1 }} />
-          <span style={{ fontSize:10, color:'#444466' }}>
-            {enabledOpsCount > 0 ? `${calculatedCount}/${enabledOpsCount} ops calculated` : ''}
+          <span style={{ fontSize:10, color:'#444466', flexShrink:0 }}>
+            {!cadMode && enabledOpsCount > 0 ? `${calculatedCount}/${enabledOpsCount} ops` : ''}
           </span>
         </div>
       </div>
@@ -441,6 +583,7 @@ export default function App() {
         <div style={S.canvas}><CAMCanvas /></div>
         <div style={S.rightPanel}>
           <div style={S.tabBar}>
+            {cadMode && <div style={S.tab(activePanelTab === 'props')} onClick={() => dispatch({ type: 'SET_PANEL_TAB', payload: 'props' })}>Props</div>}
             {[['operations','Ops'],['tools','Tools'],['stock','Stock'],['gcode','G-code']].map(([tab, label]) => (
               <div key={tab} style={S.tab(activePanelTab === tab)} onClick={() => dispatch({ type: 'SET_PANEL_TAB', payload: tab })}>{label}</div>
             ))}
@@ -449,6 +592,7 @@ export default function App() {
             <div style={S.selInfo}>{selectedEntityIds.length} entities selected (Ctrl+click to add)</div>
           )}
           <div style={{ flex:1, overflow:'hidden', display:'flex', flexDirection:'column' }}>
+            {activePanelTab === 'props'      && <CADPropertiesPanel />}
             {activePanelTab === 'operations' && <OperationsPanel />}
             {activePanelTab === 'tools'      && <ToolLibraryPanel />}
             {activePanelTab === 'stock'      && <StockPanel />}

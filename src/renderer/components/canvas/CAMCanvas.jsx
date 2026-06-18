@@ -103,10 +103,24 @@ function getEntitySnapPoints(e) {
   return pts;
 }
 
+function lineLineIntersect(e1, e2) {
+  if (e1.type !== 'line' || e2.type !== 'line') return null;
+  const a = e1.start, b = e1.end, c = e2.start, d = e2.end;
+  const d1x = b.x-a.x, d1y = b.y-a.y, d2x = d.x-c.x, d2y = d.y-c.y;
+  const denom = d1x*d2y - d1y*d2x;
+  if (Math.abs(denom) < 1e-10) return null;
+  const t = ((c.x-a.x)*d2y - (c.y-a.y)*d2x) / denom;
+  const u = ((c.x-a.x)*d1y - (c.y-a.y)*d1x) / denom;
+  if (t < 0 || t > 1 || u < 0 || u > 1) return null;
+  return { x: a.x + t*d1x, y: a.y + t*d1y, snapType: 'intersection' };
+}
+
 function snapEntities(world, entities, layers, radius) {
-  // Priority: endpoint > center > midpoint
-  const priority = { endpoint: 0, center: 1, midpoint: 2 };
+  // Priority: endpoint > center > intersection > midpoint
+  const priority = { endpoint: 0, center: 1, intersection: 2, midpoint: 3 };
   let best = null, bestDist = Infinity, bestPri = 99;
+
+  const visLines = [];
   for (const e of entities) {
     const layer = layers[e.layer];
     if (layer && !layer.visible) continue;
@@ -118,7 +132,21 @@ function snapEntities(world, entities, layers, radius) {
         best = { x: pt.x, y: pt.y, snapType: type };
       }
     }
+    if (e.type === 'line') visLines.push(e);
   }
+
+  // Line-line intersection snap (only among nearby lines)
+  if (visLines.length >= 2 && bestPri > priority.intersection) {
+    for (let i = 0; i < visLines.length; i++) {
+      for (let j = i + 1; j < visLines.length; j++) {
+        const pt = lineLineIntersect(visLines[i], visLines[j]);
+        if (!pt) continue;
+        const d = Math.hypot(pt.x - world.x, pt.y - world.y);
+        if (d < radius && d < bestDist) { bestDist = d; bestPri = priority.intersection; best = pt; }
+      }
+    }
+  }
+
   return best;
 }
 
@@ -166,7 +194,7 @@ export default function CAMCanvas() {
     statusTimerRef.current = setTimeout(() => setStatusMsg(''), 2000);
   }
 
-  const { viewport, entities, layers, operations, selectedEntityIds, hoveredEntityId, showToolpaths, showRapids, bounds, stockConfig, tabPlacementActive, tabPlacementOpId, dogboneSelectionActive, dogboneSelectionOpId, textPlacementActive, textPlacementOpId, medialAxisPolylines, postConfig, activeTool, gridSnap } = state;
+  const { viewport, entities, layers, operations, selectedEntityIds, hoveredEntityId, showToolpaths, showRapids, bounds, stockConfig, tabPlacementActive, tabPlacementOpId, dogboneSelectionActive, dogboneSelectionOpId, textPlacementActive, textPlacementOpId, medialAxisPolylines, postConfig, activeTool, gridSnap, refImage, previewEntities } = state;
   const isInch = postConfig?.units === 'inch';
 
   const [canvasDims, setCanvasDims] = useState({ w: 0, h: 0 });
@@ -177,12 +205,23 @@ export default function CAMCanvas() {
   const onDragUpRef   = useRef(null);
 
   // Drawing tool state
-  const drawStateRef  = useRef(null);  // { tool, pts[], dragging? }
-  const previewRef    = useRef(null);  // { cur: {x,y}, snapType, shift }
-  const lastSnapRef   = useRef(null);  // { pos: {x,y}, shift } — for drag-commit on mouseup
-  const onDrawMoveRef = useRef(null);  // fresh-closure draw preview handler
-  const onDrawClickRef = useRef(null); // fresh-closure draw click handler
+  const drawStateRef   = useRef(null);  // { tool, pts[], dragging? }
+  const previewRef     = useRef(null);  // { cur: {x,y}, snapType, shift }
+  const lastSnapRef    = useRef(null);  // { pos: {x,y}, shift } — for drag-commit on mouseup
+  const lastClickScr   = useRef(null);  // screen position of the last first-click (for dim input)
+  const onDrawMoveRef  = useRef(null);  // fresh-closure draw preview handler
+  const onDrawClickRef = useRef(null);  // fresh-closure draw click handler
   const [drawPhase, setDrawPhase] = useState(0); // incremented after each draw interaction
+
+  // Dimension input overlay (appears after first click in line/circle/rect)
+  const [dimInput, setDimInput]   = useState(null);
+  const dimInputRef = useRef(null); // mirrors dimInput without stale closure issues
+
+  // Coordinate input dialog (Spacebar while drawing)
+  const [coordInput, setCoordInput] = useState(null);
+
+  // Reference image
+  const refImageRef = useRef(null); // cached HTMLImageElement
 
   const [zSliderPos, setZSliderPos] = useState(0); // 0 = all passes; 1..N = pass index
   const [isAnimating, setIsAnimating] = useState(false);
@@ -225,6 +264,17 @@ export default function CAMCanvas() {
     return () => clearTimeout(t);
   }, [isAnimating, zSliderPos, zLevels.length]);
 
+  // Load reference image into a cached Image element
+  useEffect(() => {
+    if (refImage?.dataUrl) {
+      const img = new Image();
+      img.onload = () => { refImageRef.current = img; draw(); };
+      img.src = refImage.dataUrl;
+    } else {
+      refImageRef.current = null;
+    }
+  }, [refImage?.dataUrl]);
+
   // Reset draw state whenever the active tool changes
   useEffect(() => {
     if (activeTool === 'select') {
@@ -234,8 +284,34 @@ export default function CAMCanvas() {
     }
     previewRef.current = null;
     lastSnapRef.current = null;
+    lastClickScr.current = null;
+    dimInputRef.current = null;
+    setDimInput(null);
+    setCoordInput(null);
     setDrawPhase(p => p + 1);
   }, [activeTool]);
+
+  // Show/hide dim input overlay based on draw state phase
+  useEffect(() => {
+    const ds = drawStateRef.current;
+    const shouldShow = ds && ds.pts.length === 1 && ['line', 'circle', 'rect'].includes(ds.tool);
+    if (!shouldShow) {
+      if (dimInputRef.current) { dimInputRef.current = null; setDimInput(null); }
+      return;
+    }
+    if (!dimInputRef.current) {
+      const screen = lastClickScr.current || { x: canvasDims.w / 2, y: canvasDims.h / 2 };
+      const anchor = ds.pts[0];
+      // Default angle for line: direction of current mouse to anchor
+      const mouse = lastSnapRef.current?.pos;
+      const defaultAngle = (ds.tool === 'line' && mouse)
+        ? (Math.atan2(mouse.y - anchor.y, mouse.x - anchor.x) * 180 / Math.PI).toFixed(1)
+        : '0';
+      const newDI = { tool: ds.tool, anchor, screen, vals: { angle: defaultAngle } };
+      dimInputRef.current = newDI;
+      setDimInput(newDI);
+    }
+  }, [drawPhase]);
 
   function togglePlay() {
     if (isAnimating) { setIsAnimating(false); }
@@ -305,10 +381,25 @@ export default function CAMCanvas() {
     ctx.fillStyle = COLORS.background;
     ctx.fillRect(0, 0, canvas.width, canvas.height);
 
+    // Reference image (drawn before grid, faded)
+    if (refImage && refImageRef.current) {
+      const img = refImageRef.current;
+      const mpp = refImage.mmPerPixel || 0.1;
+      const imgW_mm = img.naturalWidth * mpp;
+      const imgH_mm = img.naturalHeight * mpp;
+      const screenTL = w2c(refImage.x || 0, (refImage.y || 0) + imgH_mm);
+      const screenW = imgW_mm * viewport.zoom;
+      const screenH = imgH_mm * viewport.zoom;
+      ctx.globalAlpha = refImage.opacity ?? 0.35;
+      ctx.drawImage(img, screenTL.x, screenTL.y, screenW, screenH);
+      ctx.globalAlpha = 1;
+    }
+
     drawGrid(ctx);
     drawStock(ctx);
     drawOrigin(ctx);
     drawEntities(ctx);
+    drawPreviewEntities(ctx);
     if (showToolpaths) {
       drawToolpaths(ctx);
       drawTextPreviews(ctx);
@@ -384,6 +475,15 @@ export default function CAMCanvas() {
     ctx.lineWidth = 1;
     ctx.setLineDash([6, 4]);
     ctx.strokeRect(tl.x, tl.y, w, h);
+    ctx.setLineDash([]);
+  }
+
+  function drawPreviewEntities(ctx) {
+    if (!previewEntities?.length) return;
+    ctx.strokeStyle = 'rgba(68,255,136,0.55)';
+    ctx.lineWidth = 1;
+    ctx.setLineDash([4, 3]);
+    for (const e of previewEntities) drawEntity(ctx, e);
     ctx.setLineDash([]);
   }
 
@@ -769,6 +869,12 @@ export default function CAMCanvas() {
     } else if (type === 'center') {
       ctx.strokeStyle = '#44ff88';
       ctx.beginPath(); ctx.arc(s.x, s.y, sz/2, 0, Math.PI*2); ctx.stroke();
+    } else if (type === 'intersection') {
+      ctx.strokeStyle = '#ff8844';
+      ctx.beginPath();
+      ctx.moveTo(s.x - sz/2, s.y - sz/2); ctx.lineTo(s.x + sz/2, s.y + sz/2);
+      ctx.moveTo(s.x + sz/2, s.y - sz/2); ctx.lineTo(s.x - sz/2, s.y + sz/2);
+      ctx.stroke();
     } else if (type === 'grid') {
       ctx.strokeStyle = '#44ff88'; ctx.lineWidth = 1;
       ctx.beginPath();
@@ -856,7 +962,7 @@ export default function CAMCanvas() {
     drawSnapIndicator(ctx, cur, snapType);
   }
 
-  useEffect(() => { draw(); }, [entities, layers, operations, viewport, selectedEntityIds, hoveredEntityId, showToolpaths, showRapids, mousePos, stockConfig, zSliderPos, zLevels, tabPlacementActive, tabPlacementOpId, dogboneSelectionActive, dogboneSelectionOpId, textPlacementActive, textPlacementOpId, medialAxisPolylines, liveXf, drawPhase]);
+  useEffect(() => { draw(); }, [entities, layers, operations, viewport, selectedEntityIds, hoveredEntityId, showToolpaths, showRapids, mousePos, stockConfig, zSliderPos, zLevels, tabPlacementActive, tabPlacementOpId, dogboneSelectionActive, dogboneSelectionOpId, textPlacementActive, textPlacementOpId, medialAxisPolylines, liveXf, drawPhase, refImage, previewEntities]);
 
   // Mouse events
   const onMouseDown = useCallback((e) => {
@@ -960,7 +1066,7 @@ export default function CAMCanvas() {
 
     // ── Drawing tools ──────────────────────────────────────────────────────
     if (activeTool !== 'select' && e.button === 0) {
-      onDrawClickRef.current?.(world, e.shiftKey);
+      onDrawClickRef.current?.(world, e.shiftKey, cx, cy);
       return;
     }
 
@@ -1055,7 +1161,7 @@ export default function CAMCanvas() {
     lastSnapRef.current = { pos: snapped, shift: shiftHeld };
   };
 
-  onDrawClickRef.current = (world, shiftHeld) => {
+  onDrawClickRef.current = (world, shiftHeld, screenX, screenY) => {
     const ds = drawStateRef.current;
     if (!ds) return;
     const snapped = previewRef.current?.cur ?? world;
@@ -1063,6 +1169,7 @@ export default function CAMCanvas() {
     switch (ds.tool) {
       case 'line':
         if (ds.pts.length === 0) {
+          lastClickScr.current = { x: screenX ?? 0, y: screenY ?? 0 };
           drawStateRef.current = { ...ds, pts: [snapped] };
         } else {
           const end = shiftHeld ? constrainTo45(ds.pts[0], snapped) : snapped;
@@ -1071,8 +1178,10 @@ export default function CAMCanvas() {
         }
         break;
       case 'circle':
-        // mousedown sets center and enters drag mode; commit happens on mouseup
-        if (!ds.dragging) drawStateRef.current = { ...ds, pts: [snapped], dragging: true };
+        if (!ds.dragging) {
+          lastClickScr.current = { x: screenX ?? 0, y: screenY ?? 0 };
+          drawStateRef.current = { ...ds, pts: [snapped], dragging: true };
+        }
         break;
       case 'arc':
         if (ds.pts.length < 2) {
@@ -1084,12 +1193,72 @@ export default function CAMCanvas() {
         }
         break;
       case 'rect':
-        // mousedown sets corner and enters drag mode; commit happens on mouseup
-        if (!ds.dragging) drawStateRef.current = { ...ds, pts: [snapped], dragging: true };
+        if (!ds.dragging) {
+          lastClickScr.current = { x: screenX ?? 0, y: screenY ?? 0 };
+          drawStateRef.current = { ...ds, pts: [snapped], dragging: true };
+        }
         break;
     }
     setDrawPhase(p => p + 1);
   };
+
+  // Commit entity from dimension input overlay
+  function commitFromDimInput() {
+    const di = dimInputRef.current;
+    if (!di) return;
+    const { tool, anchor, vals } = di;
+    const MM_PER_INCH = 25.4;
+    const conv = v => isInch ? parseFloat(v) * MM_PER_INCH : parseFloat(v);
+
+    let newEntity = null;
+    if (tool === 'line') {
+      const len = conv(vals.length ?? '');
+      const angleDeg = parseFloat(vals.angle ?? '0');
+      if (!isNaN(len) && len > 0.001) {
+        const ar = angleDeg * Math.PI / 180;
+        newEntity = { id: uuid(), type: 'line', layer: '0', start: { ...anchor }, end: { x: anchor.x + len * Math.cos(ar), y: anchor.y + len * Math.sin(ar) } };
+      }
+    } else if (tool === 'circle') {
+      const dia = conv(vals.diameter ?? '');
+      if (!isNaN(dia) && dia > 0.001) {
+        newEntity = { id: uuid(), type: 'circle', layer: '0', center: { ...anchor }, radius: dia / 2 };
+      }
+    } else if (tool === 'rect') {
+      const w = conv(vals.width ?? ''), h = conv(vals.height ?? '');
+      if (!isNaN(w) && !isNaN(h) && Math.abs(w) > 0.001 && Math.abs(h) > 0.001) {
+        const x2 = anchor.x + w, y2 = anchor.y + h;
+        const minX = Math.min(anchor.x, x2), maxX = Math.max(anchor.x, x2);
+        const minY = Math.min(anchor.y, y2), maxY = Math.max(anchor.y, y2);
+        newEntity = { id: uuid(), type: 'polyline', layer: '0', closed: true,
+          vertices: [{ x: minX, y: minY }, { x: maxX, y: minY }, { x: maxX, y: maxY }, { x: minX, y: maxY }] };
+      }
+    }
+
+    if (newEntity) dispatch({ type: 'ADD_ENTITIES', payload: [newEntity] });
+
+    drawStateRef.current = { tool, pts: [], dragging: false };
+    previewRef.current = null;
+    lastSnapRef.current = null;
+    lastClickScr.current = null;
+    dimInputRef.current = null;
+    setDimInput(null);
+    setDrawPhase(p => p + 1);
+  }
+
+  // Commit coordinate input (Space dialog) as a draw click
+  function commitCoordInput() {
+    const ci = coordInput;
+    if (!ci) return;
+    const MM_PER_INCH = 25.4;
+    const xMM = isInch ? parseFloat(ci.x) * MM_PER_INCH : parseFloat(ci.x);
+    const yMM = isInch ? parseFloat(ci.y) * MM_PER_INCH : parseFloat(ci.y);
+    if (isNaN(xMM) || isNaN(yMM)) { setCoordInput(null); return; }
+    const world = { x: xMM, y: yMM };
+    previewRef.current = { cur: world, snapType: null, shift: false };
+    lastSnapRef.current = { pos: world, shift: false };
+    onDrawClickRef.current?.(world, false, canvasDims.w / 2, canvasDims.h / 2);
+    setCoordInput(null);
+  }
 
   const onWheelRef = useRef(null);
   onWheelRef.current = (e) => {
@@ -1202,16 +1371,28 @@ export default function CAMCanvas() {
     return () => { window.removeEventListener('mousemove', mm); window.removeEventListener('mouseup', mu); };
   }, []);
 
-  // Keyboard shortcuts: Delete, Escape (cancel draw), Ctrl+Z (undo), Ctrl+Y/Shift+Z (redo)
+  // Keyboard shortcuts
   useEffect(() => {
     const onKey = (e) => {
       const tag = document.activeElement?.tagName;
-      if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT') return;
+      const inputFocused = tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT';
+
+      // Spacebar → open coord input (only when drawing, not in an input)
+      if (e.key === ' ' && !inputFocused && drawStateRef.current) {
+        e.preventDefault();
+        setCoordInput({ x: '', y: '' });
+        return;
+      }
+
+      if (inputFocused) return;
 
       if (e.key === 'Escape') {
+        if (coordInput) { setCoordInput(null); return; }
+        if (dimInputRef.current) { dimInputRef.current = null; setDimInput(null); return; }
         if (drawStateRef.current) {
           drawStateRef.current = null;
           previewRef.current = null;
+          lastClickScr.current = null;
           dispatch({ type: 'SET_ACTIVE_TOOL', payload: 'select' });
           setDrawPhase(p => p + 1);
         }
@@ -1233,7 +1414,7 @@ export default function CAMCanvas() {
     };
     window.addEventListener('keydown', onKey);
     return () => window.removeEventListener('keydown', onKey);
-  }, [selectedEntityIds, dispatch]);
+  }, [selectedEntityIds, dispatch, coordInput]);
 
   function startDrag(e, type, extra) {
     const canvas = canvasRef.current;
@@ -1409,6 +1590,58 @@ export default function CAMCanvas() {
         return (
           <div style={{ position: 'absolute', top: 8, left: '50%', transform: 'translateX(-50%)', background: 'rgba(10,30,10,0.9)', color: '#88ff88', padding: '4px 14px', borderRadius: 4, fontSize: 11, pointerEvents: 'none', border: '1px solid rgba(68,255,68,0.4)', whiteSpace: 'nowrap' }}>
             <strong>{labels[activeTool]}</strong> — {msgs[activeTool]} · Esc to cancel
+          </div>
+        );
+      })()}
+
+      {/* ── Dimension input overlay ──────────────────────────────────────────── */}
+      {dimInput && (() => {
+        const { tool, screen, vals } = dimInput;
+        const unit = isInch ? 'in' : 'mm';
+        const left = Math.min(screen.x + 18, canvasDims.w - 180);
+        const top  = Math.max(screen.y - 90, 8);
+        const inputSt = { background:'#0d0d20', border:'1px solid #3344aa', color:'#cce', borderRadius:3, padding:'3px 6px', fontSize:11, width:90, fontFamily:'monospace' };
+        const rowSt = { display:'flex', alignItems:'center', gap:6, marginBottom:4 };
+        const lblSt = { fontSize:10, color:'#8888bb', width:65, textAlign:'right', flexShrink:0 };
+
+        function onEnter(e) { if (e.key === 'Enter') { commitFromDimInput(); } else if (e.key === 'Escape') { dimInputRef.current = null; setDimInput(null); } }
+        function updateVal(k, v) { const nd = { ...dimInputRef.current, vals: { ...dimInputRef.current.vals, [k]: v } }; dimInputRef.current = nd; setDimInput(nd); }
+
+        return (
+          <div style={{ position:'absolute', left, top, background:'rgba(8,8,28,0.97)', border:'1px solid #3344aa', borderRadius:5, padding:'8px 10px', zIndex:15, fontSize:11, color:'#aab', boxShadow:'0 2px 8px rgba(0,0,0,0.6)' }}>
+            {tool === 'line' && <>
+              <div style={rowSt}><span style={lblSt}>Length ({unit})</span><input autoFocus style={inputSt} type="text" value={vals.length??''} onChange={e=>updateVal('length',e.target.value)} onKeyDown={onEnter} /></div>
+              <div style={rowSt}><span style={lblSt}>Angle (°)</span><input style={inputSt} type="text" value={vals.angle??'0'} onChange={e=>updateVal('angle',e.target.value)} onKeyDown={onEnter} /></div>
+            </>}
+            {tool === 'circle' && (
+              <div style={rowSt}><span style={lblSt}>Diameter ({unit})</span><input autoFocus style={inputSt} type="text" value={vals.diameter??''} onChange={e=>updateVal('diameter',e.target.value)} onKeyDown={onEnter} /></div>
+            )}
+            {tool === 'rect' && <>
+              <div style={rowSt}><span style={lblSt}>Width ({unit})</span><input autoFocus style={inputSt} type="text" value={vals.width??''} onChange={e=>updateVal('width',e.target.value)} onKeyDown={onEnter} /></div>
+              <div style={rowSt}><span style={lblSt}>Height ({unit})</span><input style={inputSt} type="text" value={vals.height??''} onChange={e=>updateVal('height',e.target.value)} onKeyDown={onEnter} /></div>
+            </>}
+            <div style={{ fontSize:9, color:'#445566', marginTop:3 }}>Enter to commit · Esc to freehand</div>
+          </div>
+        );
+      })()}
+
+      {/* ── Coordinate input dialog (Spacebar) ───────────────────────────────── */}
+      {coordInput && (() => {
+        const unit = isInch ? 'in' : 'mm';
+        const inputSt = { background:'#0d0d20', border:'1px solid #3344aa', color:'#cce', borderRadius:3, padding:'3px 8px', fontSize:12, width:110, fontFamily:'monospace' };
+        const rowSt = { display:'flex', alignItems:'center', gap:8, marginBottom:6 };
+        const lblSt = { fontSize:11, color:'#8888bb', width:60, textAlign:'right', flexShrink:0 };
+        function onKey(e) {
+          if (e.key === 'Enter') commitCoordInput();
+          else if (e.key === 'Escape') setCoordInput(null);
+          else if (e.key === 'Tab') { e.preventDefault(); const inputs = document.querySelectorAll('[data-coord-input]'); const cur = [...inputs].indexOf(e.target); inputs[(cur+1)%inputs.length]?.focus(); }
+        }
+        return (
+          <div style={{ position:'absolute', top:'50%', left:'50%', transform:'translate(-50%,-50%)', background:'rgba(8,8,28,0.97)', border:'1px solid #4455cc', borderRadius:6, padding:'14px 16px', zIndex:20, minWidth:220, boxShadow:'0 4px 16px rgba(0,0,0,0.7)' }}>
+            <div style={{ fontSize:12, fontWeight:600, color:'#8888ff', marginBottom:10 }}>Set Point ({unit})</div>
+            <div style={rowSt}><span style={lblSt}>X</span><input data-coord-input autoFocus style={inputSt} type="text" value={coordInput.x} onChange={e=>setCoordInput(c=>({...c,x:e.target.value}))} onKeyDown={onKey} /></div>
+            <div style={rowSt}><span style={lblSt}>Y</span><input data-coord-input style={inputSt} type="text" value={coordInput.y} onChange={e=>setCoordInput(c=>({...c,y:e.target.value}))} onKeyDown={onKey} /></div>
+            <div style={{ fontSize:9, color:'#445566', marginTop:4 }}>Enter to place · Esc to cancel · Tab to switch fields</div>
           </div>
         );
       })()}

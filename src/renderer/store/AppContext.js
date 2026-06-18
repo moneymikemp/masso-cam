@@ -141,6 +141,13 @@ const initialState = {
   // Drawing tools
   activeTool: 'select',  // 'select' | 'line' | 'circle' | 'arc' | 'rect'
   gridSnap: false,
+  cadMode: false,
+
+  // Reference image (not saved in project)
+  refImage: null, // { dataUrl, x, y, mmPerPixel, opacity }
+
+  // Temporary preview entities for offset/array modals
+  previewEntities: [],
 
   // Undo/redo for entity edits (snapshots of entities array, capped at 50)
   entityHistory: [],
@@ -374,6 +381,10 @@ function reducer(state, action) {
     // Drawing tools
     case 'SET_ACTIVE_TOOL': return { ...state, activeTool: action.payload };
     case 'TOGGLE_GRID_SNAP':  return { ...state, gridSnap: !state.gridSnap };
+    case 'TOGGLE_CAD_MODE':   return { ...state, cadMode: !state.cadMode };
+    case 'SET_REF_IMAGE':     return { ...state, refImage: action.payload };
+    case 'UPDATE_REF_IMAGE':  return { ...state, refImage: state.refImage ? { ...state.refImage, ...action.payload } : null };
+    case 'SET_PREVIEW_ENTITIES': return { ...state, previewEntities: action.payload || [] };
 
     // Machine
     case 'SET_MACHINE_CONFIG': return { ...state, machineConfig: { ...state.machineConfig, ...action.payload }, dirty: true };
@@ -490,6 +501,8 @@ function reducer(state, action) {
         selectedOperationId: null,
         entityHistory: [],
         entityFuture: [],
+        previewEntities: [],
+        refImage: null,
         dirty: false,
       };
     }

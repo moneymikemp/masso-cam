@@ -208,6 +208,20 @@ app.on('window-all-closed', () => {
 
 // ── IPC Handlers ──────────────────────────────────────────────────────────────
 
+ipcMain.handle('dialog-open-image', async () => {
+  const result = await dialog.showOpenDialog(mainWindow, {
+    title: 'Import Reference Image',
+    filters: [{ name: 'Images', extensions: ['jpg', 'jpeg', 'png', 'bmp', 'gif', 'webp'] }],
+    properties: ['openFile'],
+  });
+  if (result.canceled || !result.filePaths.length) return null;
+  const filePath = result.filePaths[0];
+  const buffer = fs.readFileSync(filePath);
+  const ext = path.extname(filePath).slice(1).toLowerCase();
+  const mimeMap = { jpg: 'image/jpeg', jpeg: 'image/jpeg', png: 'image/png', bmp: 'image/bmp', gif: 'image/gif', webp: 'image/webp' };
+  return `data:${mimeMap[ext] || 'image/jpeg'};base64,${buffer.toString('base64')}`;
+});
+
 ipcMain.handle('dialog-open-dxf', async () => {
   const result = await dialog.showOpenDialog(mainWindow, {
     title: 'Import DXF File',

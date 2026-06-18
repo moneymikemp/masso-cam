@@ -2,7 +2,8 @@ const { contextBridge, ipcRenderer } = require('electron');
 
 contextBridge.exposeInMainWorld('electron', {
   // File dialogs
-  openDxf: () => ipcRenderer.invoke('dialog-open-dxf'),
+  openDxf:   () => ipcRenderer.invoke('dialog-open-dxf'),
+  openImage: () => ipcRenderer.invoke('dialog-open-image'),
   saveDxf:   (name) => ipcRenderer.invoke('dialog-save-dxf',   name),
   saveGcode: (name) => ipcRenderer.invoke('dialog-save-gcode', name),
   saveGcodeInlay: (name) => ipcRenderer.invoke('dialog-save-gcode-inlay', name),
@@ -43,7 +44,7 @@ contextBridge.exposeInMainWorld('electron', {
       'menu-select-all', 'menu-delete-selected', 'menu-zoom-fit', 'menu-zoom-in',
       'menu-zoom-out', 'menu-toggle-toolpaths', 'menu-toggle-rapids',
       'menu-machine-setup', 'menu-post-settings', 'menu-tool-library', 'menu-about',
-      'menu-inlay-wizard', 'menu-export-dxf'
+      'menu-inlay-wizard', 'menu-export-dxf', 'menu-import-image'
     ];
     const handlers = {};
     for (const event of events) {
