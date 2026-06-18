@@ -136,6 +136,31 @@ export function fitArcsToChain(vertices, arcTolerance = 1.0, minArcDeg = 15) {
     }
   }
 
+  // Snap consecutive arc/line junction endpoints to eliminate fitting-residual gaps.
+  for (let k = 0; k < result.length - 1; k++) {
+    const curr = result[k], next = result[k + 1];
+    if (curr.type === 'line' && next.type === 'line') continue;
+    const currEnd  = curr.type === 'line'
+      ? curr.end
+      : { x: curr.center.x + curr.radius * Math.cos(curr.endAngle),   y: curr.center.y + curr.radius * Math.sin(curr.endAngle) };
+    const nextStart = next.type === 'line'
+      ? next.start
+      : { x: next.center.x + next.radius * Math.cos(next.startAngle), y: next.center.y + next.radius * Math.sin(next.startAngle) };
+    const jx = (currEnd.x + nextStart.x) / 2, jy = (currEnd.y + nextStart.y) / 2;
+    if (curr.type === 'arc') {
+      let ea = Math.atan2(jy - curr.center.y, jx - curr.center.x);
+      while (ea <= curr.startAngle) ea += 2 * Math.PI;
+      result[k] = { ...curr, endAngle: ea };
+    } else {
+      result[k] = { ...curr, end: { x: jx, y: jy } };
+    }
+    if (next.type === 'arc') {
+      result[k + 1] = { ...next, startAngle: Math.atan2(jy - next.center.y, jx - next.center.x) };
+    } else {
+      result[k + 1] = { ...next, start: { x: jx, y: jy } };
+    }
+  }
+
   return result;
 }
 
@@ -279,7 +304,7 @@ export function traceImage(imgEl, refImage, threshold = 0.5, simplifyTolerance =
   const oy = refImage.y || 0;
   const result = [];
   for (const chain of chains) {
-    const simplified = rdp(smoothChain(chain, 3), simplifyTolerance);
+    const simplified = rdp(smoothChain(chain, 2), simplifyTolerance);
     if (simplified.length < 2) continue;
     result.push(simplified.map(pt => ({
       x: ox + pt.x * mmPP,

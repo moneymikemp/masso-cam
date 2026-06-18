@@ -103,6 +103,56 @@ function getEntitySnapPoints(e) {
   return pts;
 }
 
+function getEntityGrips(entity) {
+  switch (entity.type) {
+    case 'line':
+      return [
+        { x: entity.start.x, y: entity.start.y, gripType: 'start' },
+        { x: entity.end.x,   y: entity.end.y,   gripType: 'end'   },
+      ];
+    case 'circle':
+      return [{ x: entity.center.x, y: entity.center.y, gripType: 'center' }];
+    case 'arc': {
+      const sp = { x: entity.center.x + entity.radius * Math.cos(entity.startAngle), y: entity.center.y + entity.radius * Math.sin(entity.startAngle) };
+      const ep = { x: entity.center.x + entity.radius * Math.cos(entity.endAngle),   y: entity.center.y + entity.radius * Math.sin(entity.endAngle) };
+      return [{ ...sp, gripType: 'start' }, { ...ep, gripType: 'end' }];
+    }
+    case 'polyline':
+      return (entity.vertices || []).map((v, i) => ({ x: v.x, y: v.y, gripType: 'vertex', vertexIdx: i }));
+    default:
+      return [];
+  }
+}
+
+function applyGrip(entity, gripType, vertexIdx, newPos) {
+  switch (entity.type) {
+    case 'line':
+      if (gripType === 'start') return { ...entity, start: { x: newPos.x, y: newPos.y } };
+      if (gripType === 'end')   return { ...entity, end:   { x: newPos.x, y: newPos.y } };
+      break;
+    case 'circle':
+      if (gripType === 'center') return { ...entity, center: { x: newPos.x, y: newPos.y } };
+      break;
+    case 'arc':
+      if (gripType === 'start') {
+        return { ...entity, startAngle: Math.atan2(newPos.y - entity.center.y, newPos.x - entity.center.x) };
+      }
+      if (gripType === 'end') {
+        let ea = Math.atan2(newPos.y - entity.center.y, newPos.x - entity.center.x);
+        while (ea <= entity.startAngle) ea += 2 * Math.PI;
+        return { ...entity, endAngle: ea };
+      }
+      break;
+    case 'polyline':
+      if (gripType === 'vertex' && vertexIdx != null) {
+        const verts = entity.vertices.map((v, i) => i === vertexIdx ? { x: newPos.x, y: newPos.y } : v);
+        return { ...entity, vertices: verts };
+      }
+      break;
+  }
+  return entity;
+}
+
 function lineLineIntersect(e1, e2) {
   if (e1.type !== 'line' || e2.type !== 'line') return null;
   const a = e1.start, b = e1.end, c = e2.start, d = e2.end;
@@ -227,6 +277,8 @@ export default function CAMCanvas() {
   const [isAnimating, setIsAnimating] = useState(false);
   const draggingTabRef = useRef(null); // { opId, tabIdx } when dragging a manual tab marker
   const commitPolylineRef = useRef(null);
+  const gripDragRef = useRef(null); // { entityId, gripType, vertexIdx, curWorld, snapType }
+  const [nearGrip, setNearGrip] = useState(false);
 
   // Unique Z levels where cutting happens, sorted shallowest → deepest.
   const zLevels = useMemo(() => {
@@ -492,6 +544,7 @@ export default function CAMCanvas() {
 
   function drawEntities(ctx) {
     const xf = xfRef.current;
+    const gd = gripDragRef.current;
     for (const entity of entities) {
       const layer = layers[entity.layer];
       if (layer && !layer.visible) continue;
@@ -503,9 +556,40 @@ export default function CAMCanvas() {
       ctx.lineWidth = isSelected ? 2 : 1;
       ctx.setLineDash([]);
 
-      const drawn = (xf && isSelected) ? applyXform(entity, xf) : entity;
+      let drawn = entity;
+      if (gd && entity.id === gd.entityId && gd.curWorld) {
+        drawn = applyGrip(entity, gd.gripType, gd.vertexIdx, gd.curWorld);
+      } else if (xf && isSelected) {
+        drawn = applyXform(entity, xf);
+      }
       drawEntity(ctx, drawn);
+
+      // Grip handles on selected entities (select tool only)
+      if (isSelected && activeTool === 'select') {
+        const grips = getEntityGrips(drawn);
+        const sz = 7;
+        for (const grip of grips) {
+          const s = w2c(grip.x, grip.y);
+          const isCenter = grip.gripType === 'center';
+          ctx.fillStyle = isCenter ? '#44ff88' : '#ffcc44';
+          ctx.strokeStyle = '#0a0a20';
+          ctx.lineWidth = 1;
+          ctx.setLineDash([]);
+          if (isCenter) {
+            ctx.beginPath();
+            ctx.moveTo(s.x, s.y - sz / 2); ctx.lineTo(s.x + sz / 2, s.y);
+            ctx.lineTo(s.x, s.y + sz / 2); ctx.lineTo(s.x - sz / 2, s.y);
+            ctx.closePath(); ctx.fill(); ctx.stroke();
+          } else {
+            ctx.fillRect(s.x - sz / 2, s.y - sz / 2, sz, sz);
+            ctx.strokeRect(s.x - sz / 2, s.y - sz / 2, sz, sz);
+          }
+        }
+      }
     }
+
+    // Snap indicator during grip drag
+    if (gd?.snapType && gd.curWorld) drawSnapIndicator(ctx, gd.curWorld, gd.snapType);
   }
 
   function drawEntity(ctx, entity) {
@@ -1116,6 +1200,22 @@ export default function CAMCanvas() {
       return;
     }
 
+    // ── Grip drag ─────────────────────────────────────────────────────────
+    if (e.button === 0 && activeTool === 'select' && selectedEntityIds.length > 0) {
+      const snapR = 10 / viewport.zoom;
+      for (const entity of entities) {
+        if (!selectedEntityIds.includes(entity.id)) continue;
+        for (const grip of getEntityGrips(entity)) {
+          if (Math.hypot(grip.x - world.x, grip.y - world.y) < snapR) {
+            gripDragRef.current = { entityId: entity.id, gripType: grip.gripType, vertexIdx: grip.vertexIdx ?? null, curWorld: null, snapType: null };
+            e.preventDefault();
+            e.stopPropagation();
+            return;
+          }
+        }
+      }
+    }
+
     // ── Normal entity selection / move drag ───────────────────────────────
     if (e.button === 0) {
       const hit = findEntityAt(world, 10 / viewport.zoom);
@@ -1168,6 +1268,21 @@ export default function CAMCanvas() {
     const world = c2w(cx, cy);
     const hit = findEntityAt(world, 8 / viewport.zoom);
     dispatch({ type: 'HOVER_ENTITY', payload: hit?.id || null });
+
+    // Near-grip check — drives cursor style
+    if (activeTool === 'select' && selectedEntityIds.length > 0) {
+      const snapR = 10 / viewport.zoom;
+      let near = false;
+      outer: for (const ent of entities) {
+        if (!selectedEntityIds.includes(ent.id)) continue;
+        for (const g of getEntityGrips(ent)) {
+          if (Math.hypot(g.x - world.x, g.y - world.y) < snapR) { near = true; break outer; }
+        }
+      }
+      setNearGrip(near);
+    } else if (nearGrip) {
+      setNearGrip(false);
+    }
   }, [isPanning, panStart, viewport, c2w, dispatch, operations]);
 
   const onMouseUp = useCallback(() => {
@@ -1402,6 +1517,18 @@ export default function CAMCanvas() {
     const rect = canvas.getBoundingClientRect();
     const cx = e.clientX - rect.left, cy = e.clientY - rect.top;
 
+    // Grip drag
+    if (gripDragRef.current) {
+      const world = c2w(cx, cy);
+      const snapRadius = 14 / viewport.zoom;
+      const others = entities.filter(en => en.id !== gripDragRef.current.entityId);
+      const snap = snapEntities(world, others, layers, snapRadius);
+      const snapped = snap || (gridSnap ? { x: Math.round(world.x/10)*10, y: Math.round(world.y/10)*10 } : world);
+      gripDragRef.current = { ...gripDragRef.current, curWorld: snapped, snapType: snap?.snapType || (gridSnap ? 'grid' : null) };
+      setDrawPhase(p => p + 1);
+      return;
+    }
+
     // Transform drag (move/scale/rotate handles)
     const dr = dragRef.current;
     if (dr) {
@@ -1430,6 +1557,21 @@ export default function CAMCanvas() {
   };
 
   onDragUpRef.current = () => {
+    // Grip drag commit
+    const gd = gripDragRef.current;
+    if (gd) {
+      gripDragRef.current = null;
+      if (gd.curWorld) {
+        const entity = entities.find(e => e.id === gd.entityId);
+        if (entity) {
+          const updated = applyGrip(entity, gd.gripType, gd.vertexIdx, gd.curWorld);
+          dispatch({ type: 'TRANSFORM_ENTITIES', payload: [updated] });
+        }
+      }
+      setDrawPhase(p => p + 1);
+      return;
+    }
+
     // Transform drag commit
     const dr = dragRef.current;
     if (dr) {
@@ -1625,7 +1767,7 @@ export default function CAMCanvas() {
       <canvas
         ref={canvasRef}
         style={{ width: '100%', height: '100%', display: 'block',
-          cursor: isPanning ? 'grabbing' : (tabPlacementActive || dogboneSelectionActive || textPlacementActive) ? 'cell' : activeTool !== 'select' ? 'crosshair' : 'default' }}
+          cursor: isPanning ? 'grabbing' : nearGrip ? 'pointer' : (tabPlacementActive || dogboneSelectionActive || textPlacementActive) ? 'cell' : activeTool !== 'select' ? 'crosshair' : 'default' }}
         onMouseDown={onMouseDown}
         onMouseMove={onMouseMove}
         onMouseUp={onMouseUp}
