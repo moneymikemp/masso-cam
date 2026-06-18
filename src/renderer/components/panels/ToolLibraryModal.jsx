@@ -133,22 +133,55 @@ function convertFusion360(obj) {
 
 // ── VCarve .vtdb import helpers ───────────────────────────────────────────────
 const VCARVE_TYPE_MAP = {
-  'end mill': 'flat', 'ball nose': 'ball', 'ballnose': 'ball',
-  'v-bit': 'tapered', 'vbit': 'tapered', 'v bit': 'tapered',
-  'tapered ball nose': 'tapered', 'tapered ballnose': 'tapered',
-  'engraving': 'diamond', 'drill': 'flat', 'spiral': 'flat',
-  'upcut spiral': 'upcut', 'downcut spiral': 'downcut',
+  'end mill': 'flat', 'square end mill': 'flat', 'spiral': 'flat',
+  'ball nose': 'ball', 'ballnose': 'ball', 'ball end mill': 'ball',
+  'v-bit': 'tapered', 'vbit': 'tapered', 'v bit': 'tapered', 'v cutter': 'tapered',
+  'tapered ball nose': 'tapered', 'tapered ballnose': 'tapered', 'tapered': 'tapered',
+  'engraving': 'diamond', 'marking': 'diamond', 'drag knife': 'diamond',
+  'drill': 'flat', 'spot drill': 'flat',
+  'upcut spiral': 'upcut', 'upcut': 'upcut',
+  'downcut spiral': 'downcut', 'downcut': 'downcut',
+  'compression': 'compression', 'compression spiral': 'compression',
 };
 
-function mapVCarveType(toolType) {
-  const t = (toolType || '').toLowerCase().trim();
+// Integer type codes used in some VCarve versions
+const VCARVE_INT_TYPE_MAP = {
+  0: 'flat',    // End Mill / Spiral
+  1: 'ball',    // Ball Nose
+  2: 'tapered', // V-Bit / V Cutter
+  3: 'diamond', // Engraving
+  4: 'flat',    // Drill
+  5: 'tapered', // Tapered Ball Nose
+  6: 'flat',    // Form Tool
+  7: 'flat',    // Thread Mill
+};
+
+function mapVCarveType(rawType) {
+  if (typeof rawType === 'number') return VCARVE_INT_TYPE_MAP[rawType] ?? 'flat';
+  const t = (rawType || '').toLowerCase().trim();
   if (VCARVE_TYPE_MAP[t]) return VCARVE_TYPE_MAP[t];
-  if (t.includes('ball'))     return 'ball';
-  if (t.includes('v-bit') || t.includes('vbit')) return 'tapered';
-  if (t.includes('engrav'))   return 'diamond';
-  if (t.includes('upcut'))    return 'upcut';
-  if (t.includes('downcut'))  return 'downcut';
+  if (t.includes('ball'))                            return 'ball';
+  if (t.includes('v-bit') || t.includes('vbit') || t.includes('v cutter')) return 'tapered';
+  if (t.includes('engrav') || t.includes('mark'))    return 'diamond';
+  if (t.includes('upcut'))                           return 'upcut';
+  if (t.includes('downcut'))                         return 'downcut';
+  if (t.includes('compress'))                        return 'compression';
+  if (t.includes('taper'))                           return 'tapered';
   return 'flat';
+}
+
+// Case-insensitive field accessor — VCarve schema column names vary by version.
+// Tries exact match first, then case-insensitive, returns undefined if not found.
+function vcGet(row, ...names) {
+  for (const n of names) {
+    if (Object.prototype.hasOwnProperty.call(row, n) && row[n] != null) return row[n];
+  }
+  const keys = Object.keys(row);
+  for (const n of names) {
+    const key = keys.find(k => k.toLowerCase() === n.toLowerCase());
+    if (key !== undefined && row[key] != null) return row[key];
+  }
+  return undefined;
 }
 
 function convertVCarve(rows) {
@@ -156,45 +189,59 @@ function convertVCarve(rows) {
   const skipped   = [];
   let toolNum = 1;
 
+  if (!rows || rows.length === 0) return { converted, skipped };
+
+  // Log column names seen in renderer console for debugging
+  console.log('[VTDB] convertVCarve — columns in first row:', Object.keys(rows[0]));
+  console.log('[VTDB] convertVCarve — first row:', JSON.stringify(rows[0]));
+
   for (const r of rows) {
     try {
-      const name = r.Name ?? r.name ?? r.ToolName ?? '';
-      if (!name) { skipped.push('(unnamed)'); continue; }
+      const name = vcGet(r, 'Name', 'ToolName', 'name', 'TOOLNAME');
+      if (!name || !String(name).trim()) { skipped.push('(unnamed)'); continue; }
 
-      const diameter    = +(r.Diameter ?? r.diameter ?? 0);
-      const tipDia      = +(r.CoreDiameter ?? r.coreDiameter ?? r.TipDiameter ?? 0);
-      const flutes      = +(r.FluteCount ?? r.fluteCount ?? r.NumberOfFlutes ?? 2);
-      const passDepth   = +(r.PassDepth ?? r.passDepth ?? r.CuttingDepth ?? 3);
-      const feedRate    = +(r.FeedRate ?? r.feedRate ?? r.Feed ?? 1500);
-      const plungeRate  = +(r.PlungeRate ?? r.plungeRate ?? r.Plunge ?? 500);
-      const spindle     = +(r.SpindleSpeed ?? r.spindleSpeed ?? r.RPM ?? 18000);
-      // StepOver in VCarve is stored as fraction 0.0–1.0; normalize defensively
-      const soRaw = +(r.StepOver ?? r.stepOver ?? r.Stepover ?? 0.45);
+      const unitsRaw = (vcGet(r, 'Units', 'units', 'Unit') || 'metric').toLowerCase();
+      const isInch   = unitsRaw.includes('inch') || unitsRaw.includes('imperial') || unitsRaw === 'in';
+      const toMM     = v => (v != null && isFinite(+v)) ? (isInch ? +v * 25.4 : +v) : 0;
+
+      const diameter   = toMM(vcGet(r, 'Diameter', 'diameter', 'ToolDiameter') ?? 0);
+      const tipDia     = toMM(vcGet(r, 'CoreDiameter', 'TipDiameter', 'coreDiameter', 'tipDiameter', 'BaseDiameter') ?? 0);
+      const flutes     = +(vcGet(r, 'FluteCount', 'NumberOfFlutes', 'fluteCount', 'Flutes', 'flutes') ?? 2);
+      const passDepth  = toMM(vcGet(r, 'PassDepth', 'DepthPerPass', 'CuttingDepth', 'passDepth', 'depthperpass') ?? 3);
+      const feedRate   = toMM(vcGet(r, 'FeedRate', 'Feed', 'FeedSpeed', 'feedRate', 'feedrate') ?? 1500);
+      const plunge     = toMM(vcGet(r, 'PlungeRate', 'PlungeFeedRate', 'VertRate', 'PlungeSpeed', 'plungeRate', 'plungerate') ?? 500);
+      const spindle    = +(vcGet(r, 'SpindleSpeed', 'RPM', 'Spindle', 'spindleSpeed', 'spindle_speed') ?? 18000);
+      const angle      = +(vcGet(r, 'AngleDegrees', 'HalfAngle', 'Angle', 'halfAngle', 'angle', 'ToolAngle') ?? 0);
+      const notes      = String(vcGet(r, 'Notes', 'notes', 'Comment', 'Description') ?? '').trim();
+
+      // StepOver: VCarve stores as fraction 0–1 or sometimes 0–100
+      const soRaw    = +(vcGet(r, 'StepOver', 'Stepover', 'stepOver', 'stepover', 'StepOverPercent') ?? 0.45);
       const stepover = soRaw > 1 ? soRaw / 100 : soRaw;
 
-      const feeds = (feedRate > 0 || spindle > 0) ? [{
-        material:       'Default',
-        spindle_rpm:    Math.round(spindle) || 18000,
-        feed_rate:      Math.round(feedRate) || 1500,
-        plunge_rate:    Math.round(plungeRate) || 500,
-        depth_per_pass: +passDepth.toFixed(3) || 3,
-        stepover:       +Math.max(0.01, Math.min(1, stepover)).toFixed(4),
-      }] : [];
+      const rawType = vcGet(r, 'Type', 'ToolType', 'toolType', 'type', 'TOOLTYPE');
+      const toolType = mapVCarveType(rawType);
 
       converted.push({
-        name:        name.trim(),
-        type:        mapVCarveType(r.ToolType ?? r.toolType ?? r.Type ?? ''),
+        name:        String(name).trim(),
+        type:        toolType,
         tool_number: toolNum++,
         diameter:    +diameter.toFixed(4),
         tipDiameter: +tipDia.toFixed(4),
-        taperAngle:  +(r.HalfAngle ?? r.halfAngle ?? r.Angle ?? 0),
+        taperAngle:  +angle.toFixed(2),
         flutes:      Math.max(1, Math.round(flutes)),
         material:    'Carbide',
-        notes:       (r.Notes ?? r.notes ?? '').toString().trim(),
-        feeds,
+        notes,
+        feeds: [{
+          material:       'Default',
+          spindle_rpm:    Math.round(spindle) || 18000,
+          feed_rate:      Math.round(feedRate) || 1500,
+          plunge_rate:    Math.round(plunge) || 500,
+          depth_per_pass: +Math.max(0.01, passDepth).toFixed(3),
+          stepover:       +Math.max(0.01, Math.min(1, stepover)).toFixed(4),
+        }],
       });
     } catch (err) {
-      skipped.push(r.Name || r.name || 'unknown');
+      skipped.push(String(vcGet(r, 'Name', 'name') ?? 'unknown'));
     }
   }
   return { converted, skipped };
@@ -414,10 +461,18 @@ export default function ToolLibraryModal({ onClose }) {
       }
     } else if (result.ext === '.vtdb') {
       const vtdbResult = await window.electron.importVtdb(result.path);
+      console.log('[VTDB] IPC response:', JSON.stringify({ ok: vtdbResult?.ok, table: vtdbResult?.table, columns: vtdbResult?.columns, rowCount: vtdbResult?.rows?.length, error: vtdbResult?.error }));
       if (!vtdbResult.ok) {
         setMsg({ text:`VCarve import failed: ${vtdbResult.error}`, isErr:true }); return;
       }
       const { converted, skipped } = convertVCarve(vtdbResult.rows);
+      if (converted.length === 0) {
+        const colHint = vtdbResult.columns?.length
+          ? `\nColumns found: ${vtdbResult.columns.join(', ')}`
+          : '';
+        setMsg({ text:`VCarve import: 0 tools converted from table "${vtdbResult.table}".${colHint}`, isErr:true });
+        return;
+      }
       toolsToImport = converted;
       label = skipped.length > 0
         ? `VCarve (${skipped.length} skipped)`

@@ -324,7 +324,7 @@ ipcMain.handle('dialog-open-tool-library', async () => {
 });
 
 // VCarve .vtdb import — reads SQLite database using better-sqlite3 (read-only)
-// Returns { ok, rows } on success or { ok: false, error } on failure.
+// Returns { ok, rows, columns, table } on success or { ok: false, error } on failure.
 ipcMain.handle('import-vtdb', async (_, filePath) => {
   let db;
   try {
@@ -332,33 +332,50 @@ ipcMain.handle('import-vtdb', async (_, filePath) => {
     db = new Database(filePath, { readonly: true, fileMustExist: true });
 
     const tables = db.prepare(
-      "SELECT name FROM sqlite_master WHERE type='table'"
+      "SELECT name FROM sqlite_master WHERE type='table' ORDER BY name"
     ).all().map(r => r.name);
+    console.log('[VTDB] All tables:', tables);
 
-    // Try known VCarve table names in order of likelihood
     const candidates = ['Tools', 'tools', 'TOOLS', 'ToolLibrary', 'VCarveToolLibrary', 'CncToolLibrary'];
     let rows = null;
     let usedTable = null;
+    let columns = [];
 
     for (const tbl of candidates) {
       if (tables.includes(tbl)) {
+        const info = db.prepare(`PRAGMA table_info("${tbl}")`).all();
+        columns = info.map(c => c.name);
+        console.log(`[VTDB] Table "${tbl}" columns:`, columns);
         rows = db.prepare(`SELECT * FROM "${tbl}"`).all();
+        console.log(`[VTDB] Row count: ${rows.length}`);
+        console.log('[VTDB] First 3 rows:', JSON.stringify(rows.slice(0, 3), null, 2));
         usedTable = tbl;
         break;
       }
     }
 
-    // Fallback: pick first table that has a Name or ToolType column
+    // Fallback: inspect every table, pick first with any tool-like column
     if (!rows) {
       for (const tbl of tables) {
         try {
-          const sample = db.prepare(`SELECT * FROM "${tbl}" LIMIT 1`).get();
-          if (sample && ('Name' in sample || 'ToolType' in sample || 'name' in sample)) {
+          const info = db.prepare(`PRAGMA table_info("${tbl}")`).all();
+          const colNames = info.map(c => c.name);
+          const colLower = colNames.map(c => c.toLowerCase());
+          console.log(`[VTDB] Inspecting fallback table "${tbl}":`, colNames);
+          const looksLikeTools = colLower.some(c =>
+            ['name', 'toolname', 'diameter', 'tooltype', 'type'].includes(c)
+          );
+          if (looksLikeTools) {
+            columns = colNames;
             rows = db.prepare(`SELECT * FROM "${tbl}"`).all();
+            console.log(`[VTDB] Using fallback table "${tbl}", ${rows.length} rows`);
+            console.log('[VTDB] First 3 rows:', JSON.stringify(rows.slice(0, 3), null, 2));
             usedTable = tbl;
             break;
           }
-        } catch {}
+        } catch (e) {
+          console.log(`[VTDB] Error inspecting table "${tbl}":`, e.message);
+        }
       }
     }
 
@@ -371,7 +388,7 @@ ipcMain.handle('import-vtdb', async (_, filePath) => {
       };
     }
 
-    return { ok: true, rows, table: usedTable };
+    return { ok: true, rows, table: usedTable, columns };
   } catch (err) {
     if (db) { try { db.close(); } catch {} }
     const isABI = /NODE_MODULE_VERSION|was compiled against|binding/i.test(err.message || '');
