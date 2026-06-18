@@ -138,9 +138,13 @@ const initialState = {
   statusMessage: '',
   medialAxisPolylines: null,  // set by V-carve skeleton toggle
 
-  // Undo/redo
-  history: [],
-  historyIndex: -1,
+  // Drawing tools
+  activeTool: 'select',  // 'select' | 'line' | 'circle' | 'arc' | 'rect'
+  gridSnap: false,
+
+  // Undo/redo for entity edits (snapshots of entities array, capped at 50)
+  entityHistory: [],
+  entityFuture: [],
 };
 
 function reducer(state, action) {
@@ -148,7 +152,7 @@ function reducer(state, action) {
 
     case 'SET_DXF': {
       const { entities, layers, bounds } = action.payload;
-      return { ...state, entities, layers, bounds, selectedEntityIds: [], dirty: true };
+      return { ...state, entities, layers, bounds, selectedEntityIds: [], entityHistory: [], entityFuture: [], dirty: true };
     }
 
     case 'SET_LAYERS': return { ...state, layers: action.payload };
@@ -308,10 +312,28 @@ function reducer(state, action) {
     case 'SELECT_TOOL':  return { ...state, selectedToolId: action.payload };
 
     // Entity editing
+    case 'ADD_ENTITIES': {
+      const newLayers = { ...state.layers };
+      if (!newLayers['0']) newLayers['0'] = { name: '0', color: '#4488ff', visible: true };
+      return {
+        ...state,
+        entities: [...state.entities, ...action.payload],
+        layers: newLayers,
+        entityHistory: [...state.entityHistory.slice(-49), state.entities],
+        entityFuture: [],
+        dirty: true,
+      };
+    }
     case 'TRANSFORM_ENTITIES': {
       const map = {};
       for (const e of action.payload) map[e.id] = e;
-      return { ...state, entities: state.entities.map(e => map[e.id] ? { ...e, ...map[e.id] } : e), dirty: true };
+      return {
+        ...state,
+        entities: state.entities.map(e => map[e.id] ? { ...e, ...map[e.id] } : e),
+        entityHistory: [...state.entityHistory.slice(-49), state.entities],
+        entityFuture: [],
+        dirty: true,
+      };
     }
     case 'DELETE_ENTITIES': {
       const ids = new Set(action.payload);
@@ -319,9 +341,39 @@ function reducer(state, action) {
         ...state,
         entities: state.entities.filter(e => !ids.has(e.id)),
         selectedEntityIds: state.selectedEntityIds.filter(id => !ids.has(id)),
+        entityHistory: [...state.entityHistory.slice(-49), state.entities],
+        entityFuture: [],
         dirty: true,
       };
     }
+    case 'UNDO_ENTITY': {
+      if (!state.entityHistory.length) return state;
+      const prev = state.entityHistory[state.entityHistory.length - 1];
+      return {
+        ...state,
+        entities: prev,
+        entityHistory: state.entityHistory.slice(0, -1),
+        entityFuture: [state.entities, ...state.entityFuture.slice(0, 49)],
+        selectedEntityIds: [],
+        dirty: true,
+      };
+    }
+    case 'REDO_ENTITY': {
+      if (!state.entityFuture.length) return state;
+      const next = state.entityFuture[0];
+      return {
+        ...state,
+        entities: next,
+        entityHistory: [...state.entityHistory.slice(-49), state.entities],
+        entityFuture: state.entityFuture.slice(1),
+        selectedEntityIds: [],
+        dirty: true,
+      };
+    }
+
+    // Drawing tools
+    case 'SET_ACTIVE_TOOL': return { ...state, activeTool: action.payload };
+    case 'TOGGLE_GRID_SNAP':  return { ...state, gridSnap: !state.gridSnap };
 
     // Machine
     case 'SET_MACHINE_CONFIG': return { ...state, machineConfig: { ...state.machineConfig, ...action.payload }, dirty: true };
@@ -436,6 +488,8 @@ function reducer(state, action) {
         gcodeOutput:   '',
         selectedEntityIds: [],
         selectedOperationId: null,
+        entityHistory: [],
+        entityFuture: [],
         dirty: false,
       };
     }

@@ -145,7 +145,7 @@ const S = {
 
 export default function App() {
   const { state, dispatch, getProject } = useApp();
-  const { activePanelTab, statusMessage, selectedEntityIds, entities, operations, postConfig } = state;
+  const { activePanelTab, statusMessage, selectedEntityIds, entities, operations, postConfig, activeTool, gridSnap } = state;
   const [modal, setModal] = useState(null); // 'profiles' | 'tool-library' | 'about' | 'inlay-wizard'
 
   useEffect(() => {
@@ -374,6 +374,27 @@ export default function App() {
           <button style={S.tbBtn} onClick={importDxf}>📐 Import DXF</button>
           <button style={S.tbBtn} onClick={exportGcode}>💾 Export G-code</button>
           <button style={{ ...S.tbBtn, borderColor:'#3a4a2a', color:'#99cc88' }} onClick={() => setModal('inlay-wizard')}>⬡ Inlay Wizard</button>
+          <div style={{ width:1, background:'#2a2a50', margin:'0 4px' }} />
+          {/* Drawing tools */}
+          {[
+            { key: 'select',   label: '▲ Select',  title: 'Select / Move / Scale / Rotate' },
+            { key: 'line',     label: '/ Line',    title: 'Line tool — click start, click end (Shift=45°)' },
+            { key: 'circle',   label: '○ Circle',  title: 'Circle tool — click center, drag radius' },
+            { key: 'arc',      label: '⌒ Arc',     title: 'Arc tool — 3-point arc: start, end, midpoint' },
+            { key: 'rect',     label: '□ Rect',    title: 'Rectangle tool — click and drag (Shift=square)' },
+          ].map(({ key, label, title }) => (
+            <button
+              key={key}
+              title={title}
+              style={{ ...S.tbBtn, ...(activeTool === key ? { background:'#1a3a1a', border:'1px solid #44aa44', color:'#88ff88' } : {}) }}
+              onClick={() => dispatch({ type: 'SET_ACTIVE_TOOL', payload: key })}
+            >{label}</button>
+          ))}
+          <button
+            title="Grid snap (10mm grid)"
+            style={{ ...S.tbBtn, ...(gridSnap ? { background:'#1a2a3a', border:'1px solid #4488aa', color:'#88ccff' } : {}) }}
+            onClick={() => dispatch({ type: 'TOGGLE_GRID_SNAP' })}
+          >⊞ Snap</button>
           <div style={{ width:1, background:'#2a2a50', margin:'0 4px' }} />
           <button style={{ ...S.tbBtn, ...(state.showToolpaths ? S.tbBtnActive : {}) }} onClick={() => dispatch({ type: 'TOGGLE_TOOLPATHS' })}>⬡ Paths</button>
           <button style={{ ...S.tbBtn, ...(state.showRapids ? S.tbBtnActive : {}) }} onClick={() => dispatch({ type: 'TOGGLE_RAPIDS' })}>↗ Rapids</button>

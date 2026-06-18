@@ -1,4 +1,5 @@
 import React, { useRef, useEffect, useCallback, useState, useMemo } from 'react';
+import { v4 as uuid } from 'uuid';
 import { useApp } from '../../store/AppContext';
 import { circleToPoints, arcToPoints, polylineToPoints } from '../../dxf/parser';
 import { computeAutoTabPositions } from '../../cam/toolpath';
@@ -66,6 +67,88 @@ function applyXform(entity, xf) {
   }
 }
 
+// ── Drawing tool helpers ──────────────────────────────────────────────────────
+
+function getEntitySnapPoints(e) {
+  const pts = [];
+  switch (e.type) {
+    case 'line':
+      pts.push({ pt: e.start, type: 'endpoint' }, { pt: e.end, type: 'endpoint' },
+        { pt: { x: (e.start.x+e.end.x)/2, y: (e.start.y+e.end.y)/2 }, type: 'midpoint' });
+      break;
+    case 'circle':
+      pts.push({ pt: e.center, type: 'center' });
+      for (let a = 0; a < Math.PI*2; a += Math.PI/2)
+        pts.push({ pt: { x: e.center.x + e.radius*Math.cos(a), y: e.center.y + e.radius*Math.sin(a) }, type: 'endpoint' });
+      break;
+    case 'arc': {
+      const s = { x: e.center.x + e.radius*Math.cos(e.startAngle), y: e.center.y + e.radius*Math.sin(e.startAngle) };
+      const en = { x: e.center.x + e.radius*Math.cos(e.endAngle),   y: e.center.y + e.radius*Math.sin(e.endAngle) };
+      let span = e.endAngle - e.startAngle; while (span < 0) span += Math.PI*2;
+      const ma = e.startAngle + span/2;
+      pts.push({ pt: s, type: 'endpoint' }, { pt: en, type: 'endpoint' },
+        { pt: { x: e.center.x + e.radius*Math.cos(ma), y: e.center.y + e.radius*Math.sin(ma) }, type: 'midpoint' },
+        { pt: e.center, type: 'center' });
+      break;
+    }
+    case 'polyline':
+      (e.vertices||[]).forEach((v, i, arr) => {
+        pts.push({ pt: v, type: 'endpoint' });
+        const next = arr[i+1] ?? (e.closed ? arr[0] : null);
+        if (next) pts.push({ pt: { x: (v.x+next.x)/2, y: (v.y+next.y)/2 }, type: 'midpoint' });
+      });
+      break;
+    default: break;
+  }
+  return pts;
+}
+
+function snapEntities(world, entities, layers, radius) {
+  // Priority: endpoint > center > midpoint
+  const priority = { endpoint: 0, center: 1, midpoint: 2 };
+  let best = null, bestDist = Infinity, bestPri = 99;
+  for (const e of entities) {
+    const layer = layers[e.layer];
+    if (layer && !layer.visible) continue;
+    for (const { pt, type } of getEntitySnapPoints(e)) {
+      const d = Math.hypot(pt.x - world.x, pt.y - world.y);
+      const pri = priority[type] ?? 99;
+      if (d < radius && (d < bestDist - 0.01 || (Math.abs(d - bestDist) < 0.01 && pri < bestPri))) {
+        bestDist = d; bestPri = pri;
+        best = { x: pt.x, y: pt.y, snapType: type };
+      }
+    }
+  }
+  return best;
+}
+
+// Returns { center, radius, startAngle, endAngle } for an arc through 3 points,
+// or null if points are collinear.
+function arcFrom3Pts(p1, p2, p3) {
+  const ax = p2.x-p1.x, ay = p2.y-p1.y;
+  const bx = p3.x-p1.x, by = p3.y-p1.y;
+  const D = 2*(ax*by - ay*bx);
+  if (Math.abs(D) < 1e-10) return null;
+  const ux = (by*(ax*ax+ay*ay) - ay*(bx*bx+by*by)) / D;
+  const uy = (ax*(bx*bx+by*by) - bx*(ax*ax+ay*ay)) / D;
+  const cx = p1.x+ux, cy = p1.y+uy;
+  const r = Math.hypot(p1.x-cx, p1.y-cy);
+  let sa = Math.atan2(p1.y-cy, p1.x-cx);
+  let ea = Math.atan2(p2.y-cy, p2.x-cx);
+  const ma = Math.atan2(p3.y-cy, p3.x-cx);
+  // Normalize to CCW from sa; ensure midpoint p3 falls on the arc
+  const norm = (a, ref) => { let x = a-ref; while (x < 0) x += Math.PI*2; return x; };
+  if (norm(ma, sa) > norm(ea, sa)) { const t=sa; sa=ea; ea=t; }
+  return { center: { x: cx, y: cy }, radius: r, startAngle: sa, endAngle: ea };
+}
+
+function constrainTo45(start, end) {
+  const dx = end.x-start.x, dy = end.y-start.y;
+  const dist = Math.hypot(dx, dy);
+  const angle = Math.round(Math.atan2(dy, dx) / (Math.PI/4)) * (Math.PI/4);
+  return { x: start.x + dist*Math.cos(angle), y: start.y + dist*Math.sin(angle) };
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 
 export default function CAMCanvas() {
@@ -83,7 +166,7 @@ export default function CAMCanvas() {
     statusTimerRef.current = setTimeout(() => setStatusMsg(''), 2000);
   }
 
-  const { viewport, entities, layers, operations, selectedEntityIds, hoveredEntityId, showToolpaths, showRapids, bounds, stockConfig, tabPlacementActive, tabPlacementOpId, dogboneSelectionActive, dogboneSelectionOpId, textPlacementActive, textPlacementOpId, medialAxisPolylines, postConfig } = state;
+  const { viewport, entities, layers, operations, selectedEntityIds, hoveredEntityId, showToolpaths, showRapids, bounds, stockConfig, tabPlacementActive, tabPlacementOpId, dogboneSelectionActive, dogboneSelectionOpId, textPlacementActive, textPlacementOpId, medialAxisPolylines, postConfig, activeTool, gridSnap } = state;
   const isInch = postConfig?.units === 'inch';
 
   const [canvasDims, setCanvasDims] = useState({ w: 0, h: 0 });
@@ -92,6 +175,14 @@ export default function CAMCanvas() {
   const xfRef  = useRef(null); // current live transform applied in drawEntities
   const onDragMoveRef = useRef(null);
   const onDragUpRef   = useRef(null);
+
+  // Drawing tool state
+  const drawStateRef  = useRef(null);  // { tool, pts[], dragging? }
+  const previewRef    = useRef(null);  // { cur: {x,y}, snapType, shift }
+  const lastSnapRef   = useRef(null);  // { pos: {x,y}, shift } — for drag-commit on mouseup
+  const onDrawMoveRef = useRef(null);  // fresh-closure draw preview handler
+  const onDrawClickRef = useRef(null); // fresh-closure draw click handler
+  const [drawPhase, setDrawPhase] = useState(0); // incremented after each draw interaction
 
   const [zSliderPos, setZSliderPos] = useState(0); // 0 = all passes; 1..N = pass index
   const [isAnimating, setIsAnimating] = useState(false);
@@ -133,6 +224,18 @@ export default function CAMCanvas() {
     const t = setTimeout(() => setZSliderPos(p => p + 1), 700);
     return () => clearTimeout(t);
   }, [isAnimating, zSliderPos, zLevels.length]);
+
+  // Reset draw state whenever the active tool changes
+  useEffect(() => {
+    if (activeTool === 'select') {
+      drawStateRef.current = null;
+    } else {
+      drawStateRef.current = { tool: activeTool, pts: [], dragging: false };
+    }
+    previewRef.current = null;
+    lastSnapRef.current = null;
+    setDrawPhase(p => p + 1);
+  }, [activeTool]);
 
   function togglePlay() {
     if (isAnimating) { setIsAnimating(false); }
@@ -211,6 +314,7 @@ export default function CAMCanvas() {
       drawTextPreviews(ctx);
     }
     if (medialAxisPolylines?.length) drawMedialAxis(ctx);
+    drawPreview(ctx);
     drawMouseCoords(ctx);
   }
 
@@ -647,7 +751,112 @@ export default function CAMCanvas() {
     ctx.fillText(`X: ${cx.toFixed(decimals)}  Y: ${cy.toFixed(decimals)} ${unit}`, 14, ctx.canvas.height - 14);
   }
 
-  useEffect(() => { draw(); }, [entities, layers, operations, viewport, selectedEntityIds, hoveredEntityId, showToolpaths, showRapids, mousePos, stockConfig, zSliderPos, zLevels, tabPlacementActive, tabPlacementOpId, dogboneSelectionActive, dogboneSelectionOpId, textPlacementActive, textPlacementOpId, medialAxisPolylines, liveXf]);
+  function drawSnapIndicator(ctx, pt, type) {
+    if (!type) return;
+    const s = w2c(pt.x, pt.y);
+    const sz = 7;
+    ctx.setLineDash([]);
+    ctx.lineWidth = 1.5;
+    if (type === 'endpoint') {
+      ctx.strokeStyle = '#ffcc44';
+      ctx.strokeRect(s.x - sz/2, s.y - sz/2, sz, sz);
+    } else if (type === 'midpoint') {
+      ctx.strokeStyle = '#44aaff';
+      ctx.beginPath();
+      ctx.moveTo(s.x, s.y - sz/2); ctx.lineTo(s.x + sz/2, s.y);
+      ctx.lineTo(s.x, s.y + sz/2); ctx.lineTo(s.x - sz/2, s.y);
+      ctx.closePath(); ctx.stroke();
+    } else if (type === 'center') {
+      ctx.strokeStyle = '#44ff88';
+      ctx.beginPath(); ctx.arc(s.x, s.y, sz/2, 0, Math.PI*2); ctx.stroke();
+    } else if (type === 'grid') {
+      ctx.strokeStyle = '#44ff88'; ctx.lineWidth = 1;
+      ctx.beginPath();
+      ctx.moveTo(s.x - sz/2, s.y); ctx.lineTo(s.x + sz/2, s.y);
+      ctx.moveTo(s.x, s.y - sz/2); ctx.lineTo(s.x, s.y + sz/2);
+      ctx.stroke();
+    }
+  }
+
+  function drawPreview(ctx) {
+    const ds = drawStateRef.current;
+    const pv = previewRef.current;
+    if (!ds || !pv) return;
+    const { cur, snapType, shift } = pv;
+    const pts = ds.pts;
+
+    // Committed-point markers
+    ctx.setLineDash([]);
+    for (const p of pts) {
+      const s = w2c(p.x, p.y);
+      ctx.fillStyle = '#ffcc44';
+      ctx.beginPath(); ctx.arc(s.x, s.y, 3, 0, Math.PI*2); ctx.fill();
+    }
+
+    ctx.strokeStyle = '#44ff88';
+    ctx.lineWidth = 1;
+    ctx.setLineDash([5, 3]);
+
+    switch (ds.tool) {
+      case 'line': {
+        if (pts.length < 1) break;
+        const end = shift ? constrainTo45(pts[0], cur) : cur;
+        const s0 = w2c(pts[0].x, pts[0].y), se = w2c(end.x, end.y);
+        ctx.beginPath(); ctx.moveTo(s0.x, s0.y); ctx.lineTo(se.x, se.y); ctx.stroke();
+        break;
+      }
+      case 'circle': {
+        if (pts.length < 1) break;
+        const r = Math.hypot(cur.x - pts[0].x, cur.y - pts[0].y);
+        if (r < 0.01) break;
+        const c = w2c(pts[0].x, pts[0].y);
+        ctx.beginPath(); ctx.arc(c.x, c.y, r * viewport.zoom, 0, Math.PI*2); ctx.stroke();
+        // Radius label
+        const MM_PER_INCH = 25.4;
+        const rDisp = isInch ? r / MM_PER_INCH : r;
+        const ls = w2c(pts[0].x, pts[0].y + r);
+        ctx.setLineDash([]);
+        ctx.fillStyle = '#44ff88'; ctx.font = '11px monospace';
+        ctx.fillText(`r=${rDisp.toFixed(isInch?3:2)}${isInch?'″':'mm'}`, ls.x + 6, ls.y);
+        break;
+      }
+      case 'arc': {
+        if (pts.length === 1) {
+          const s0 = w2c(pts[0].x, pts[0].y), sc = w2c(cur.x, cur.y);
+          ctx.beginPath(); ctx.moveTo(s0.x, s0.y); ctx.lineTo(sc.x, sc.y); ctx.stroke();
+        } else if (pts.length === 2) {
+          const arc = arcFrom3Pts(pts[0], pts[1], cur);
+          if (arc) {
+            const arcPts = arcToPoints(arc.center, arc.radius, arc.startAngle, arc.endAngle, 64);
+            if (arcPts.length > 1) {
+              const f = w2c(arcPts[0].x, arcPts[0].y);
+              ctx.beginPath(); ctx.moveTo(f.x, f.y);
+              for (let i = 1; i < arcPts.length; i++) {
+                const p = w2c(arcPts[i].x, arcPts[i].y); ctx.lineTo(p.x, p.y);
+              }
+              ctx.stroke();
+            }
+          }
+        }
+        break;
+      }
+      case 'rect': {
+        if (pts.length < 1) break;
+        let dx = cur.x - pts[0].x, dy = cur.y - pts[0].y;
+        if (shift) { const s = Math.max(Math.abs(dx), Math.abs(dy)); dx = Math.sign(dx)*s; dy = Math.sign(dy)*s; }
+        if (Math.abs(dx) < 0.01 || Math.abs(dy) < 0.01) break;
+        const x2 = pts[0].x + dx, y2 = pts[0].y + dy;
+        const tl = w2c(Math.min(pts[0].x, x2), Math.max(pts[0].y, y2));
+        const br = w2c(Math.max(pts[0].x, x2), Math.min(pts[0].y, y2));
+        ctx.beginPath(); ctx.strokeRect(tl.x, tl.y, br.x - tl.x, br.y - tl.y); ctx.stroke();
+        break;
+      }
+    }
+    ctx.setLineDash([]);
+    drawSnapIndicator(ctx, cur, snapType);
+  }
+
+  useEffect(() => { draw(); }, [entities, layers, operations, viewport, selectedEntityIds, hoveredEntityId, showToolpaths, showRapids, mousePos, stockConfig, zSliderPos, zLevels, tabPlacementActive, tabPlacementOpId, dogboneSelectionActive, dogboneSelectionOpId, textPlacementActive, textPlacementOpId, medialAxisPolylines, liveXf, drawPhase]);
 
   // Mouse events
   const onMouseDown = useCallback((e) => {
@@ -749,6 +958,12 @@ export default function CAMCanvas() {
       return;
     }
 
+    // ── Drawing tools ──────────────────────────────────────────────────────
+    if (activeTool !== 'select' && e.button === 0) {
+      onDrawClickRef.current?.(world, e.shiftKey);
+      return;
+    }
+
     // ── Normal entity selection / move drag ───────────────────────────────
     if (e.button === 0) {
       const hit = findEntityAt(world, 10 / viewport.zoom);
@@ -765,7 +980,7 @@ export default function CAMCanvas() {
         dispatch({ type: 'SELECT_ENTITIES', payload: [] });
       }
     }
-  }, [viewport, c2w, dispatch, tabPlacementActive, tabPlacementOpId, dogboneSelectionActive, dogboneSelectionOpId, textPlacementActive, textPlacementOpId, operations, selectedEntityIds]);
+  }, [viewport, c2w, dispatch, tabPlacementActive, tabPlacementOpId, dogboneSelectionActive, dogboneSelectionOpId, textPlacementActive, textPlacementOpId, operations, selectedEntityIds, activeTool]);
 
   const onMouseMove = useCallback((e) => {
     const canvas = canvasRef.current;
@@ -793,6 +1008,11 @@ export default function CAMCanvas() {
       return;
     }
 
+    // Draw tool preview (non-dragging — line/arc click modes and hover snap)
+    if (!draggingTabRef.current) {
+      onDrawMoveRef.current?.(cx, cy, e.shiftKey);
+    }
+
     const world = c2w(cx, cy);
     const hit = findEntityAt(world, 8 / viewport.zoom);
     dispatch({ type: 'HOVER_ENTITY', payload: hit?.id || null });
@@ -816,6 +1036,60 @@ export default function CAMCanvas() {
       showStatus(`Selected ${connectedIds.length} connected entities`);
     }
   }, [viewport, c2w, entities, layers, dispatch]);
+
+  // Composite snap: entity snap first, then grid, then raw
+  onDrawMoveRef.current = (cx, cy, shiftHeld) => {
+    const ds = drawStateRef.current;
+    if (!ds) return;
+    const world = c2w(cx, cy);
+    const snapRadius = 14 / viewport.zoom;
+    const entitySnap = snapEntities(world, entities, layers, snapRadius);
+    let snapped = world, snapType = null;
+    if (entitySnap) {
+      snapped = entitySnap; snapType = entitySnap.snapType;
+    } else if (gridSnap) {
+      snapped = { x: Math.round(world.x / 10) * 10, y: Math.round(world.y / 10) * 10 };
+      snapType = 'grid';
+    }
+    previewRef.current = { cur: snapped, snapType, shift: shiftHeld };
+    lastSnapRef.current = { pos: snapped, shift: shiftHeld };
+  };
+
+  onDrawClickRef.current = (world, shiftHeld) => {
+    const ds = drawStateRef.current;
+    if (!ds) return;
+    const snapped = previewRef.current?.cur ?? world;
+
+    switch (ds.tool) {
+      case 'line':
+        if (ds.pts.length === 0) {
+          drawStateRef.current = { ...ds, pts: [snapped] };
+        } else {
+          const end = shiftHeld ? constrainTo45(ds.pts[0], snapped) : snapped;
+          dispatch({ type: 'ADD_ENTITIES', payload: [{ id: uuid(), type: 'line', layer: '0', start: { ...ds.pts[0] }, end: { ...end } }] });
+          drawStateRef.current = { tool: 'line', pts: [], dragging: false };
+        }
+        break;
+      case 'circle':
+        // mousedown sets center and enters drag mode; commit happens on mouseup
+        if (!ds.dragging) drawStateRef.current = { ...ds, pts: [snapped], dragging: true };
+        break;
+      case 'arc':
+        if (ds.pts.length < 2) {
+          drawStateRef.current = { ...ds, pts: [...ds.pts, snapped] };
+        } else {
+          const arc = arcFrom3Pts(ds.pts[0], ds.pts[1], snapped);
+          if (arc) dispatch({ type: 'ADD_ENTITIES', payload: [{ id: uuid(), type: 'arc', layer: '0', ...arc }] });
+          drawStateRef.current = { tool: 'arc', pts: [], dragging: false };
+        }
+        break;
+      case 'rect':
+        // mousedown sets corner and enters drag mode; commit happens on mouseup
+        if (!ds.dragging) drawStateRef.current = { ...ds, pts: [snapped], dragging: true };
+        break;
+    }
+    setDrawPhase(p => p + 1);
+  };
 
   const onWheelRef = useRef(null);
   onWheelRef.current = (e) => {
@@ -844,38 +1118,80 @@ export default function CAMCanvas() {
 
   // Window-level drag handlers (move / scale / rotate)
   onDragMoveRef.current = (e) => {
-    const dr = dragRef.current;
-    if (!dr) return;
     const canvas = canvasRef.current;
     const rect = canvas.getBoundingClientRect();
-    const cur = c2w(e.clientX - rect.left, e.clientY - rect.top);
-    let xf;
-    if (dr.type === 'move') {
-      xf = { type: 'move', dx: cur.x - dr.startWorld.x, dy: cur.y - dr.startWorld.y };
-    } else if (dr.type === 'scale') {
-      const orig = Math.hypot(dr.startWorld.x - dr.cx, dr.startWorld.y - dr.cy) || 1;
-      const now  = Math.hypot(cur.x - dr.cx, cur.y - dr.cy);
-      xf = { type: 'scale', cx: dr.cx, cy: dr.cy, s: now / orig };
-    } else if (dr.type === 'rotate') {
-      const a = Math.atan2(cur.y - dr.cy, cur.x - dr.cx) - dr.startAngle;
-      xf = { type: 'rotate', cx: dr.cx, cy: dr.cy, a };
+    const cx = e.clientX - rect.left, cy = e.clientY - rect.top;
+
+    // Transform drag (move/scale/rotate handles)
+    const dr = dragRef.current;
+    if (dr) {
+      const cur = c2w(cx, cy);
+      let xf;
+      if (dr.type === 'move') {
+        xf = { type: 'move', dx: cur.x - dr.startWorld.x, dy: cur.y - dr.startWorld.y };
+      } else if (dr.type === 'scale') {
+        const orig = Math.hypot(dr.startWorld.x - dr.cx, dr.startWorld.y - dr.cy) || 1;
+        const now  = Math.hypot(cur.x - dr.cx, cur.y - dr.cy);
+        xf = { type: 'scale', cx: dr.cx, cy: dr.cy, s: now / orig };
+      } else if (dr.type === 'rotate') {
+        const a = Math.atan2(cur.y - dr.cy, cur.x - dr.cx) - dr.startAngle;
+        xf = { type: 'rotate', cx: dr.cx, cy: dr.cy, a };
+      }
+      xfRef.current = xf;
+      setLiveXf(xf);
+      return;
     }
-    xfRef.current = xf;
-    setLiveXf(xf); // triggers overlay re-render
+
+    // Draw drag (circle center → radius, rect corner → opposite corner)
+    if (drawStateRef.current?.dragging) {
+      onDrawMoveRef.current?.(cx, cy, e.shiftKey);
+      setDrawPhase(p => p + 1); // force canvas repaint for preview
+    }
   };
 
   onDragUpRef.current = () => {
+    // Transform drag commit
     const dr = dragRef.current;
-    if (!dr) return;
-    dragRef.current = null;
-    const xf = xfRef.current;
-    xfRef.current = null;
-    setLiveXf(null);
-    if (!xf) return;
-    const updated = entities
-      .filter(e => selectedEntityIds.includes(e.id))
-      .map(e => applyXform(e, xf));
-    dispatch({ type: 'TRANSFORM_ENTITIES', payload: updated });
+    if (dr) {
+      dragRef.current = null;
+      const xf = xfRef.current;
+      xfRef.current = null;
+      setLiveXf(null);
+      if (xf) {
+        const updated = entities.filter(e => selectedEntityIds.includes(e.id)).map(e => applyXform(e, xf));
+        dispatch({ type: 'TRANSFORM_ENTITIES', payload: updated });
+      }
+      return;
+    }
+
+    // Drawing drag commit (circle, rect)
+    const ds = drawStateRef.current;
+    if (!ds?.dragging || !lastSnapRef.current) {
+      if (ds) drawStateRef.current = { ...ds, dragging: false };
+      return;
+    }
+    const { pos, shift } = lastSnapRef.current;
+
+    if (ds.tool === 'circle') {
+      const r = Math.hypot(pos.x - ds.pts[0].x, pos.y - ds.pts[0].y);
+      if (r > 0.01) dispatch({ type: 'ADD_ENTITIES', payload: [{ id: uuid(), type: 'circle', layer: '0', center: { ...ds.pts[0] }, radius: r }] });
+      drawStateRef.current = { tool: 'circle', pts: [], dragging: false };
+    } else if (ds.tool === 'rect') {
+      let dx = pos.x - ds.pts[0].x, dy = pos.y - ds.pts[0].y;
+      if (shift) { const s = Math.max(Math.abs(dx), Math.abs(dy)); dx = Math.sign(dx)*s; dy = Math.sign(dy)*s; }
+      const x2 = ds.pts[0].x + dx, y2 = ds.pts[0].y + dy;
+      if (Math.abs(dx) > 0.01 && Math.abs(dy) > 0.01) {
+        const minX = Math.min(ds.pts[0].x, x2), maxX = Math.max(ds.pts[0].x, x2);
+        const minY = Math.min(ds.pts[0].y, y2), maxY = Math.max(ds.pts[0].y, y2);
+        dispatch({ type: 'ADD_ENTITIES', payload: [{ id: uuid(), type: 'polyline', layer: '0',
+          vertices: [{ x: minX, y: minY }, { x: maxX, y: minY }, { x: maxX, y: maxY }, { x: minX, y: maxY }],
+          closed: true }] });
+      }
+      drawStateRef.current = { tool: 'rect', pts: [], dragging: false };
+    }
+    previewRef.current = null;
+    lastSnapRef.current = null;
+    setDrawPhase(p => p + 1);
   };
 
   useEffect(() => {
@@ -886,11 +1202,33 @@ export default function CAMCanvas() {
     return () => { window.removeEventListener('mousemove', mm); window.removeEventListener('mouseup', mu); };
   }, []);
 
-  // Delete key removes selected entities
+  // Keyboard shortcuts: Delete, Escape (cancel draw), Ctrl+Z (undo), Ctrl+Y/Shift+Z (redo)
   useEffect(() => {
     const onKey = (e) => {
+      const tag = document.activeElement?.tagName;
+      if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT') return;
+
+      if (e.key === 'Escape') {
+        if (drawStateRef.current) {
+          drawStateRef.current = null;
+          previewRef.current = null;
+          dispatch({ type: 'SET_ACTIVE_TOOL', payload: 'select' });
+          setDrawPhase(p => p + 1);
+        }
+        return;
+      }
       if (e.key === 'Delete' && selectedEntityIds.length > 0) {
         dispatch({ type: 'DELETE_ENTITIES', payload: selectedEntityIds });
+        return;
+      }
+      if (e.ctrlKey && !e.shiftKey && e.key === 'z') {
+        e.preventDefault();
+        dispatch({ type: 'UNDO_ENTITY' });
+        return;
+      }
+      if (e.ctrlKey && (e.key === 'y' || (e.shiftKey && e.key === 'z'))) {
+        e.preventDefault();
+        dispatch({ type: 'REDO_ENTITY' });
       }
     };
     window.addEventListener('keydown', onKey);
@@ -994,7 +1332,7 @@ export default function CAMCanvas() {
       <canvas
         ref={canvasRef}
         style={{ width: '100%', height: '100%', display: 'block',
-          cursor: isPanning ? 'grabbing' : (tabPlacementActive || dogboneSelectionActive || textPlacementActive) ? 'cell' : 'crosshair' }}
+          cursor: isPanning ? 'grabbing' : (tabPlacementActive || dogboneSelectionActive || textPlacementActive) ? 'cell' : activeTool !== 'select' ? 'crosshair' : 'default' }}
         onMouseDown={onMouseDown}
         onMouseMove={onMouseMove}
         onMouseUp={onMouseUp}
@@ -1057,6 +1395,23 @@ export default function CAMCanvas() {
           Click to place text origin (baseline of first line)
         </div>
       )}
+
+      {/* ── Drawing tool status banner ───────────────────────────────────────── */}
+      {activeTool !== 'select' && !tabPlacementActive && !dogboneSelectionActive && !textPlacementActive && (() => {
+        const ds = drawStateRef.current;
+        const msgs = {
+          line: ds?.pts?.length === 1 ? 'Click to set endpoint (Shift = 45°)' : 'Click to set start point',
+          circle: ds?.dragging ? 'Release to set radius' : 'Click to set center, drag to set radius',
+          arc: ds?.pts?.length === 2 ? 'Click a point on the arc' : ds?.pts?.length === 1 ? 'Click to set end point' : 'Click to set start point',
+          rect: ds?.dragging ? 'Release to set opposite corner (Shift = square)' : 'Click and drag to draw rectangle',
+        };
+        const labels = { line: 'Line', circle: 'Circle', arc: 'Arc', rect: 'Rectangle' };
+        return (
+          <div style={{ position: 'absolute', top: 8, left: '50%', transform: 'translateX(-50%)', background: 'rgba(10,30,10,0.9)', color: '#88ff88', padding: '4px 14px', borderRadius: 4, fontSize: 11, pointerEvents: 'none', border: '1px solid rgba(68,255,68,0.4)', whiteSpace: 'nowrap' }}>
+            <strong>{labels[activeTool]}</strong> — {msgs[activeTool]} · Esc to cancel
+          </div>
+        );
+      })()}
 
       {/* ── Entity transform overlay ─────────────────────────────────────────── */}
       {overlayScreen && selectedEntityIds.length > 0 && !tabPlacementActive && !dogboneSelectionActive && !textPlacementActive && (() => {
