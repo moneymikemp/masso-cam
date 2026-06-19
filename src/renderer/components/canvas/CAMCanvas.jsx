@@ -982,7 +982,7 @@ export default function CAMCanvas() {
       setChamferD1Str(String(d(chamferDist1Ref.current)));
       setChamferD2Str(String(d(chamferDist2Ref.current)));
     }
-  }, [activeTool]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [activeTool]);
 
   // Show/hide dim input overlay based on draw state phase
   useEffect(() => {
