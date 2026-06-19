@@ -6,7 +6,7 @@ const MM = 25.4;
 
 const S = {
   overlay:  { position:'fixed', inset:0, background:'rgba(0,0,0,0.78)', zIndex:1000, display:'flex', alignItems:'center', justifyContent:'center' },
-  wizard:   { background:'#1a1a38', border:'1px solid #3a3a70', borderRadius:10, width:700, maxWidth:'96vw', maxHeight:'92vh', display:'flex', flexDirection:'column', fontFamily:'system-ui,sans-serif', color:'#ccc', overflow:'hidden' },
+  wizard:   { background:'#1a1a38', border:'1px solid #3a3a70', borderRadius:10, width:900, maxWidth:'96vw', maxHeight:'92vh', display:'flex', flexDirection:'column', fontFamily:'system-ui,sans-serif', color:'#ccc', overflow:'hidden' },
   hdr:      { padding:'14px 20px 12px', borderBottom:'1px solid #2a2a50', flexShrink:0 },
   hdrTitle: { fontSize:15, fontWeight:700, color:'#aaaaff', marginBottom:12 },
   body:     { flex:1, overflow:'auto', padding:'18px 22px', minHeight:0 },
