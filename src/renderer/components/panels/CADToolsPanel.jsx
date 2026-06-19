@@ -24,7 +24,8 @@ const TOOL_GROUPS = [
     tools: [
       { key: 'trim',   label: '✂',  title: 'Trim — click a segment to trim it at intersecting edges' },
       { key: 'extend', label: '→|', title: 'Extend — click near an end of a line or arc to extend to nearest boundary' },
-      { key: 'fillet', label: '╭',  title: 'Fillet — click two lines to round the corner (set radius in overlay)' },
+      { key: 'fillet',  label: '╭',  title: 'Fillet — click two lines to round the corner (set radius in overlay)' },
+      { key: 'chamfer', label: '⌐',  title: 'Chamfer — click two lines to cut the corner at an angle (set distance in overlay)' },
     ],
   },
   {

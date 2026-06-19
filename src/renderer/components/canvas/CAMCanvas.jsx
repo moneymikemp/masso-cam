@@ -477,6 +477,60 @@ function computeLineFillet(l1, click1, l2, click2, radius) {
   };
 }
 
+// ── Chamfer helpers ───────────────────────────────────────────────────────────
+
+// Returns { trimL1, trimL2, chamferLine } or null if geometrically invalid.
+// dist1 = setback along l1, dist2 = setback along l2 (equal chamfer if both same).
+function computeLineChamfer(l1, click1, l2, click2, dist1, dist2) {
+  const dx1 = l1.end.x-l1.start.x, dy1 = l1.end.y-l1.start.y;
+  const dx2 = l2.end.x-l2.start.x, dy2 = l2.end.y-l2.start.y;
+  const len1 = Math.hypot(dx1, dy1), len2 = Math.hypot(dx2, dy2);
+  if (len1 < 1e-10 || len2 < 1e-10) return null;
+
+  // Intersection of the two infinite lines
+  const den = dx1*dy2 - dy1*dx2;
+  if (Math.abs(den) < 1e-10) return null; // parallel
+  const t1 = ((l2.start.x-l1.start.x)*dy2 - (l2.start.y-l1.start.y)*dx2) / den;
+  const t2 = ((l2.start.x-l1.start.x)*dy1 - (l2.start.y-l1.start.y)*dx1) / den;
+  const ix = l1.start.x + t1*dx1, iy = l1.start.y + t1*dy1;
+
+  // Click parameters — which side of I is kept
+  const t1c = ((click1.x-l1.start.x)*dx1 + (click1.y-l1.start.y)*dy1) / (len1*len1);
+  const t2c = ((click2.x-l2.start.x)*dx2 + (click2.y-l2.start.y)*dy2) / (len2*len2);
+
+  // Unit vectors FROM I toward the kept portion of each line
+  const u1x = t1 > t1c ? -dx1/len1 : dx1/len1;
+  const u1y = t1 > t1c ? -dy1/len1 : dy1/len1;
+  const u2x = t2 > t2c ? -dx2/len2 : dx2/len2;
+  const u2y = t2 > t2c ? -dy2/len2 : dy2/len2;
+
+  // Chamfer points: setback from I along each kept direction
+  const C1 = { x: ix + u1x*dist1, y: iy + u1y*dist1 };
+  const C2 = { x: ix + u2x*dist2, y: iy + u2y*dist2 };
+
+  // Validate setback is within the actual line segment
+  const t1f = ((C1.x-l1.start.x)*dx1 + (C1.y-l1.start.y)*dy1) / (len1*len1);
+  const t2f = ((C2.x-l2.start.x)*dx2 + (C2.y-l2.start.y)*dy2) / (len2*len2);
+  const EPS = 0.02;
+  const dSI1 = Math.hypot(l1.start.x-ix, l1.start.y-iy);
+  const dEI1 = Math.hypot(l1.end.x-ix,   l1.end.y-iy);
+  const kp1  = dSI1 > dEI1 ? 0 : 1;
+  const ke1  = kp1 === 0 ? l1.start : l1.end;
+  if (t1f < Math.min(kp1, t1)-EPS || t1f > Math.max(kp1, t1)+EPS) return null;
+
+  const dSI2 = Math.hypot(l2.start.x-ix, l2.start.y-iy);
+  const dEI2 = Math.hypot(l2.end.x-ix,   l2.end.y-iy);
+  const kp2  = dSI2 > dEI2 ? 0 : 1;
+  const ke2  = kp2 === 0 ? l2.start : l2.end;
+  if (t2f < Math.min(kp2, t2)-EPS || t2f > Math.max(kp2, t2)+EPS) return null;
+
+  return {
+    trimL1:      { ...l1, start: { ...ke1 }, end: { ...C1 } },
+    trimL2:      { ...l2, start: { ...C2 }, end: { ...ke2 } },
+    chamferLine: { id: uuid(), type: 'line', layer: l1.layer || '0', start: { ...C1 }, end: { ...C2 } },
+  };
+}
+
 // ── Measurement label helper ──────────────────────────────────────────────────
 
 function drawMeasureLabel(ctx, text, x, y) {
@@ -786,6 +840,7 @@ export default function CAMCanvas() {
   const [nearGrip, setNearGrip] = useState(false);
   const polygonSidesRef = useRef(6); // persists across polygon draws
   const filletRadiusRef = useRef(5); // persists across fillet operations
+  const chamferDistRef  = useRef(5); // persists across chamfer operations
 
   // Context menu + clipboard
   const [contextMenu, setContextMenu] = useState(null); // { x, y } screen pixels
@@ -862,6 +917,8 @@ export default function CAMCanvas() {
         ? { tool: 'measure', pts: [] }
         : activeTool === 'fillet'
         ? { tool: 'fillet', radius: filletRadiusRef.current, ent1: null, click1: null }
+        : activeTool === 'chamfer'
+        ? { tool: 'chamfer', dist: chamferDistRef.current, ent1: null, click1: null }
         : { tool: activeTool, pts: [], dragging: false };
     }
     previewRef.current = null;
@@ -1732,6 +1789,18 @@ export default function CAMCanvas() {
         }
         break;
       }
+      case 'chamfer': {
+        // Highlight the first selected line in yellow
+        if (ds.ent1) {
+          ctx.save();
+          ctx.strokeStyle = '#ffdd00';
+          ctx.lineWidth = 2;
+          ctx.setLineDash([]);
+          drawEntity(ctx, ds.ent1);
+          ctx.restore();
+        }
+        break;
+      }
     }
     ctx.setLineDash([]);
     drawSnapIndicator(ctx, cur, snapType);
@@ -2152,6 +2221,31 @@ export default function CAMCanvas() {
             showStatus(`Fillet r=${r.toFixed(2)} mm applied`);
           }
           drawStateRef.current = { tool: 'fillet', radius: r, ent1: null, click1: null };
+        }
+        break;
+      }
+      case 'chamfer': {
+        const tol = 8 / viewport.zoom;
+        const hit = findEntityAt(world, tol);
+        if (!hit || hit.type !== 'line') {
+          showStatus('Chamfer works on lines — click a line');
+          break;
+        }
+        if (!ds.ent1) {
+          drawStateRef.current = { ...ds, ent1: hit, click1: world };
+          showStatus('Click the second line to complete chamfer');
+        } else {
+          if (hit.id === ds.ent1.id) { showStatus('Click a different line'); break; }
+          const d = ds.dist ?? chamferDistRef.current;
+          const res = computeLineChamfer(ds.ent1, ds.click1, hit, world, d, d);
+          if (!res) {
+            showStatus('Chamfer failed — lines may be parallel or distance too large');
+          } else {
+            dispatch({ type: 'TRANSFORM_ENTITIES', payload: [res.trimL1, res.trimL2] });
+            dispatch({ type: 'ADD_ENTITIES', payload: [res.chamferLine] });
+            showStatus(`Chamfer ${d.toFixed(2)} mm applied`);
+          }
+          drawStateRef.current = { tool: 'chamfer', dist: d, ent1: null, click1: null };
         }
         break;
       }
@@ -2795,8 +2889,9 @@ export default function CAMCanvas() {
           trim:     'Click segment to trim · Esc to exit',
           extend:   'Click near an end of a line or arc to extend it · Esc to exit',
           fillet:   ds?.ent1 ? 'Click the second line to complete fillet' : 'Click first line to fillet',
+          chamfer:  ds?.ent1 ? 'Click the second line to complete chamfer' : 'Click first line to chamfer',
         };
-        const labels = { line: 'Line', circle: 'Circle', arc: 'Arc', rect: 'Rectangle', polyline: 'Polyline', polygon: 'Polygon', mirror: 'Mirror', measure: 'Measure', trim: 'Trim', extend: 'Extend', fillet: 'Fillet' };
+        const labels = { line: 'Line', circle: 'Circle', arc: 'Arc', rect: 'Rectangle', polyline: 'Polyline', polygon: 'Polygon', mirror: 'Mirror', measure: 'Measure', trim: 'Trim', extend: 'Extend', fillet: 'Fillet', chamfer: 'Chamfer' };
         return (
           <div style={{ position: 'absolute', top: 8, left: '50%', transform: 'translateX(-50%)', background: 'rgba(10,30,10,0.9)', color: '#88ff88', padding: '4px 14px', borderRadius: 4, fontSize: 11, pointerEvents: 'none', border: '1px solid rgba(68,255,68,0.4)', whiteSpace: 'nowrap' }}>
             <strong>{labels[activeTool]}</strong> — {msgs[activeTool]} · Esc to cancel
@@ -2821,6 +2916,31 @@ export default function CAMCanvas() {
                 if (!isNaN(v) && v > 0) {
                   filletRadiusRef.current = v;
                   if (drawStateRef.current) drawStateRef.current.radius = v;
+                }
+              }}
+            />
+            <span style={{ fontSize:10, color:'#556677' }}>mm</span>
+          </div>
+        );
+      })()}
+
+      {/* ── Chamfer distance overlay ─────────────────────────────────────────── */}
+      {activeTool === 'chamfer' && (() => {
+        const inputSt = { background:'#0d0d20', border:'1px solid #3344aa', color:'#cce', borderRadius:3, padding:'3px 8px', fontSize:12, width:80, fontFamily:'monospace' };
+        return (
+          <div style={{ position:'absolute', bottom:40, right:16, background:'rgba(8,8,28,0.92)', border:'1px solid #3344aa', borderRadius:5, padding:'8px 12px', zIndex:15, display:'flex', alignItems:'center', gap:8 }}>
+            <span style={{ fontSize:11, color:'#8888bb' }}>Chamfer D</span>
+            <input
+              style={inputSt}
+              type="number"
+              min="0.01"
+              step="0.5"
+              value={drawStateRef.current?.dist ?? chamferDistRef.current}
+              onChange={e => {
+                const v = parseFloat(e.target.value);
+                if (!isNaN(v) && v > 0) {
+                  chamferDistRef.current = v;
+                  if (drawStateRef.current) drawStateRef.current.dist = v;
                 }
               }}
             />
