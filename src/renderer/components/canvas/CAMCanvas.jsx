@@ -497,6 +497,24 @@ function constrainTo45(start, end) {
   return { x: start.x + dist*Math.cos(angle), y: start.y + dist*Math.sin(angle) };
 }
 
+// ── Context menu item ─────────────────────────────────────────────────────────
+
+const CTX_ITEM_ST = { padding:'6px 14px', cursor:'pointer', color:'#ccccee', background:'transparent', display:'block', width:'100%', textAlign:'left', border:'none', fontSize:12, fontFamily:'inherit' };
+const CTX_ITEM_DIS = { ...CTX_ITEM_ST, cursor:'default', color:'#444466' };
+
+function CtxItem({ label, onClick }) {
+  return (
+    <button
+      style={CTX_ITEM_ST}
+      onMouseEnter={e => { e.currentTarget.style.background = '#1e1e40'; }}
+      onMouseLeave={e => { e.currentTarget.style.background = 'transparent'; }}
+      onClick={onClick}
+    >
+      {label}
+    </button>
+  );
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 
 export default function CAMCanvas() {
@@ -1461,6 +1479,7 @@ export default function CAMCanvas() {
         break;
       }
       case 'mirror': {
+        if (pts.length < 1) break;
         const p1 = pts[0];
         // Dashed axis line
         ctx.setLineDash([6, 4]);
@@ -1502,8 +1521,7 @@ export default function CAMCanvas() {
     const cy     = e.clientY - rect.top;
     const world  = c2w(cx, cy);
 
-    // ── Close context menu on any click ───────────────────────────────────
-    if (contextMenu) { setContextMenu(null); }
+    // Context menu is closed via document mousedown listener (see useEffect below)
 
     // ── Command mode intercept (move/paste two-point operations) ──────────
     if (e.button === 0 && cmdModeRef.current) {
@@ -2097,6 +2115,16 @@ export default function CAMCanvas() {
     return () => { window.removeEventListener('mousemove', mm); window.removeEventListener('mouseup', mu); };
   }, []);
 
+  // Close context menu when clicking outside it
+  useEffect(() => {
+    if (!contextMenu) return;
+    const close = (e) => {
+      if (!e.target.closest?.('[data-ctx-menu]')) setContextMenu(null);
+    };
+    document.addEventListener('mousedown', close, true); // capture phase — fires before button click
+    return () => document.removeEventListener('mousedown', close, true);
+  }, [contextMenu]);
+
   // Keyboard shortcuts
   useEffect(() => {
     const onKey = (e) => {
@@ -2636,30 +2664,23 @@ export default function CAMCanvas() {
         const hasSel = selectedEntityIds.length > 0;
         const hasCB  = clipboardRef.current.length > 0;
         const mnuSt = { position:'absolute', left:contextMenu.x, top:contextMenu.y, background:'#151528', border:'1px solid #3344aa', borderRadius:5, zIndex:25, minWidth:190, boxShadow:'0 4px 16px rgba(0,0,0,0.7)', overflow:'hidden', fontSize:12 };
-        const itemSt = (disabled) => ({ padding:'6px 14px', cursor:disabled?'default':'pointer', color:disabled?'#444466':'#ccccee', background:'transparent', display:'block', width:'100%', textAlign:'left', border:'none', fontSize:12 });
         const divSt = { borderTop:'1px solid #2a2a50', margin:'2px 0' };
-        const Item = ({ label, onClick, disabled }) => (
-          <button style={itemSt(disabled)} disabled={disabled}
-            onMouseEnter={e => { if (!disabled) e.target.style.background='#1e1e40'; }}
-            onMouseLeave={e => { e.target.style.background='transparent'; }}
-            onClick={onClick}>{label}</button>
-        );
         return (
-          <div style={mnuSt}>
+          <div style={mnuSt} data-ctx-menu="1">
             {hasSel && <>
-              <Item label="Cut"                 onClick={ctxCut} />
-              <Item label="Copy"                onClick={ctxCopy} />
-              <Item label="Copy with Base Point" onClick={ctxCopyWithBase} />
+              <CtxItem label="Cut"                  onClick={ctxCut} />
+              <CtxItem label="Copy"                 onClick={ctxCopy} />
+              <CtxItem label="Copy with Base Point" onClick={ctxCopyWithBase} />
               <div style={divSt} />
-              <Item label="Move"                onClick={ctxMove} />
-              <Item label="Scale…"              onClick={ctxScale} />
-              <Item label="Rotate…"             onClick={ctxRotate} />
+              <CtxItem label="Move"                 onClick={ctxMove} />
+              <CtxItem label="Scale…"               onClick={ctxScale} />
+              <CtxItem label="Rotate…"              onClick={ctxRotate} />
               <div style={divSt} />
-              <Item label="Erase"               onClick={ctxErase} />
+              <CtxItem label="Erase"                onClick={ctxErase} />
             </>}
             {hasCB && <>
               {hasSel && <div style={divSt} />}
-              <Item label="Paste" onClick={ctxPaste} />
+              <CtxItem label="Paste" onClick={ctxPaste} />
             </>}
             {!hasSel && !hasCB && (
               <div style={{ padding:'8px 14px', color:'#555577', fontSize:11 }}>Nothing selected</div>
