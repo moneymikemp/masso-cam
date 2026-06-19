@@ -20,6 +20,12 @@ const TOOL_GROUPS = [
     ],
   },
   {
+    label: 'Edit',
+    tools: [
+      { key: 'trim',    label: '✂',  title: 'Trim — click a segment to trim it at intersecting edges' },
+    ],
+  },
+  {
     label: 'Measure',
     tools: [
       { key: 'measure',  label: '⊢→', title: 'Measure — click two points for distance, third for angle' },

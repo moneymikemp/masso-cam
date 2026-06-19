@@ -67,6 +67,199 @@ function applyXform(entity, xf) {
   }
 }
 
+// ── Trim helpers ─────────────────────────────────────────────────────────────
+
+const TAU = Math.PI * 2;
+
+// Returns how far along the arc (0..span) the angle lands, or null if outside
+function arcFrac(angle, startAngle, endAngle) {
+  let ea = endAngle <= startAngle ? endAngle + TAU : endAngle;
+  let a = angle;
+  while (a < startAngle) a += TAU;
+  while (a > startAngle + TAU) a -= TAU;
+  if (a > ea + 1e-9) return null;
+  return a - startAngle;
+}
+
+// Intersection t on l1 (0..1), checking t2 on l2 also in (0,1). Returns null if none.
+function lineLineParam(p1, p2, p3, p4) {
+  const dx1 = p2.x-p1.x, dy1 = p2.y-p1.y;
+  const dx2 = p4.x-p3.x, dy2 = p4.y-p3.y;
+  const den = dx1*dy2 - dy1*dx2;
+  if (Math.abs(den) < 1e-10) return null;
+  const t1 = ((p3.x-p1.x)*dy2 - (p3.y-p1.y)*dx2) / den;
+  const t2 = ((p3.x-p1.x)*dy1 - (p3.y-p1.y)*dx1) / den;
+  const eps = 1e-9;
+  if (t1 < eps || t1 > 1-eps || t2 < eps || t2 > 1-eps) return null;
+  return t1;
+}
+
+// t values on line [0..1] where it hits circle; optionally filtered by arc range
+function lineCircleParams(ls, le, cx, cy, r, arcSa, arcEa) {
+  const dx = le.x-ls.x, dy = le.y-ls.y;
+  const fx = ls.x-cx, fy = ls.y-cy;
+  const a = dx*dx+dy*dy, b = 2*(fx*dx+fy*dy), c = fx*fx+fy*fy-r*r;
+  const disc = b*b - 4*a*c;
+  if (disc < 0) return [];
+  const sqD = Math.sqrt(disc);
+  const result = [];
+  for (const sign of [-1, 1]) {
+    const t = (-b + sign*sqD) / (2*a);
+    if (t < 1e-9 || t > 1-1e-9) continue;
+    if (arcSa != null) {
+      const px = ls.x+t*dx, py = ls.y+t*dy;
+      const angle = Math.atan2(py-cy, px-cx);
+      if (arcFrac(angle, arcSa, arcEa) === null) continue;
+    }
+    result.push(t);
+  }
+  return result;
+}
+
+// Intersection angles on circle1 that also lie on circle2 (or arc2 if Sa2!=null)
+function circleCircleAngles(cx1, cy1, r1, cx2, cy2, r2, sa1, ea1, sa2, ea2) {
+  const dx = cx2-cx1, dy = cy2-cy1, D = Math.hypot(dx, dy);
+  if (D > r1+r2+1e-9 || D < Math.abs(r1-r2)-1e-9 || D < 1e-9) return [];
+  const a = (r1*r1-r2*r2+D*D)/(2*D);
+  const h2 = r1*r1-a*a;
+  if (h2 < 0) return [];
+  const h = Math.sqrt(h2);
+  const ux = dx/D, uy = dy/D;
+  const px = cx1+a*ux, py = cy1+a*uy;
+  const result = [];
+  for (const sign of [-1, 1]) {
+    const ix = px+sign*h*(-uy), iy = py+sign*h*ux;
+    const ang1 = Math.atan2(iy-cy1, ix-cx1);
+    const ang2 = Math.atan2(iy-cy2, ix-cx2);
+    if (sa1 != null && arcFrac(ang1, sa1, ea1) === null) continue;
+    if (sa2 != null && arcFrac(ang2, sa2, ea2) === null) continue;
+    result.push(ang1);
+  }
+  return result;
+}
+
+// Returns the intersection angles on the target entity contributed by one other entity
+function intersectionsOnTarget(target, other) {
+  const params = [];
+  const iArc = target.type === 'arc';
+  const sa = iArc ? target.startAngle : null;
+  const ea = iArc ? target.endAngle   : null;
+
+  if (target.type === 'line') {
+    const ls = target.start, le = target.end;
+    if (other.type === 'line') {
+      const t = lineLineParam(ls, le, other.start, other.end);
+      if (t != null) params.push(t);
+    } else if (other.type === 'circle' || other.type === 'arc') {
+      const osa = other.type === 'arc' ? other.startAngle : null;
+      const oea = other.type === 'arc' ? other.endAngle   : null;
+      lineCircleParams(ls, le, other.center.x, other.center.y, other.radius, osa, oea)
+        .forEach(t => params.push(t));
+    } else if (other.type === 'polyline') {
+      const v = other.vertices || [];
+      const n = other.closed ? v.length : v.length-1;
+      for (let i = 0; i < n; i++) {
+        const t = lineLineParam(ls, le, v[i], v[(i+1)%v.length]);
+        if (t != null) params.push(t);
+      }
+    }
+  } else if (target.type === 'arc' || target.type === 'circle') {
+    const tc = target.center, tr = target.radius;
+    if (other.type === 'line') {
+      lineCircleParams(other.start, other.end, tc.x, tc.y, tr, null, null).forEach(t => {
+        const px = other.start.x+t*(other.end.x-other.start.x);
+        const py = other.start.y+t*(other.end.y-other.start.y);
+        const angle = Math.atan2(py-tc.y, px-tc.x);
+        if (!iArc || arcFrac(angle, sa, ea) != null) params.push(angle);
+      });
+    } else if (other.type === 'circle' || other.type === 'arc') {
+      const osa = other.type === 'arc' ? other.startAngle : null;
+      const oea = other.type === 'arc' ? other.endAngle   : null;
+      circleCircleAngles(tc.x, tc.y, tr, other.center.x, other.center.y, other.radius, sa, ea, osa, oea)
+        .forEach(ang => params.push(ang));
+    } else if (other.type === 'polyline') {
+      const v = other.vertices || [];
+      const n = other.closed ? v.length : v.length-1;
+      for (let i = 0; i < n; i++) {
+        lineCircleParams(v[i], v[(i+1)%v.length], tc.x, tc.y, tr, null, null).forEach(t => {
+          const px = v[i].x+t*(v[(i+1)%v.length].x-v[i].x);
+          const py = v[i].y+t*(v[(i+1)%v.length].y-v[i].y);
+          const angle = Math.atan2(py-tc.y, px-tc.x);
+          if (!iArc || arcFrac(angle, sa, ea) != null) params.push(angle);
+        });
+      }
+    }
+  }
+  return params;
+}
+
+// Main trim: returns replacement entities or null if not trimmable
+function doTrim(target, clickPt, others) {
+  const params = [];
+  for (const other of others) {
+    intersectionsOnTarget(target, other).forEach(p => params.push(p));
+  }
+  if (params.length === 0) return null;
+
+  if (target.type === 'line') {
+    params.sort((a, b) => a-b);
+    const dx = target.end.x-target.start.x, dy = target.end.y-target.start.y;
+    const len2 = dx*dx+dy*dy;
+    if (len2 < 1e-10) return null;
+    const ct = ((clickPt.x-target.start.x)*dx+(clickPt.y-target.start.y)*dy)/len2;
+    let lo = 0, hi = 1;
+    for (const t of params) { if (t < ct) lo = Math.max(lo, t); }
+    for (const t of params) { if (t > ct) { hi = Math.min(hi, t); break; } }
+    const pieces = [];
+    if (lo > 1e-6)
+      pieces.push({ ...target, id: uuid(), end: { x: target.start.x+lo*dx, y: target.start.y+lo*dy } });
+    if (hi < 1-1e-6)
+      pieces.push({ ...target, id: uuid(), start: { x: target.start.x+hi*dx, y: target.start.y+hi*dy } });
+    return pieces;
+  }
+
+  if (target.type === 'arc') {
+    const effEnd = target.endAngle <= target.startAngle ? target.endAngle+TAU : target.endAngle;
+    // Normalize params into [startAngle, effEnd]
+    const sorted = params.map(a => {
+      while (a < target.startAngle) a += TAU;
+      while (a > target.startAngle+TAU) a -= TAU;
+      return a;
+    }).filter(a => a > target.startAngle+1e-9 && a < effEnd-1e-9).sort((a, b) => a-b);
+    if (sorted.length === 0) return null;
+    let ca = Math.atan2(clickPt.y-target.center.y, clickPt.x-target.center.x);
+    while (ca < target.startAngle) ca += TAU;
+    while (ca > target.startAngle+TAU) ca -= TAU;
+    let lo = target.startAngle, hi = effEnd;
+    for (const a of sorted) { if (a < ca) lo = Math.max(lo, a); }
+    for (const a of sorted) { if (a > ca) { hi = Math.min(hi, a); break; } }
+    const pieces = [];
+    if (lo > target.startAngle+1e-6)
+      pieces.push({ ...target, id: uuid(), startAngle: target.startAngle, endAngle: lo });
+    if (hi < effEnd-1e-6)
+      pieces.push({ ...target, id: uuid(), startAngle: hi, endAngle: target.endAngle });
+    return pieces;
+  }
+
+  if (target.type === 'circle') {
+    // Deduplicate and sort all intersection angles in [0, TAU)
+    const angles = [...new Set(params.map(a => { const n = ((a%TAU)+TAU)%TAU; return Math.round(n*1e7)/1e7; }))]
+      .map(Number).sort((a, b) => a-b);
+    if (angles.length < 2) return null;
+    const ca = ((Math.atan2(clickPt.y-target.center.y, clickPt.x-target.center.x) % TAU)+TAU) % TAU;
+    // Find the two consecutive angles bracketing click
+    let lo = angles[angles.length-1]-TAU, hi = angles[0]; // wrap-around default
+    for (let i = 0; i < angles.length; i++) {
+      if (angles[i] <= ca) lo = angles[i];
+      else { hi = angles[i]; break; }
+    }
+    // Keep: arc from hi CCW to lo (the untrimmed portion)
+    return [{ ...target, id: uuid(), type: 'arc', startAngle: hi, endAngle: lo }];
+  }
+
+  return null;
+}
+
 // ── Measurement label helper ──────────────────────────────────────────────────
 
 function drawMeasureLabel(ctx, text, x, y) {
@@ -1646,6 +1839,24 @@ export default function CAMCanvas() {
         }
         break;
       }
+      case 'trim': {
+        const tol = 8 / viewport.zoom;
+        const hit = findEntityAt(world, tol);
+        if (!hit) break;
+        const others = entities.filter(e => {
+          const lyr = layers[e.layer];
+          return e.id !== hit.id && (!lyr || lyr.visible);
+        });
+        const result = doTrim(hit, world, others);
+        if (result !== null) {
+          dispatch({ type: 'DELETE_ENTITIES', payload: [hit.id] });
+          if (result.length > 0) dispatch({ type: 'ADD_ENTITIES', payload: result });
+          showStatus('Trimmed');
+        } else {
+          showStatus('No intersection found to trim');
+        }
+        break;
+      }
       case 'measure': {
         const newPts = [...ds.pts, snapped];
         if (newPts.length >= 3) {
@@ -2273,8 +2484,9 @@ export default function CAMCanvas() {
           polygon:  ds?.pts?.length === 1 ? 'Click to set radius (or type Sides/Radius above)' : 'Click to set center',
           mirror:   ds?.pts?.length === 1 ? 'Click second point of mirror axis' : selectedEntityIds.length === 0 ? 'Select entities first, then click mirror axis start' : 'Click first point of mirror axis',
           measure:  ds?.pts?.length === 2 ? 'Click third point to measure angle · Esc to reset' : ds?.pts?.length === 1 ? 'Click second point to lock distance' : 'Click first point',
+          trim:     'Click segment to trim · Esc to exit',
         };
-        const labels = { line: 'Line', circle: 'Circle', arc: 'Arc', rect: 'Rectangle', polyline: 'Polyline', polygon: 'Polygon', mirror: 'Mirror', measure: 'Measure' };
+        const labels = { line: 'Line', circle: 'Circle', arc: 'Arc', rect: 'Rectangle', polyline: 'Polyline', polygon: 'Polygon', mirror: 'Mirror', measure: 'Measure', trim: 'Trim' };
         return (
           <div style={{ position: 'absolute', top: 8, left: '50%', transform: 'translateX(-50%)', background: 'rgba(10,30,10,0.9)', color: '#88ff88', padding: '4px 14px', borderRadius: 4, fontSize: 11, pointerEvents: 'none', border: '1px solid rgba(68,255,68,0.4)', whiteSpace: 'nowrap' }}>
             <strong>{labels[activeTool]}</strong> — {msgs[activeTool]} · Esc to cancel
