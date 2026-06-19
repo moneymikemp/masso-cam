@@ -406,6 +406,77 @@ function doExtend(target, clickPt, others) {
   return null;
 }
 
+// ── Fillet helpers ────────────────────────────────────────────────────────────
+
+// Returns { trimL1, trimL2, arc } or null if the fillet is geometrically invalid.
+// arcFrom3Pts must be defined before this function in the file.
+function computeLineFillet(l1, click1, l2, click2, radius) {
+  const dx1 = l1.end.x-l1.start.x, dy1 = l1.end.y-l1.start.y;
+  const dx2 = l2.end.x-l2.start.x, dy2 = l2.end.y-l2.start.y;
+  const len1 = Math.hypot(dx1, dy1), len2 = Math.hypot(dx2, dy2);
+  if (len1 < 1e-10 || len2 < 1e-10) return null;
+
+  // Intersection of the two infinite lines
+  const den = dx1*dy2 - dy1*dx2;
+  if (Math.abs(den) < 1e-10) return null; // parallel
+  const t1 = ((l2.start.x-l1.start.x)*dy2 - (l2.start.y-l1.start.y)*dx2) / den;
+  const t2 = ((l2.start.x-l1.start.x)*dy1 - (l2.start.y-l1.start.y)*dx1) / den;
+  const ix = l1.start.x + t1*dx1, iy = l1.start.y + t1*dy1;
+
+  // Click parameters on each line (projection)
+  const t1c = ((click1.x-l1.start.x)*dx1 + (click1.y-l1.start.y)*dy1) / (len1*len1);
+  const t2c = ((click2.x-l2.start.x)*dx2 + (click2.y-l2.start.y)*dy2) / (len2*len2);
+
+  // Unit vectors FROM I toward each kept portion
+  const u1x = t1 > t1c ? -dx1/len1 : dx1/len1;
+  const u1y = t1 > t1c ? -dy1/len1 : dy1/len1;
+  const u2x = t2 > t2c ? -dx2/len2 : dx2/len2;
+  const u2y = t2 > t2c ? -dy2/len2 : dy2/len2;
+
+  // Bisector pointing from I toward arc center
+  const bx = u1x+u2x, by = u1y+u2y;
+  const blen = Math.hypot(bx, by);
+  if (blen < 1e-10) return null; // 180° — lines are collinear
+  const ubx = bx/blen, uby = by/blen;
+  const sinHa = Math.abs(u1x*uby - u1y*ubx); // sin(half-angle)
+  if (sinHa < 1e-10) return null;
+  const dIC = radius / sinHa;
+  const cx = ix + ubx*dIC, cy = iy + uby*dIC;
+
+  // Tangent points: perpendicular feet from C onto each line
+  const t1f = ((cx-l1.start.x)*dx1 + (cy-l1.start.y)*dy1) / (len1*len1);
+  const T1  = { x: l1.start.x+t1f*dx1, y: l1.start.y+t1f*dy1 };
+  const t2f = ((cx-l2.start.x)*dx2 + (cy-l2.start.y)*dy2) / (len2*len2);
+  const T2  = { x: l2.start.x+t2f*dx2, y: l2.start.y+t2f*dy2 };
+
+  // Which endpoint of each line is kept (farthest from I)
+  const dSI1 = Math.hypot(l1.start.x-ix, l1.start.y-iy);
+  const dEI1 = Math.hypot(l1.end.x-ix,   l1.end.y-iy);
+  const kp1  = dSI1 > dEI1 ? 0 : 1; // parameter of kept endpoint
+  const ke1  = kp1 === 0 ? l1.start : l1.end;
+
+  const dSI2 = Math.hypot(l2.start.x-ix, l2.start.y-iy);
+  const dEI2 = Math.hypot(l2.end.x-ix,   l2.end.y-iy);
+  const kp2  = dSI2 > dEI2 ? 0 : 1;
+  const ke2  = kp2 === 0 ? l2.start : l2.end;
+
+  // Tangent point must lie between kept endpoint and I
+  const EPS = 0.02;
+  if (t1f < Math.min(kp1, t1)-EPS || t1f > Math.max(kp1, t1)+EPS) return null;
+  if (t2f < Math.min(kp2, t2)-EPS || t2f > Math.max(kp2, t2)+EPS) return null;
+
+  // Fillet arc: pass through midpoint closest to I (on bisector toward I)
+  const arcMid = { x: cx-ubx*radius, y: cy-uby*radius };
+  const arc = arcFrom3Pts(T1, T2, arcMid);
+  if (!arc) return null;
+
+  return {
+    trimL1: { ...l1, start: { ...ke1 }, end: { ...T1 } },
+    trimL2: { ...l2, start: { ...T2 }, end: { ...ke2 } },
+    arc:    { id: uuid(), type: 'arc', layer: l1.layer || '0', ...arc },
+  };
+}
+
 // ── Measurement label helper ──────────────────────────────────────────────────
 
 function drawMeasureLabel(ctx, text, x, y) {
@@ -714,6 +785,7 @@ export default function CAMCanvas() {
   const gripDragRef = useRef(null); // { entityId, gripType, vertexIdx, curWorld, snapType }
   const [nearGrip, setNearGrip] = useState(false);
   const polygonSidesRef = useRef(6); // persists across polygon draws
+  const filletRadiusRef = useRef(5); // persists across fillet operations
 
   // Context menu + clipboard
   const [contextMenu, setContextMenu] = useState(null); // { x, y } screen pixels
@@ -788,6 +860,8 @@ export default function CAMCanvas() {
         ? { tool: 'mirror', pts: [] }
         : activeTool === 'measure'
         ? { tool: 'measure', pts: [] }
+        : activeTool === 'fillet'
+        ? { tool: 'fillet', radius: filletRadiusRef.current, ent1: null, click1: null }
         : { tool: activeTool, pts: [], dragging: false };
     }
     previewRef.current = null;
@@ -1646,6 +1720,18 @@ export default function CAMCanvas() {
         }
         break;
       }
+      case 'fillet': {
+        // Highlight the first selected line in orange
+        if (ds.ent1) {
+          ctx.save();
+          ctx.strokeStyle = '#ff8800';
+          ctx.lineWidth = 2;
+          ctx.setLineDash([]);
+          drawEntity(ctx, ds.ent1);
+          ctx.restore();
+        }
+        break;
+      }
     }
     ctx.setLineDash([]);
     drawSnapIndicator(ctx, cur, snapType);
@@ -2039,6 +2125,33 @@ export default function CAMCanvas() {
           showStatus('Extended');
         } else {
           showStatus('No boundary found to extend to');
+        }
+        break;
+      }
+      case 'fillet': {
+        const tol = 8 / viewport.zoom;
+        const hit = findEntityAt(world, tol);
+        if (!hit || hit.type !== 'line') {
+          showStatus('Fillet works on lines — click a line');
+          break;
+        }
+        if (!ds.ent1) {
+          // First click: store entity and click position
+          drawStateRef.current = { ...ds, ent1: hit, click1: world };
+          showStatus('Click the second line to complete fillet');
+        } else {
+          // Second click: compute fillet
+          if (hit.id === ds.ent1.id) { showStatus('Click a different line'); break; }
+          const r = ds.radius ?? filletRadiusRef.current;
+          const res = computeLineFillet(ds.ent1, ds.click1, hit, world, r);
+          if (!res) {
+            showStatus('Fillet failed — lines may be parallel or radius too large');
+          } else {
+            dispatch({ type: 'TRANSFORM_ENTITIES', payload: [res.trimL1, res.trimL2] });
+            dispatch({ type: 'ADD_ENTITIES', payload: [res.arc] });
+            showStatus(`Fillet r=${r.toFixed(2)} mm applied`);
+          }
+          drawStateRef.current = { tool: 'fillet', radius: r, ent1: null, click1: null };
         }
         break;
       }
@@ -2681,11 +2794,37 @@ export default function CAMCanvas() {
           measure:  ds?.pts?.length === 2 ? 'Click third point to measure angle · Esc to reset' : ds?.pts?.length === 1 ? 'Click second point to lock distance' : 'Click first point',
           trim:     'Click segment to trim · Esc to exit',
           extend:   'Click near an end of a line or arc to extend it · Esc to exit',
+          fillet:   ds?.ent1 ? 'Click the second line to complete fillet' : 'Click first line to fillet',
         };
-        const labels = { line: 'Line', circle: 'Circle', arc: 'Arc', rect: 'Rectangle', polyline: 'Polyline', polygon: 'Polygon', mirror: 'Mirror', measure: 'Measure', trim: 'Trim', extend: 'Extend' };
+        const labels = { line: 'Line', circle: 'Circle', arc: 'Arc', rect: 'Rectangle', polyline: 'Polyline', polygon: 'Polygon', mirror: 'Mirror', measure: 'Measure', trim: 'Trim', extend: 'Extend', fillet: 'Fillet' };
         return (
           <div style={{ position: 'absolute', top: 8, left: '50%', transform: 'translateX(-50%)', background: 'rgba(10,30,10,0.9)', color: '#88ff88', padding: '4px 14px', borderRadius: 4, fontSize: 11, pointerEvents: 'none', border: '1px solid rgba(68,255,68,0.4)', whiteSpace: 'nowrap' }}>
             <strong>{labels[activeTool]}</strong> — {msgs[activeTool]} · Esc to cancel
+          </div>
+        );
+      })()}
+
+      {/* ── Fillet radius overlay ────────────────────────────────────────────── */}
+      {activeTool === 'fillet' && (() => {
+        const inputSt = { background:'#0d0d20', border:'1px solid #3344aa', color:'#cce', borderRadius:3, padding:'3px 8px', fontSize:12, width:80, fontFamily:'monospace' };
+        return (
+          <div style={{ position:'absolute', bottom:40, right:16, background:'rgba(8,8,28,0.92)', border:'1px solid #3344aa', borderRadius:5, padding:'8px 12px', zIndex:15, display:'flex', alignItems:'center', gap:8 }}>
+            <span style={{ fontSize:11, color:'#8888bb' }}>Fillet R</span>
+            <input
+              style={inputSt}
+              type="number"
+              min="0.01"
+              step="0.5"
+              value={drawStateRef.current?.radius ?? filletRadiusRef.current}
+              onChange={e => {
+                const v = parseFloat(e.target.value);
+                if (!isNaN(v) && v > 0) {
+                  filletRadiusRef.current = v;
+                  if (drawStateRef.current) drawStateRef.current.radius = v;
+                }
+              }}
+            />
+            <span style={{ fontSize:10, color:'#556677' }}>mm</span>
           </div>
         );
       })()}
