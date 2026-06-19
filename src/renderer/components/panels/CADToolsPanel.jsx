@@ -22,7 +22,8 @@ const TOOL_GROUPS = [
   {
     label: 'Edit',
     tools: [
-      { key: 'trim',    label: '✂',  title: 'Trim — click a segment to trim it at intersecting edges' },
+      { key: 'trim',   label: '✂',  title: 'Trim — click a segment to trim it at intersecting edges' },
+      { key: 'extend', label: '→|', title: 'Extend — click near an end of a line or arc to extend to nearest boundary' },
     ],
   },
   {

@@ -260,6 +260,152 @@ function doTrim(target, clickPt, others) {
   return null;
 }
 
+// ── Extend helpers ────────────────────────────────────────────────────────────
+
+// t1 on target line (any range), t2 must be in (0,1) on boundary line
+function lineLineParamExt(p1, p2, p3, p4) {
+  const dx1 = p2.x-p1.x, dy1 = p2.y-p1.y;
+  const dx2 = p4.x-p3.x, dy2 = p4.y-p3.y;
+  const den = dx1*dy2 - dy1*dx2;
+  if (Math.abs(den) < 1e-10) return null;
+  const t1 = ((p3.x-p1.x)*dy2 - (p3.y-p1.y)*dx2) / den;
+  const t2 = ((p3.x-p1.x)*dy1 - (p3.y-p1.y)*dx1) / den;
+  if (t2 < 1e-9 || t2 > 1-1e-9) return null;
+  return t1; // any range — caller filters by extension direction
+}
+
+// t values (any range) on target line where it hits a circle/arc boundary
+function lineCircleParamsExt(ls, le, cx, cy, r, arcSa, arcEa) {
+  const dx = le.x-ls.x, dy = le.y-ls.y;
+  const fx = ls.x-cx, fy = ls.y-cy;
+  const a = dx*dx+dy*dy, b = 2*(fx*dx+fy*dy), c = fx*fx+fy*fy-r*r;
+  const disc = b*b - 4*a*c;
+  if (disc < 0) return [];
+  const sqD = Math.sqrt(disc);
+  return [-1, 1].reduce((acc, sign) => {
+    const t = (-b + sign*sqD) / (2*a);
+    if (arcSa != null) {
+      const angle = Math.atan2(ls.y+t*dy - cy, ls.x+t*dx - cx);
+      if (arcFrac(angle, arcSa, arcEa) === null) return acc;
+    }
+    acc.push(t);
+    return acc;
+  }, []);
+}
+
+// Intersection angles on an arc target that are OUTSIDE its current range,
+// filtered so the intersection lies within the boundary entity
+function arcAnglesForExtend(target, other) {
+  const tc = target.center, tr = target.radius;
+  const result = [];
+  const pushIfOutside = (angle) => {
+    if (arcFrac(angle, target.startAngle, target.endAngle) === null) result.push(angle);
+  };
+
+  if (other.type === 'line') {
+    lineCircleParamsExt(other.start, other.end, tc.x, tc.y, tr, null, null).forEach(t => {
+      if (t < 1e-9 || t > 1-1e-9) return; // boundary segment must contain point
+      pushIfOutside(Math.atan2(other.start.y+t*(other.end.y-other.start.y)-tc.y,
+                               other.start.x+t*(other.end.x-other.start.x)-tc.x));
+    });
+  } else if (other.type === 'circle' || other.type === 'arc') {
+    const osa = other.type === 'arc' ? other.startAngle : null;
+    const oea = other.type === 'arc' ? other.endAngle   : null;
+    circleCircleAngles(tc.x, tc.y, tr, other.center.x, other.center.y, other.radius,
+                       null, null, osa, oea).forEach(pushIfOutside);
+  } else if (other.type === 'polyline') {
+    const v = other.vertices || [], n = other.closed ? v.length : v.length-1;
+    for (let i = 0; i < n; i++) {
+      const a = v[i], b = v[(i+1)%v.length];
+      lineCircleParamsExt(a, b, tc.x, tc.y, tr, null, null).forEach(t => {
+        if (t < 1e-9 || t > 1-1e-9) return;
+        pushIfOutside(Math.atan2(a.y+t*(b.y-a.y)-tc.y, a.x+t*(b.x-a.x)-tc.x));
+      });
+    }
+  }
+  return result;
+}
+
+function normAngle(a) {
+  while (a >  Math.PI) a -= TAU;
+  while (a < -Math.PI) a += TAU;
+  return a;
+}
+
+function doExtend(target, clickPt, others) {
+  const visible = others.filter(o => o.id !== target.id);
+
+  if (target.type === 'line') {
+    const dx = target.end.x - target.start.x, dy = target.end.y - target.start.y;
+    const len2 = dx*dx + dy*dy;
+    if (len2 < 1e-10) return null;
+    const dS = Math.hypot(clickPt.x-target.start.x, clickPt.y-target.start.y);
+    const dE = Math.hypot(clickPt.x-target.end.x,   clickPt.y-target.end.y);
+    const extEnd = dE < dS;
+
+    const allTs = [];
+    for (const other of visible) {
+      if (other.type === 'line') {
+        const t = lineLineParamExt(target.start, target.end, other.start, other.end);
+        if (t != null) allTs.push(t);
+      } else if (other.type === 'circle' || other.type === 'arc') {
+        const osa = other.type === 'arc' ? other.startAngle : null;
+        const oea = other.type === 'arc' ? other.endAngle   : null;
+        lineCircleParamsExt(target.start, target.end, other.center.x, other.center.y, other.radius, osa, oea)
+          .forEach(t => allTs.push(t));
+      } else if (other.type === 'polyline') {
+        const v = other.vertices || [], n = other.closed ? v.length : v.length-1;
+        for (let i = 0; i < n; i++) {
+          const t = lineLineParamExt(target.start, target.end, v[i], v[(i+1)%v.length]);
+          if (t != null) allTs.push(t);
+        }
+      }
+    }
+
+    const eps = 1e-6;
+    if (extEnd) {
+      const cands = allTs.filter(t => t > 1+eps);
+      if (!cands.length) return null;
+      const bestT = Math.min(...cands);
+      return [{ ...target, end: { x: target.start.x+bestT*dx, y: target.start.y+bestT*dy } }];
+    } else {
+      const cands = allTs.filter(t => t < -eps);
+      if (!cands.length) return null;
+      const bestT = Math.max(...cands);
+      return [{ ...target, start: { x: target.start.x+bestT*dx, y: target.start.y+bestT*dy } }];
+    }
+  }
+
+  if (target.type === 'arc') {
+    const effEnd = target.endAngle <= target.startAngle ? target.endAngle+TAU : target.endAngle;
+    const sp = { x: target.center.x + target.radius*Math.cos(target.startAngle),
+                 y: target.center.y + target.radius*Math.sin(target.startAngle) };
+    const ep = { x: target.center.x + target.radius*Math.cos(target.endAngle),
+                 y: target.center.y + target.radius*Math.sin(target.endAngle) };
+    const extEnd = Math.hypot(clickPt.x-ep.x, clickPt.y-ep.y) <
+                   Math.hypot(clickPt.x-sp.x, clickPt.y-sp.y);
+
+    const angles = visible.flatMap(o => arcAnglesForExtend(target, o));
+    if (!angles.length) return null;
+
+    if (extEnd) {
+      // Nearest angle CCW beyond effEnd
+      const cands = angles.map(a => { while (a < effEnd+1e-9) a += TAU; return a; })
+                          .filter(a => a > effEnd+1e-9);
+      if (!cands.length) return null;
+      return [{ ...target, endAngle: normAngle(Math.min(...cands)) }];
+    } else {
+      // Nearest angle CW before startAngle
+      const cands = angles.map(a => { while (a > target.startAngle-1e-9) a -= TAU; return a; })
+                          .filter(a => a < target.startAngle-1e-9);
+      if (!cands.length) return null;
+      return [{ ...target, startAngle: normAngle(Math.max(...cands)) }];
+    }
+  }
+
+  return null;
+}
+
 // ── Measurement label helper ──────────────────────────────────────────────────
 
 function drawMeasureLabel(ctx, text, x, y) {
@@ -1875,6 +2021,27 @@ export default function CAMCanvas() {
         }
         break;
       }
+      case 'extend': {
+        const tol = 8 / viewport.zoom;
+        const hit = findEntityAt(world, tol);
+        if (!hit) break;
+        if (hit.type !== 'line' && hit.type !== 'arc') {
+          showStatus('Extend works on lines and arcs');
+          break;
+        }
+        const others = entities.filter(e => {
+          const lyr = layers[e.layer];
+          return e.id !== hit.id && (!lyr || lyr.visible);
+        });
+        const result = doExtend(hit, world, others);
+        if (result !== null) {
+          dispatch({ type: 'TRANSFORM_ENTITIES', payload: result });
+          showStatus('Extended');
+        } else {
+          showStatus('No boundary found to extend to');
+        }
+        break;
+      }
       case 'measure': {
         const newPts = [...ds.pts, snapped];
         if (newPts.length >= 3) {
@@ -2513,8 +2680,9 @@ export default function CAMCanvas() {
           mirror:   ds?.pts?.length === 1 ? 'Click second point of mirror axis' : selectedEntityIds.length === 0 ? 'Select entities first, then click mirror axis start' : 'Click first point of mirror axis',
           measure:  ds?.pts?.length === 2 ? 'Click third point to measure angle · Esc to reset' : ds?.pts?.length === 1 ? 'Click second point to lock distance' : 'Click first point',
           trim:     'Click segment to trim · Esc to exit',
+          extend:   'Click near an end of a line or arc to extend it · Esc to exit',
         };
-        const labels = { line: 'Line', circle: 'Circle', arc: 'Arc', rect: 'Rectangle', polyline: 'Polyline', polygon: 'Polygon', mirror: 'Mirror', measure: 'Measure', trim: 'Trim' };
+        const labels = { line: 'Line', circle: 'Circle', arc: 'Arc', rect: 'Rectangle', polyline: 'Polyline', polygon: 'Polygon', mirror: 'Mirror', measure: 'Measure', trim: 'Trim', extend: 'Extend' };
         return (
           <div style={{ position: 'absolute', top: 8, left: '50%', transform: 'translateX(-50%)', background: 'rgba(10,30,10,0.9)', color: '#88ff88', padding: '4px 14px', borderRadius: 4, fontSize: 11, pointerEvents: 'none', border: '1px solid rgba(68,255,68,0.4)', whiteSpace: 'nowrap' }}>
             <strong>{labels[activeTool]}</strong> — {msgs[activeTool]} · Esc to cancel
