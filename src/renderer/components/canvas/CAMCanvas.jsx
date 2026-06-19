@@ -948,9 +948,9 @@ export default function CAMCanvas() {
         : activeTool === 'measure'
         ? { tool: 'measure', pts: [] }
         : activeTool === 'fillet'
-        ? { tool: 'fillet', radius: filletRadiusRef.current, ent1: null, click1: null }
+        ? { tool: 'fillet', pts: [], radius: filletRadiusRef.current, ent1: null, click1: null }
         : activeTool === 'chamfer'
-        ? { tool: 'chamfer', dist: chamferDistRef.current, ent1: null, click1: null }
+        ? { tool: 'chamfer', pts: [], dist: chamferDistRef.current, ent1: null, click1: null }
         : { tool: activeTool, pts: [], dragging: false };
     }
     previewRef.current = null;
@@ -2263,7 +2263,7 @@ export default function CAMCanvas() {
             dispatch({ type: 'ADD_ENTITIES', payload: [res.arc] });
             showStatus(`Fillet r=${r.toFixed(2)} mm applied`);
           }
-          drawStateRef.current = { tool: 'fillet', radius: r, ent1: null, click1: null };
+          drawStateRef.current = { tool: 'fillet', pts: [], radius: r, ent1: null, click1: null };
         }
         break;
       }
@@ -2288,7 +2288,7 @@ export default function CAMCanvas() {
             dispatch({ type: 'ADD_ENTITIES', payload: [res.chamferLine] });
             showStatus(`Chamfer ${d.toFixed(2)} mm applied`);
           }
-          drawStateRef.current = { tool: 'chamfer', dist: d, ent1: null, click1: null };
+          drawStateRef.current = { tool: 'chamfer', pts: [], dist: d, ent1: null, click1: null };
         }
         break;
       }
