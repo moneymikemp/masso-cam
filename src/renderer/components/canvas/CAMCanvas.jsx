@@ -878,6 +878,10 @@ export default function CAMCanvas() {
   const chamferDist2Ref  = useRef(5);   // chamfer second-side setback (mm)
   const [filletOverlayInch,  setFilletOverlayInch]  = useState(() => isInch);
   const [chamferOverlayInch, setChamferOverlayInch] = useState(() => isInch);
+  // Local edit strings — decoupled from refs so mid-typing values survive re-renders
+  const [filletStr,    setFilletStr]    = useState('5');
+  const [chamferD1Str, setChamferD1Str] = useState('5');
+  const [chamferD2Str, setChamferD2Str] = useState('5');
 
   // Context menu + clipboard
   const [contextMenu, setContextMenu] = useState(null); // { x, y } screen pixels
@@ -966,6 +970,19 @@ export default function CAMCanvas() {
     setCoordInput(null);
     setDrawPhase(p => p + 1);
   }, [activeTool]);
+
+  // Initialise fillet/chamfer display strings when tool is selected
+  useEffect(() => {
+    if (activeTool === 'fillet') {
+      const d = mm => filletOverlayInch ? +(mm / 25.4).toFixed(4) : +mm.toFixed(3);
+      setFilletStr(String(d(filletRadiusRef.current)));
+    }
+    if (activeTool === 'chamfer') {
+      const d = mm => chamferOverlayInch ? +(mm / 25.4).toFixed(4) : +mm.toFixed(3);
+      setChamferD1Str(String(d(chamferDist1Ref.current)));
+      setChamferD2Str(String(d(chamferDist2Ref.current)));
+    }
+  }, [activeTool]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // Show/hide dim input overlay based on draw state phase
   useEffect(() => {
@@ -3089,10 +3106,8 @@ export default function CAMCanvas() {
       {activeTool === 'fillet' && (() => {
         const INV = 25.4;
         const unitLbl = filletOverlayInch ? 'INCH' : 'MM';
-        const toDisp = mm => filletOverlayInch ? +(mm / INV).toFixed(4) : +mm.toFixed(3);
-        const toMM   = v  => filletOverlayInch ? v * INV : v;
-        const step   = filletOverlayInch ? 0.01 : 0.5;
-        const rMM    = drawStateRef.current?.radius ?? filletRadiusRef.current;
+        const toMM    = v => filletOverlayInch ? v * INV : v;
+        const toDisp  = mm => filletOverlayInch ? +(mm / INV).toFixed(4) : +mm.toFixed(3);
         const inputSt = { background:'#0d0d20', border:'1px solid #3344aa', color:'#cce', borderRadius:3, padding:'3px 8px', fontSize:12, width:80, fontFamily:'monospace' };
         const unitBtnSt = { background:'#1a1a38', border:'1px solid #3344aa', color:'#8899cc', borderRadius:3, padding:'2px 6px', fontSize:10, cursor:'pointer', fontFamily:'monospace', userSelect:'none' };
         return (
@@ -3100,11 +3115,10 @@ export default function CAMCanvas() {
             <span style={{ fontSize:11, color:'#8888bb' }}>Fillet R</span>
             <input
               style={inputSt}
-              type="number"
-              min={filletOverlayInch ? 0.001 : 0.01}
-              step={step}
-              value={toDisp(rMM)}
+              type="text"
+              value={filletStr}
               onChange={e => {
+                setFilletStr(e.target.value);
                 const v = parseFloat(e.target.value);
                 if (!isNaN(v) && v > 0) {
                   const mm = toMM(v);
@@ -3112,8 +3126,14 @@ export default function CAMCanvas() {
                   if (drawStateRef.current) drawStateRef.current.radius = mm;
                 }
               }}
+              onBlur={() => setFilletStr(String(toDisp(filletRadiusRef.current)))}
             />
-            <button style={unitBtnSt} onClick={() => setFilletOverlayInch(b => !b)}>{unitLbl}</button>
+            <button style={unitBtnSt} onClick={() => {
+              const newInch = !filletOverlayInch;
+              setFilletOverlayInch(newInch);
+              const d = mm => newInch ? +(mm / INV).toFixed(4) : +mm.toFixed(3);
+              setFilletStr(String(d(filletRadiusRef.current)));
+            }}>{unitLbl}</button>
           </div>
         );
       })()}
@@ -3122,11 +3142,8 @@ export default function CAMCanvas() {
       {activeTool === 'chamfer' && (() => {
         const INV = 25.4;
         const unitLbl = chamferOverlayInch ? 'INCH' : 'MM';
-        const toDisp = mm => chamferOverlayInch ? +(mm / INV).toFixed(4) : +mm.toFixed(3);
-        const toMM   = v  => chamferOverlayInch ? v * INV : v;
-        const step   = chamferOverlayInch ? 0.01 : 0.5;
-        const d1MM   = drawStateRef.current?.dist1 ?? chamferDist1Ref.current;
-        const d2MM   = drawStateRef.current?.dist2 ?? chamferDist2Ref.current;
+        const toMM    = v => chamferOverlayInch ? v * INV : v;
+        const toDisp  = mm => chamferOverlayInch ? +(mm / INV).toFixed(4) : +mm.toFixed(3);
         const inputSt = { background:'#0d0d20', border:'1px solid #3344aa', color:'#cce', borderRadius:3, padding:'3px 6px', fontSize:12, width:74, fontFamily:'monospace' };
         const unitBtnSt = { background:'#1a1a38', border:'1px solid #3344aa', color:'#8899cc', borderRadius:3, padding:'2px 6px', fontSize:10, cursor:'pointer', fontFamily:'monospace', userSelect:'none' };
         const lblSt = { fontSize:10, color:'#666688' };
@@ -3134,17 +3151,22 @@ export default function CAMCanvas() {
           <div style={{ position:'absolute', bottom:40, right:16, background:'rgba(8,8,28,0.92)', border:'1px solid #3344aa', borderRadius:5, padding:'8px 12px', zIndex:15, display:'flex', flexDirection:'column', gap:6 }}>
             <div style={{ display:'flex', alignItems:'center', justifyContent:'space-between', marginBottom:2 }}>
               <span style={{ fontSize:11, color:'#8888bb' }}>Chamfer</span>
-              <button style={unitBtnSt} onClick={() => setChamferOverlayInch(b => !b)}>{unitLbl}</button>
+              <button style={unitBtnSt} onClick={() => {
+                const newInch = !chamferOverlayInch;
+                setChamferOverlayInch(newInch);
+                const d = mm => newInch ? +(mm / INV).toFixed(4) : +mm.toFixed(3);
+                setChamferD1Str(String(d(chamferDist1Ref.current)));
+                setChamferD2Str(String(d(chamferDist2Ref.current)));
+              }}>{unitLbl}</button>
             </div>
             <div style={{ display:'flex', alignItems:'center', gap:6 }}>
               <span style={lblSt}>Side 1</span>
               <input
                 style={inputSt}
-                type="number"
-                min={chamferOverlayInch ? 0.001 : 0.01}
-                step={step}
-                value={toDisp(d1MM)}
+                type="text"
+                value={chamferD1Str}
                 onChange={e => {
+                  setChamferD1Str(e.target.value);
                   const v = parseFloat(e.target.value);
                   if (!isNaN(v) && v > 0) {
                     const mm = toMM(v);
@@ -3152,17 +3174,17 @@ export default function CAMCanvas() {
                     if (drawStateRef.current) drawStateRef.current.dist1 = mm;
                   }
                 }}
+                onBlur={() => setChamferD1Str(String(toDisp(chamferDist1Ref.current)))}
               />
             </div>
             <div style={{ display:'flex', alignItems:'center', gap:6 }}>
               <span style={lblSt}>Side 2</span>
               <input
                 style={inputSt}
-                type="number"
-                min={chamferOverlayInch ? 0.001 : 0.01}
-                step={step}
-                value={toDisp(d2MM)}
+                type="text"
+                value={chamferD2Str}
                 onChange={e => {
+                  setChamferD2Str(e.target.value);
                   const v = parseFloat(e.target.value);
                   if (!isNaN(v) && v > 0) {
                     const mm = toMM(v);
@@ -3170,6 +3192,7 @@ export default function CAMCanvas() {
                     if (drawStateRef.current) drawStateRef.current.dist2 = mm;
                   }
                 }}
+                onBlur={() => setChamferD2Str(String(toDisp(chamferDist2Ref.current)))}
               />
             </div>
           </div>
