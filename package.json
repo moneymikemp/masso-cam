@@ -21,6 +21,7 @@
     "react-dom": "^18.2.0",
     "react-scripts": "5.0.1",
     "sql.js": "^1.14.1",
+    "three": "^0.184.0",
     "uuid": "^9.0.0"
   },
   "devDependencies": {

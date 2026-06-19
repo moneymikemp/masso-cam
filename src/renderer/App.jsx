@@ -2,6 +2,7 @@ import React, { useEffect, useCallback, useState, useRef } from 'react';
 import { v4 as uuid } from 'uuid';
 import { useApp } from './store/AppContext';
 import CAMCanvas from './components/canvas/CAMCanvas';
+import ThreeCanvas from './components/canvas/ThreeCanvas';
 import OperationsPanel from './components/panels/OperationsPanel';
 import ToolLibraryPanel from './components/panels/ToolLibraryPanel';
 import LayersPanel from './components/panels/LayersPanel';
@@ -159,6 +160,7 @@ export default function App() {
   const isInch = postConfig.units === 'inch';
   const MM_PER_INCH = 25.4;
   const [modal, setModal] = useState(null); // 'profiles' | 'tool-library' | 'about' | 'inlay-wizard'
+  const [view3d, setView3d] = useState(false);
   const [showArrayModal, setShowArrayModal] = useState(false);
   const [offsetModal, setOffsetModal] = useState(null); // null | { distance: '', direction: 'both' }
   const refImageElRef = useRef(null); // cached HTMLImageElement for tracing
@@ -601,6 +603,12 @@ export default function App() {
           <span style={{ fontSize:10, color:'#444466', flexShrink:0 }}>
             {!cadMode && enabledOpsCount > 0 ? `${calculatedCount}/${enabledOpsCount} ops` : ''}
           </span>
+          <div style={{ width:1, background:'#2a2a50', margin:'0 4px' }} />
+          <button
+            title="Toggle 3D toolpath view"
+            style={{ ...S.tbBtn, ...(view3d ? S.tbBtnActive : {}) }}
+            onClick={() => setView3d(v => !v)}
+          >◈ 3D</button>
         </div>
       </div>
 
@@ -611,7 +619,7 @@ export default function App() {
           </div>
           <CADToolsPanel />
         </div>
-        <div style={S.canvas}><CAMCanvas /></div>
+        <div style={S.canvas}>{view3d ? <ThreeCanvas /> : <CAMCanvas />}</div>
         <div style={S.rightPanel}>
           <div style={S.tabBar}>
             {cadMode && <div style={S.tab(activePanelTab === 'props')} onClick={() => dispatch({ type: 'SET_PANEL_TAB', payload: 'props' })}>Props</div>}
