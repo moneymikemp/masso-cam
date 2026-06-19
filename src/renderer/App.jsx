@@ -18,6 +18,7 @@ import InlayWizard from './components/panels/InlayWizard';
 import ToolLibraryModal from './components/panels/ToolLibraryModal';
 import MachineProfilesModal from './components/panels/MachineProfilesModal';
 import CADToolsPanel from './components/panels/CADToolsPanel';
+import { version as appVersion } from '../../package.json';
 
 // ── Modal styles ──────────────────────────────────────────────────────────────
 const MS = {
@@ -112,7 +113,8 @@ function AboutModal({ onClose }) {
     <div style={MS.overlay} onClick={onClose}>
       <div style={{ ...MS.box, minWidth:340, textAlign:'center' }} onClick={e => e.stopPropagation()}>
         <img src={`${process.env.PUBLIC_URL}/dmdcam-logo.png`} alt="DMDCAM" style={{ height:80, marginBottom:12, objectFit:'contain' }} />
-        <div style={{ fontSize:22, fontWeight:700, color:'#aaaaff', marginBottom:4 }}>DMDCAM</div>
+        <div style={{ fontSize:22, fontWeight:700, color:'#aaaaff', marginBottom:2 }}>DMDCAM</div>
+        <div style={{ fontSize:11, color:'#5555aa', marginBottom:4, fontFamily:'monospace' }}>v{appVersion}</div>
         <div style={{ fontSize:12, color:'#666688', marginBottom:16 }}>2.5D CAM for Masso G3 CNC Router</div>
         <div style={{ fontSize:11, color:'#8888aa', lineHeight:1.8, marginBottom:16 }}>
           Operations: Contour · Pocket · Adaptive · Face<br/>
