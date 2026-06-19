@@ -4,34 +4,34 @@ import { useApp } from '../../store/AppContext';
 const TOOL_GROUPS = [
   {
     tools: [
-      { key: 'select',   label: '▲',  title: 'Select / Move / Rotate (S)' },
+      { key: 'select',   label: '▲',  title: 'Select / Move / Rotate  [S]' },
     ],
   },
   {
     label: 'Draw',
     tools: [
-      { key: 'line',     label: '╱',   title: 'Line — click start, click end' },
-      { key: 'circle',   label: '○',   title: 'Circle — click center, click radius' },
-      { key: 'arc',      label: '⌒',  title: 'Arc — start, midpoint, end' },
-      { key: 'rect',     label: '□',   title: 'Rectangle — click corner, click opposite' },
-      { key: 'polyline', label: '⌒╱', title: 'Polyline — A=arc seg · C=close · Enter=finish' },
+      { key: 'line',     label: '╱',   title: 'Line — click start, click end  [L]' },
+      { key: 'circle',   label: '○',   title: 'Circle — click center, click radius  [C]' },
+      { key: 'arc',      label: '⌒',  title: 'Arc — start, midpoint, end  [A]' },
+      { key: 'rect',     label: '□',   title: 'Rectangle — click corner, click opposite  [R]' },
+      { key: 'polyline', label: '⌒╱', title: 'Polyline — A=arc · L=line · C=close · Enter=finish  [P]' },
       { key: 'polygon',  label: '⬡',  title: 'Polygon — click center, set sides, click radius' },
-      { key: 'mirror',   label: '⇔',  title: 'Mirror — select entities, click two points for mirror axis' },
+      { key: 'mirror',   label: '⇔',  title: 'Mirror — select entities, click two axis points  [M]' },
     ],
   },
   {
     label: 'Edit',
     tools: [
-      { key: 'trim',   label: '✂',  title: 'Trim — click a segment to trim it at intersecting edges' },
-      { key: 'extend', label: '→|', title: 'Extend — click near an end of a line or arc to extend to nearest boundary' },
-      { key: 'fillet',  label: '╭',  title: 'Fillet — click two lines to round the corner (set radius in overlay)' },
-      { key: 'chamfer', label: '⌐',  title: 'Chamfer — click two lines to cut the corner at an angle (set distance in overlay)' },
+      { key: 'trim',    label: '✂',  title: 'Trim — click a segment to trim at intersecting edges  [T]' },
+      { key: 'extend',  label: '→|', title: 'Extend — click near an end to extend to nearest boundary  [E]' },
+      { key: 'fillet',  label: '╭',  title: 'Fillet — click two lines to round the corner  [F]' },
+      { key: 'chamfer', label: '⌐',  title: 'Chamfer — click two lines to cut the corner at an angle  [H]' },
     ],
   },
   {
     label: 'Measure',
     tools: [
-      { key: 'measure',  label: '⊢→', title: 'Measure — click two points for distance, third for angle' },
+      { key: 'measure', label: '⊢→', title: 'Measure — click two points for distance, third for angle' },
     ],
   },
 ];

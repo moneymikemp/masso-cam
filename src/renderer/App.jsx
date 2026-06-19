@@ -215,6 +215,30 @@ export default function App() {
     });
   }, [state, entities, operations]);
 
+  // CAD tool keyboard shortcuts
+  useEffect(() => {
+    const TOOL_KEYS = {
+      s: 'select', l: 'line', c: 'circle', a: 'arc',
+      r: 'rect',   p: 'polyline', m: 'mirror',
+      t: 'trim',   e: 'extend',   f: 'fillet', h: 'chamfer',
+    };
+    const onKey = (ev) => {
+      const tag = document.activeElement?.tagName;
+      if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT') return;
+      if (!cadMode || ev.ctrlKey || ev.altKey || ev.metaKey) return;
+      // A / L / C / 3 are handled inside the polyline tool itself — don't intercept them here
+      if (activeTool === 'polyline') return;
+      const tool = TOOL_KEYS[ev.key.toLowerCase()];
+      if (tool) { ev.preventDefault(); dispatch({ type: 'SET_ACTIVE_TOOL', payload: tool }); return; }
+      if (ev.key.toLowerCase() === 'o' && selectedEntityIds.length > 0) {
+        ev.preventDefault();
+        setOffsetModal({ distance: isInch ? '0.1' : '2', direction: 'expand' });
+      }
+    };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, [cadMode, activeTool, selectedEntityIds, dispatch, isInch]);
+
   const importDxf = useCallback(async () => {
     try {
       let content;
