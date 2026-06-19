@@ -761,6 +761,38 @@ function arcFrom3Pts(p1, p2, p3) {
   return { center: { x: cx, y: cy }, radius: r, startAngle: sa, endAngle: ea };
 }
 
+// Given start point p with unit tangent tang and endpoint e, returns the unique
+// circular arc tangent to tang at p that ends at e, as { mid, exitTangent }.
+// mid is the arc's geometric midpoint — pass it to arcFrom3Pts(p, e, mid).
+// Returns null if e lies on the tangent line (degenerate).
+function computeTangentArc(p, tang, e) {
+  const dx = p.x - e.x, dy = p.y - e.y;
+  const denom = 2 * (tang.y * dx - tang.x * dy);
+  if (Math.abs(denom) < 1e-10) return null;
+  const t = (dx*dx + dy*dy) / denom;
+  if (Math.abs(t) < 1e-10) return null;
+  // Center = p + t * perp(tang);  t>0 → center left → CCW;  t<0 → center right → CW
+  const cx = p.x + t * (-tang.y), cy = p.y + t * tang.x;
+  const r  = Math.abs(t);
+  const sa = Math.atan2(p.y - cy, p.x - cx);
+  const ea = Math.atan2(e.y - cy, e.x - cx);
+  let midAngle;
+  let exitTangent;
+  if (t > 0) {
+    // CCW from p to e
+    const effEa = ea <= sa ? ea + TAU : ea;
+    midAngle = (sa + effEa) / 2;
+    exitTangent = { x: -(e.y - cy) / r, y:  (e.x - cx) / r };
+  } else {
+    // CW from p to e
+    const effEa = ea >= sa ? ea - TAU : ea;
+    midAngle = (sa + effEa) / 2;
+    exitTangent = { x:  (e.y - cy) / r, y: -(e.x - cx) / r };
+  }
+  const mid = { x: cx + r * Math.cos(midAngle), y: cy + r * Math.sin(midAngle) };
+  return { mid, exitTangent };
+}
+
 function constrainTo45(start, end) {
   const dx = end.x-start.x, dy = end.y-start.y;
   const dist = Math.hypot(dx, dy);
@@ -908,7 +940,7 @@ export default function CAMCanvas() {
       drawStateRef.current = null;
     } else {
       drawStateRef.current = activeTool === 'polyline'
-        ? { tool: 'polyline', pts: [], segs: [], nextSegType: 'line', arcMid: null, dragging: false }
+        ? { tool: 'polyline', pts: [], segs: [], nextSegType: 'line', arcMid: null, arcSubMode: 'tangent', endTangent: null, dragging: false }
         : activeTool === 'polygon'
         ? { tool: 'polygon', pts: [], sides: polygonSidesRef.current, dragging: false }
         : activeTool === 'mirror'
@@ -1681,19 +1713,30 @@ export default function CAMCanvas() {
         }
         // Draw next-segment preview to cursor
         const lastPt = plPts[plPts.length - 1];
+        const drawArcPreview = (arcResult) => {
+          if (!arcResult) return false;
+          const arc = arcFrom3Pts(lastPt, cur, arcResult.mid);
+          if (!arc) return false;
+          const aPts = arcToPoints(arc.center, arc.radius, arc.startAngle, arc.endAngle, 48);
+          if (aPts.length < 2) return false;
+          const f = w2c(aPts[0].x, aPts[0].y);
+          ctx.beginPath(); ctx.moveTo(f.x, f.y);
+          for (let j = 1; j < aPts.length; j++) { const p = w2c(aPts[j].x, aPts[j].y); ctx.lineTo(p.x, p.y); }
+          ctx.stroke();
+          return true;
+        };
         if (ds.nextSegType === 'arc' && ds.arcMid !== null) {
-          // Have arc midpoint, preview arc from lastPt through arcMid to cursor
-          const arc = arcFrom3Pts(lastPt, cur, ds.arcMid);
-          if (arc) {
-            const aPts = arcToPoints(arc.center, arc.radius, arc.startAngle, arc.endAngle, 48);
-            if (aPts.length > 1) {
-              const f = w2c(aPts[0].x, aPts[0].y);
-              ctx.beginPath(); ctx.moveTo(f.x, f.y);
-              for (let j = 1; j < aPts.length; j++) { const p = w2c(aPts[j].x, aPts[j].y); ctx.lineTo(p.x, p.y); }
-              ctx.stroke();
-            }
+          // 3-point arc: have midpoint, preview to cursor as end
+          drawArcPreview({ mid: ds.arcMid });
+        } else if (ds.nextSegType === 'arc' && ds.arcSubMode !== '3point' && ds.endTangent) {
+          // Tangent arc: compute from exit tangent
+          if (!drawArcPreview(computeTangentArc(lastPt, ds.endTangent, cur))) {
+            // Degenerate (cursor on tangent line) — show line placeholder
+            const s0 = w2c(lastPt.x, lastPt.y), se = w2c(cur.x, cur.y);
+            ctx.beginPath(); ctx.moveTo(s0.x, s0.y); ctx.lineTo(se.x, se.y); ctx.stroke();
           }
         } else {
+          // Line mode, or arc mode with no tangent yet (first segment)
           const s0 = w2c(lastPt.x, lastPt.y), se = w2c(cur.x, cur.y);
           ctx.beginPath(); ctx.moveTo(s0.x, s0.y); ctx.lineTo(se.x, se.y); ctx.stroke();
         }
@@ -2262,15 +2305,63 @@ export default function CAMCanvas() {
       case 'polyline': {
         const segs = ds.segs || [];
         if (ds.pts.length === 0) {
-          drawStateRef.current = { ...ds, pts: [snapped] };
-        } else if (ds.nextSegType === 'arc' && ds.arcMid === null) {
-          // First arc click: store midpoint, don't advance pts yet
-          drawStateRef.current = { ...ds, arcMid: snapped };
-        } else if (ds.nextSegType === 'arc' && ds.arcMid !== null) {
-          // Second arc click: snapped = end, arcMid already stored
-          drawStateRef.current = { ...ds, pts: [...ds.pts, snapped], segs: [...segs, { type: 'arc', mid: ds.arcMid }], arcMid: null, nextSegType: 'line' };
+          // First point — no tangent direction yet
+          drawStateRef.current = { ...ds, pts: [snapped], endTangent: null };
+        } else if (ds.nextSegType === 'arc') {
+          const hasTangent = !!ds.endTangent;
+          const use3pt = ds.arcSubMode === '3point' || !hasTangent;
+          if (!use3pt) {
+            // Tangent arc: one click is the endpoint
+            const lastPt = ds.pts[ds.pts.length - 1];
+            const ta = computeTangentArc(lastPt, ds.endTangent, snapped);
+            if (ta) {
+              drawStateRef.current = {
+                ...ds,
+                pts: [...ds.pts, snapped],
+                segs: [...segs, { type: 'arc', mid: ta.mid }],
+                arcMid: null,
+                arcSubMode: 'tangent',
+                endTangent: ta.exitTangent,
+              };
+            }
+            // If ta is null (cursor on tangent line), ignore the click
+          } else if (ds.arcMid === null) {
+            // 3-point arc, first click: store midpoint
+            drawStateRef.current = { ...ds, arcMid: snapped };
+          } else {
+            // 3-point arc, second click: commit arc, compute exit tangent
+            const lastPt = ds.pts[ds.pts.length - 1];
+            const arc3 = arcFrom3Pts(lastPt, snapped, ds.arcMid);
+            let newEndTangent = null;
+            if (arc3) {
+              const angLast = Math.atan2(lastPt.y - arc3.center.y, lastPt.x - arc3.center.x);
+              const isForward = Math.abs(normAngle(arc3.startAngle - angLast)) < 1e-4;
+              const ex = snapped.x - arc3.center.x, ey = snapped.y - arc3.center.y;
+              newEndTangent = isForward
+                ? { x: -ey / arc3.radius, y:  ex / arc3.radius }
+                : { x:  ey / arc3.radius, y: -ex / arc3.radius };
+            }
+            drawStateRef.current = {
+              ...ds,
+              pts: [...ds.pts, snapped],
+              segs: [...segs, { type: 'arc', mid: ds.arcMid }],
+              arcMid: null,
+              arcSubMode: 'tangent',
+              endTangent: newEndTangent,
+            };
+          }
         } else {
-          drawStateRef.current = { ...ds, pts: [...ds.pts, snapped], segs: [...segs, { type: 'line' }] };
+          // Line segment: commit and record exit tangent
+          const lastPt = ds.pts[ds.pts.length - 1];
+          const dx = snapped.x - lastPt.x, dy = snapped.y - lastPt.y;
+          const len = Math.hypot(dx, dy);
+          const newEndTangent = len > 1e-10 ? { x: dx/len, y: dy/len } : ds.endTangent;
+          drawStateRef.current = {
+            ...ds,
+            pts: [...ds.pts, snapped],
+            segs: [...segs, { type: 'line' }],
+            endTangent: newEndTangent,
+          };
         }
         break;
       }
@@ -2354,7 +2445,7 @@ export default function CAMCanvas() {
       }
       if (newEntities.length > 0) dispatch({ type: 'ADD_ENTITIES', payload: newEntities });
     }
-    drawStateRef.current = { tool: 'polyline', pts: [], segs: [], nextSegType: 'line', arcMid: null, dragging: false };
+    drawStateRef.current = { tool: 'polyline', pts: [], segs: [], nextSegType: 'line', arcMid: null, arcSubMode: 'tangent', endTangent: null, dragging: false };
     previewRef.current = null;
     lastSnapRef.current = null;
     setDrawPhase(p => p + 1);
@@ -2526,13 +2617,21 @@ export default function CAMCanvas() {
         }
         if (e.key.toLowerCase() === 'a') {
           e.preventDefault();
-          drawStateRef.current = { ...drawStateRef.current, nextSegType: 'arc', arcMid: null };
+          drawStateRef.current = { ...drawStateRef.current, nextSegType: 'arc', arcMid: null, arcSubMode: 'tangent' };
           setDrawPhase(p => p + 1);
           return;
         }
         if (e.key.toLowerCase() === 'l') {
           e.preventDefault();
           drawStateRef.current = { ...drawStateRef.current, nextSegType: 'line', arcMid: null };
+          setDrawPhase(p => p + 1);
+          return;
+        }
+        if (e.key === '3' && drawStateRef.current?.nextSegType === 'arc') {
+          e.preventDefault();
+          const cur3 = drawStateRef.current;
+          const next = cur3.arcSubMode === '3point' ? 'tangent' : '3point';
+          drawStateRef.current = { ...cur3, arcSubMode: next, arcMid: null };
           setDrawPhase(p => p + 1);
           return;
         }
@@ -2881,8 +2980,16 @@ export default function CAMCanvas() {
           arc:      ds?.pts?.length === 2 ? 'Click to set end point' : ds?.pts?.length === 1 ? 'Click midpoint on arc' : 'Click to set start point',
           rect:     ds?.pts?.length === 1 ? 'Click opposite corner (Shift = square, or type W/H above)' : 'Click first corner',
           polyline: ds?.nextSegType === 'arc'
-            ? (ds?.arcMid ? 'Click arc end point · L = line mode · Enter = finish' : 'Click arc midpoint · L = line mode')
-            : (ds?.pts?.length === 0 ? 'Click to start · A = arc seg · Enter = finish · Dbl-click = finish' : 'Click to add point · A = arc · C = close · Enter = finish'),
+            ? (ds?.arcMid
+                ? 'Click arc end point · L = line · Enter = finish'
+                : ds?.arcSubMode === '3point'
+                  ? 'Click arc midpoint (3-point) · 3 = tangent arc · L = line'
+                  : ds?.endTangent
+                    ? 'Click endpoint (tangent arc) · 3 = 3-point arc · L = line · C = close'
+                    : 'Click arc midpoint (no tangent yet) · L = line')
+            : (ds?.pts?.length === 0
+                ? 'Click to start · A = arc · Enter = finish'
+                : 'Click to add point · A = arc · C = close · Enter = finish'),
           polygon:  ds?.pts?.length === 1 ? 'Click to set radius (or type Sides/Radius above)' : 'Click to set center',
           mirror:   ds?.pts?.length === 1 ? 'Click second point of mirror axis' : selectedEntityIds.length === 0 ? 'Select entities first, then click mirror axis start' : 'Click first point of mirror axis',
           measure:  ds?.pts?.length === 2 ? 'Click third point to measure angle · Esc to reset' : ds?.pts?.length === 1 ? 'Click second point to lock distance' : 'Click first point',
