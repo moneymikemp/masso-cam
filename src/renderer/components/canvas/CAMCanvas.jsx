@@ -866,6 +866,7 @@ export default function CAMCanvas() {
 
   const [zSliderPos, setZSliderPos] = useState(0); // 0 = all passes; 1..N = pass index
   const [isAnimating, setIsAnimating] = useState(false);
+  const [showOnionSkin, setShowOnionSkin] = useState(false);
   const draggingTabRef = useRef(null); // { opId, tabIdx } when dragging a manual tab marker
   const commitPolylineRef = useRef(null);
   const gripDragRef = useRef(null); // { entityId, gripType, vertexIdx, curWorld, snapType }
@@ -1071,6 +1072,7 @@ export default function CAMCanvas() {
 
     drawGrid(ctx);
     drawStock(ctx);
+    if (showToolpaths && showOnionSkin) drawOnionSkin(ctx);
     drawOrigin(ctx);
     drawEntities(ctx);
     drawPreviewEntities(ctx);
@@ -1302,6 +1304,62 @@ export default function CAMCanvas() {
       // Always advance position so skipped moves don't corrupt subsequent start points.
       if (move.x !== undefined) prevX = x;
       if (move.y !== undefined) prevY = y;
+    }
+  }
+
+  function drawOnionSkin(ctx) {
+    if (zLevels.length === 0) return;
+    const SNAP = 0.001;
+    const SKIP_TYPES = new Set(['drill', 'bore', 'thread']);
+    const maxZ = Math.max(zLevels.length - 1, 1);
+
+    for (const op of operations) {
+      if (!op.enabled || !op.toolpath) continue;
+      if (SKIP_TYPES.has(op.type)) continue;
+
+      const toolDia = op.params?.toolDiameter ?? 6;
+      const strokeW = Math.max(toolDia * viewport.zoom, 1);
+
+      const moveLists = op.toolpath.subToolpaths?.length > 0
+        ? op.toolpath.subToolpaths.map(st => st.moves)
+        : [op.toolpath.moves];
+
+      for (const moves of moveLists) {
+        if (!moves) continue;
+        let prevX = 0, prevY = 0, curZ = 0;
+
+        for (const move of moves) {
+          const x = move.x ?? prevX;
+          const y = move.y ?? prevY;
+          if (move.z !== undefined) curZ = move.z;
+
+          if (move.type === 'feed') {
+            const isPlunge = (x === prevX && y === prevY);
+            if (!isPlunge) {
+              const zi = zLevels.findIndex(zl => Math.abs(zl - curZ) < SNAP);
+              const inRange = zi >= 0 && (filterZIndex === null || zi <= filterZIndex);
+              if (inRange) {
+                const depthFraction = zi / maxZ;
+                const sat = Math.round(60 + depthFraction * 30);
+                const lit = Math.round(50 - depthFraction * 20);
+                const alpha = (0.35 + depthFraction * 0.25).toFixed(2);
+                ctx.strokeStyle = `hsla(190, ${sat}%, ${lit}%, ${alpha})`;
+                ctx.lineWidth = strokeW;
+                ctx.lineCap = 'round';
+                ctx.setLineDash([]);
+                ctx.beginPath();
+                const s = w2c(prevX, prevY), e = w2c(x, y);
+                ctx.moveTo(s.x, s.y);
+                ctx.lineTo(e.x, e.y);
+                ctx.stroke();
+              }
+            }
+          }
+
+          if (move.x !== undefined) prevX = x;
+          if (move.y !== undefined) prevY = y;
+        }
+      }
     }
   }
 
@@ -1849,7 +1907,7 @@ export default function CAMCanvas() {
     drawSnapIndicator(ctx, cur, snapType);
   }
 
-  useEffect(() => { draw(); }, [entities, layers, operations, viewport, selectedEntityIds, hoveredEntityId, showToolpaths, showRapids, mousePos, stockConfig, zSliderPos, zLevels, tabPlacementActive, tabPlacementOpId, dogboneSelectionActive, dogboneSelectionOpId, textPlacementActive, textPlacementOpId, medialAxisPolylines, liveXf, drawPhase, refImage, previewEntities]);
+  useEffect(() => { draw(); }, [entities, layers, operations, viewport, selectedEntityIds, hoveredEntityId, showToolpaths, showRapids, mousePos, stockConfig, zSliderPos, zLevels, showOnionSkin, tabPlacementActive, tabPlacementOpId, dogboneSelectionActive, dogboneSelectionOpId, textPlacementActive, textPlacementOpId, medialAxisPolylines, liveXf, drawPhase, refImage, previewEntities]);
 
   // Mouse events
   const onMouseDown = useCallback((e) => {
@@ -2941,6 +2999,13 @@ export default function CAMCanvas() {
                 <div style={{ width: 9, height: 9, borderRadius: 2, background: passColor(filterZIndex, zLevels.length), flexShrink: 0 }} />
                 {`Z${(zLevels[filterZIndex] ?? 0).toFixed(2)}  ${zSliderPos}/${zLevels.length}`}
               </div>}
+          <button
+            onClick={() => setShowOnionSkin(v => !v)}
+            title="Onion Skin — show filled material removed up to current depth"
+            style={{ width: 22, height: 22, background: showOnionSkin ? '#0a2a2a' : '#111128', border: `1px solid ${showOnionSkin ? '#22aaaa' : '#4444aa'}`, color: showOnionSkin ? '#44cccc' : '#aaaacc', borderRadius: 3, cursor: 'pointer', fontSize: 11, display: 'flex', alignItems: 'center', justifyContent: 'center', flexShrink: 0, padding: 0 }}
+          >
+            ◎
+          </button>
         </div>
       )}
       {statusMsg && (
