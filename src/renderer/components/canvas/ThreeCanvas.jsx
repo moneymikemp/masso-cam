@@ -12,15 +12,28 @@ function wy(z)       { return z ?? 0; }   // world Z becomes Three Y (up)
 function wz(y)       { return -(y ?? 0); } // world Y becomes Three -Z
 
 const COLORS = {
-  bg:          0x0a0a1e,
-  grid1:       0x1a1a36,
-  grid2:       0x141428,
-  stockFace:   0x1a2a40,
-  stockEdge:   0x3355aa,
-  rapid:       0x2a3a5a,
-  feed:        0x22aaaa,
-  plunge:      0xcc6622,
+  bg:        0x0a0a1e,
+  grid1:     0x1a1a36,
+  grid2:     0x141428,
+  stockFace: 0x1a2a40,
+  stockEdge: 0x3355aa,
+  rapid:     0x2a3a5a,
+  plunge:    0xcc6622,
 };
+
+// Distinct op colors — bright enough to read on the dark background
+const OP_PALETTE = [
+  0x22aaaa, // teal
+  0x44cc55, // green
+  0xdd4444, // red
+  0xddcc22, // yellow
+  0x4488dd, // blue
+  0xcc44cc, // magenta
+  0xdd8822, // amber
+  0x44ccaa, // cyan-green
+  0xaa55dd, // purple
+  0xdd6644, // salmon
+];
 
 function buildStockMesh(stockConfig) {
   const { width, length, thickness, topZ, datum,
@@ -61,9 +74,13 @@ function buildStockMesh(stockConfig) {
 
 function buildToolpathLines(operations, showRapids) {
   const groups = [];
+  let opIdx = 0;
 
   for (const op of operations) {
     if (!op.enabled || !op.toolpath) continue;
+
+    const feedColor = OP_PALETTE[opIdx % OP_PALETTE.length];
+    opIdx++;
 
     const moveLists = op.toolpath.subToolpaths?.length
       ? op.toolpath.subToolpaths.map(st => st.moves)
@@ -109,7 +126,7 @@ function buildToolpathLines(operations, showRapids) {
       };
 
       addSegs(rapidVerts,  COLORS.rapid);
-      addSegs(feedVerts,   COLORS.feed);
+      addSegs(feedVerts,   feedColor);
       addSegs(plungeVerts, COLORS.plunge);
     }
   }
@@ -278,10 +295,21 @@ export default function ThreeCanvas() {
       </div>
 
       {/* Legend */}
-      <div style={{ position: 'absolute', bottom: 8, left: 8, background: 'rgba(8,8,24,0.75)', border: '1px solid #1a1a38', borderRadius: 4, padding: '5px 8px', fontSize: 10, color: '#666688', lineHeight: 1.8 }}>
-        <div><span style={{ color: '#22aaaa' }}>■</span> Feed</div>
-        <div><span style={{ color: '#cc6622' }}>■</span> Plunge</div>
-        <div><span style={{ color: '#2a3a5a' }}>■</span> Rapid</div>
+      <div style={{ position: 'absolute', bottom: 8, left: 8, background: 'rgba(8,8,24,0.75)', border: '1px solid #1a1a38', borderRadius: 4, padding: '5px 8px', fontSize: 10, color: '#666688', lineHeight: 1.8, maxHeight: '40vh', overflowY: 'auto' }}>
+        {operations.filter(op => op.enabled && op.toolpath).map((op, i) => {
+          const c = OP_PALETTE[i % OP_PALETTE.length];
+          const hex = '#' + c.toString(16).padStart(6, '0');
+          return (
+            <div key={op.id} style={{ display: 'flex', alignItems: 'center', gap: 5 }}>
+              <span style={{ color: hex, fontSize: 13, lineHeight: 1 }}>■</span>
+              <span style={{ color: '#8888aa' }}>{op.name || `Op ${i + 1}`}</span>
+            </div>
+          );
+        })}
+        <div style={{ borderTop: '1px solid #1a1a38', marginTop: 3, paddingTop: 3 }}>
+          <div><span style={{ color: '#cc6622' }}>■</span> Plunge</div>
+          <div><span style={{ color: '#2a3a5a' }}>■</span> Rapid</div>
+        </div>
       </div>
 
       {/* Orbit hint */}
