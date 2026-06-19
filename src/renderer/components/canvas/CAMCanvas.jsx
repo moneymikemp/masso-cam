@@ -857,6 +857,7 @@ export default function CAMCanvas() {
   // Dimension input overlay (appears after first click in line/circle/rect)
   const [dimInput, setDimInput]   = useState(null);
   const dimInputRef = useRef(null); // mirrors dimInput without stale closure issues
+  const dimFirstInputRef = useRef(null); // used to programmatically focus the first field
 
   // Coordinate input dialog (Spacebar while drawing)
   const [coordInput, setCoordInput] = useState(null);
@@ -990,6 +991,15 @@ export default function CAMCanvas() {
       setDimInput(newDI);
     }
   }, [drawPhase]);
+
+  // Focus the first input field when the dim input overlay mounts.
+  // autoFocus alone is unreliable after a canvas click because the canvas
+  // retains browser focus; programmatic focus after a tick is more robust.
+  useEffect(() => {
+    if (!dimInput) return;
+    const t = setTimeout(() => dimFirstInputRef.current?.focus(), 0);
+    return () => clearTimeout(t);
+  }, [dimInput]);
 
   function togglePlay() {
     if (isAnimating) { setIsAnimating(false); }
@@ -3182,18 +3192,18 @@ export default function CAMCanvas() {
         return (
           <div style={{ position:'absolute', left, top, background:'rgba(8,8,28,0.97)', border:'1px solid #3344aa', borderRadius:5, padding:'8px 10px', zIndex:15, fontSize:11, color:'#aab', boxShadow:'0 2px 8px rgba(0,0,0,0.6)' }}>
             {tool === 'line' && <>
-              <div style={rowSt}><span style={lblSt}>Length ({unit})</span><input autoFocus style={inputSt} type="text" value={vals.length??''} onChange={e=>updateVal('length',e.target.value)} onKeyDown={onEnter} /></div>
+              <div style={rowSt}><span style={lblSt}>Length ({unit})</span><input ref={dimFirstInputRef} style={inputSt} type="text" value={vals.length??''} onChange={e=>updateVal('length',e.target.value)} onKeyDown={onEnter} /></div>
               <div style={rowSt}><span style={lblSt}>Angle (°)</span><input style={inputSt} type="text" value={vals.angle??'0'} onChange={e=>updateVal('angle',e.target.value)} onKeyDown={onEnter} /></div>
             </>}
             {tool === 'circle' && (
-              <div style={rowSt}><span style={lblSt}>Diameter ({unit})</span><input autoFocus style={inputSt} type="text" value={vals.diameter??''} onChange={e=>updateVal('diameter',e.target.value)} onKeyDown={onEnter} /></div>
+              <div style={rowSt}><span style={lblSt}>Diameter ({unit})</span><input ref={dimFirstInputRef} style={inputSt} type="text" value={vals.diameter??''} onChange={e=>updateVal('diameter',e.target.value)} onKeyDown={onEnter} /></div>
             )}
             {tool === 'rect' && <>
-              <div style={rowSt}><span style={lblSt}>Width ({unit})</span><input autoFocus style={inputSt} type="text" value={vals.width??''} onChange={e=>updateVal('width',e.target.value)} onKeyDown={onEnter} /></div>
+              <div style={rowSt}><span style={lblSt}>Width ({unit})</span><input ref={dimFirstInputRef} style={inputSt} type="text" value={vals.width??''} onChange={e=>updateVal('width',e.target.value)} onKeyDown={onEnter} /></div>
               <div style={rowSt}><span style={lblSt}>Height ({unit})</span><input style={inputSt} type="text" value={vals.height??''} onChange={e=>updateVal('height',e.target.value)} onKeyDown={onEnter} /></div>
             </>}
             {tool === 'polygon' && <>
-              <div style={rowSt}><span style={lblSt}>Sides</span><input autoFocus style={inputSt} type="text" value={vals.sides??'6'} onChange={e=>updateVal('sides',e.target.value)} onKeyDown={onEnter} /></div>
+              <div style={rowSt}><span style={lblSt}>Sides</span><input ref={dimFirstInputRef} style={inputSt} type="text" value={vals.sides??'6'} onChange={e=>updateVal('sides',e.target.value)} onKeyDown={onEnter} /></div>
               <div style={rowSt}><span style={lblSt}>Radius ({unit})</span><input style={inputSt} type="text" value={vals.radius??''} onChange={e=>updateVal('radius',e.target.value)} onKeyDown={onEnter} /></div>
             </>}
             <div style={{ fontSize:9, color:'#445566', marginTop:3 }}>Enter to commit · Esc to freehand</div>
