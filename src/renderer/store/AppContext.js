@@ -143,6 +143,9 @@ const initialState = {
   gridSnap: false,
   cadMode: false,
 
+  // Z-depth slider (0 = show all, 1..N = show passes up to index N-1)
+  zSliderPos: 0,
+
   // Reference image (not saved in project)
   refImage: null, // { dataUrl, x, y, mmPerPixel, opacity }
 
@@ -450,6 +453,7 @@ function reducer(state, action) {
     case 'SET_STATUS':          return { ...state, statusMessage: action.payload };
     case 'TOGGLE_TOOLPATHS':    return { ...state, showToolpaths: !state.showToolpaths };
     case 'TOGGLE_RAPIDS':       return { ...state, showRapids: !state.showRapids };
+    case 'SET_Z_SLIDER':        return { ...state, zSliderPos: action.payload };
     case 'SET_MEDIAL_AXIS':     return { ...state, medialAxisPolylines: action.payload };
 
     case 'SET_TAB_PLACEMENT':

@@ -72,7 +72,30 @@ function buildStockMesh(stockConfig) {
   return { group, bounds: { minX, maxX, minY, maxY, minZ, maxZ } };
 }
 
-function buildToolpathLines(operations, showRapids) {
+function computeZLevels(operations) {
+  const zSet = new Set();
+  for (const op of operations) {
+    if (!op.enabled || !op.toolpath) continue;
+    const moveLists = op.toolpath.subToolpaths?.length
+      ? op.toolpath.subToolpaths.map(st => st.moves)
+      : [op.toolpath.moves];
+    for (const moves of moveLists) {
+      if (!moves) continue;
+      let curZ = 0;
+      for (const m of moves) {
+        if (m.z !== undefined) curZ = m.z;
+        if (m.type === 'feed') zSet.add(Math.round(curZ * 1000) / 1000);
+      }
+    }
+  }
+  return [...zSet].sort((a, b) => b - a); // shallowest first (matches CAMCanvas)
+}
+
+function buildToolpathLines(operations, showRapids, zSliderPos) {
+  const SNAP = 0.001;
+  const zLevels = computeZLevels(operations);
+  const filterZIndex = zSliderPos === 0 ? null : zSliderPos - 1;
+
   const groups = [];
   let opIdx = 0;
 
@@ -101,15 +124,20 @@ function buildToolpathLines(operations, showRapids) {
         const z = m.z ?? pz;
 
         if (m.type === 'rapid') {
-          if (showRapids) {
+          if (showRapids && filterZIndex === null) {
             rapidVerts.push(wx(px), wy(pz), wz(py), wx(x), wy(z), wz(y));
           }
         } else if (m.type === 'feed') {
-          const isPlunge = (x === px && y === py && z !== pz);
-          if (isPlunge) {
-            plungeVerts.push(wx(px), wy(pz), wz(py), wx(x), wy(z), wz(y));
-          } else {
-            feedVerts.push(wx(px), wy(pz), wz(py), wx(x), wy(z), wz(y));
+          // Check whether this move's Z level is within the current filter
+          const zi = zLevels.findIndex(zl => Math.abs(zl - z) < SNAP);
+          const inRange = filterZIndex === null || (zi >= 0 && zi <= filterZIndex);
+          if (inRange) {
+            const isPlunge = (x === px && y === py && z !== pz);
+            if (isPlunge) {
+              plungeVerts.push(wx(px), wy(pz), wz(py), wx(x), wy(z), wz(y));
+            } else {
+              feedVerts.push(wx(px), wy(pz), wz(py), wx(x), wy(z), wz(y));
+            }
           }
         }
 
@@ -136,7 +164,7 @@ function buildToolpathLines(operations, showRapids) {
 
 export default function ThreeCanvas() {
   const { state } = useApp();
-  const { operations, stockConfig, showToolpaths, showRapids } = state;
+  const { operations, stockConfig, showToolpaths, showRapids, zSliderPos } = state;
 
   const mountRef    = useRef(null);
   const rendererRef = useRef(null);
@@ -264,7 +292,7 @@ export default function ThreeCanvas() {
 
     // Toolpaths
     if (showToolpaths) {
-      const lines = buildToolpathLines(operations, showRapids);
+      const lines = buildToolpathLines(operations, showRapids, zSliderPos);
       for (const l of lines) scene.add(l);
     }
 
@@ -273,7 +301,7 @@ export default function ThreeCanvas() {
       fittedRef.current = true;
       fitCamera(firstBounds);
     }
-  }, [operations, stockConfig, showToolpaths, showRapids, fitCamera]);
+  }, [operations, stockConfig, showToolpaths, showRapids, zSliderPos, fitCamera]);
 
   const handleFit = () => {
     fittedRef.current = false;
