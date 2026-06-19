@@ -1,4 +1,4 @@
-import React from 'react';
+import React, { useMemo } from 'react';
 import { useApp } from '../../store/AppContext';
 import { getBounds } from '../../dxf/parser';
 
@@ -112,9 +112,12 @@ function NumInput({ value, onChange, min, step = 0.1 }) {
 
 export default function StockPanel() {
   const { state, dispatch } = useApp();
-  const { stockConfig, entities, bounds, layers } = state;
+  const { stockConfig, entities, layers } = state;
   const isInch = state.postConfig?.units === 'inch';
-  const hasGeometry = entities.length > 0 && bounds != null;
+
+  // Compute bounds from all current entities (DXF-imported or drawn in-app).
+  const bounds = useMemo(() => entities.length > 0 ? getBounds(entities) : null, [entities]);
+  const hasGeometry = bounds != null;
 
   const set = (key, val) => dispatch({ type: 'SET_STOCK_CONFIG', payload: { [key]: val } });
 

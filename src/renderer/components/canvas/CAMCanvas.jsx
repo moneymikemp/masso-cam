@@ -872,8 +872,11 @@ export default function CAMCanvas() {
   const gripDragRef = useRef(null); // { entityId, gripType, vertexIdx, curWorld, snapType }
   const [nearGrip, setNearGrip] = useState(false);
   const polygonSidesRef = useRef(6); // persists across polygon draws
-  const filletRadiusRef = useRef(5); // persists across fillet operations
-  const chamferDistRef  = useRef(5); // persists across chamfer operations
+  const filletRadiusRef  = useRef(5);   // persists across fillet operations (mm)
+  const chamferDist1Ref  = useRef(5);   // chamfer first-side setback (mm)
+  const chamferDist2Ref  = useRef(5);   // chamfer second-side setback (mm)
+  const [filletOverlayInch,  setFilletOverlayInch]  = useState(() => isInch);
+  const [chamferOverlayInch, setChamferOverlayInch] = useState(() => isInch);
 
   // Context menu + clipboard
   const [contextMenu, setContextMenu] = useState(null); // { x, y } screen pixels
@@ -951,7 +954,7 @@ export default function CAMCanvas() {
         : activeTool === 'fillet'
         ? { tool: 'fillet', pts: [], radius: filletRadiusRef.current, ent1: null, click1: null }
         : activeTool === 'chamfer'
-        ? { tool: 'chamfer', pts: [], dist: chamferDistRef.current, ent1: null, click1: null }
+        ? { tool: 'chamfer', pts: [], dist1: chamferDist1Ref.current, dist2: chamferDist2Ref.current, ent1: null, click1: null }
         : { tool: activeTool, pts: [], dragging: false };
     }
     previewRef.current = null;
@@ -2337,16 +2340,17 @@ export default function CAMCanvas() {
           showStatus('Click the second line to complete chamfer');
         } else {
           if (hit.id === ds.ent1.id) { showStatus('Click a different line'); break; }
-          const d = ds.dist ?? chamferDistRef.current;
-          const res = computeLineChamfer(ds.ent1, ds.click1, hit, world, d, d);
+          const d1 = ds.dist1 ?? chamferDist1Ref.current;
+          const d2 = ds.dist2 ?? chamferDist2Ref.current;
+          const res = computeLineChamfer(ds.ent1, ds.click1, hit, world, d1, d2);
           if (!res) {
             showStatus('Chamfer failed — lines may be parallel or distance too large');
           } else {
             dispatch({ type: 'TRANSFORM_ENTITIES', payload: [res.trimL1, res.trimL2] });
             dispatch({ type: 'ADD_ENTITIES', payload: [res.chamferLine] });
-            showStatus(`Chamfer ${d.toFixed(2)} mm applied`);
+            showStatus(`Chamfer ${d1.toFixed(2)}×${d2.toFixed(2)} mm applied`);
           }
-          drawStateRef.current = { tool: 'chamfer', pts: [], dist: d, ent1: null, click1: null };
+          drawStateRef.current = { tool: 'chamfer', pts: [], dist1: d1, dist2: d2, ent1: null, click1: null };
         }
         break;
       }
@@ -3073,50 +3077,91 @@ export default function CAMCanvas() {
 
       {/* ── Fillet radius overlay ────────────────────────────────────────────── */}
       {activeTool === 'fillet' && (() => {
+        const INV = 25.4;
+        const unitLbl = filletOverlayInch ? 'INCH' : 'MM';
+        const toDisp = mm => filletOverlayInch ? +(mm / INV).toFixed(4) : +mm.toFixed(3);
+        const toMM   = v  => filletOverlayInch ? v * INV : v;
+        const step   = filletOverlayInch ? 0.01 : 0.5;
+        const rMM    = drawStateRef.current?.radius ?? filletRadiusRef.current;
         const inputSt = { background:'#0d0d20', border:'1px solid #3344aa', color:'#cce', borderRadius:3, padding:'3px 8px', fontSize:12, width:80, fontFamily:'monospace' };
+        const unitBtnSt = { background:'#1a1a38', border:'1px solid #3344aa', color:'#8899cc', borderRadius:3, padding:'2px 6px', fontSize:10, cursor:'pointer', fontFamily:'monospace', userSelect:'none' };
         return (
           <div style={{ position:'absolute', bottom:40, right:16, background:'rgba(8,8,28,0.92)', border:'1px solid #3344aa', borderRadius:5, padding:'8px 12px', zIndex:15, display:'flex', alignItems:'center', gap:8 }}>
             <span style={{ fontSize:11, color:'#8888bb' }}>Fillet R</span>
             <input
               style={inputSt}
               type="number"
-              min="0.01"
-              step="0.5"
-              value={drawStateRef.current?.radius ?? filletRadiusRef.current}
+              min={filletOverlayInch ? 0.001 : 0.01}
+              step={step}
+              value={toDisp(rMM)}
               onChange={e => {
                 const v = parseFloat(e.target.value);
                 if (!isNaN(v) && v > 0) {
-                  filletRadiusRef.current = v;
-                  if (drawStateRef.current) drawStateRef.current.radius = v;
+                  const mm = toMM(v);
+                  filletRadiusRef.current = mm;
+                  if (drawStateRef.current) drawStateRef.current.radius = mm;
                 }
               }}
             />
-            <span style={{ fontSize:10, color:'#556677' }}>mm</span>
+            <button style={unitBtnSt} onClick={() => setFilletOverlayInch(b => !b)}>{unitLbl}</button>
           </div>
         );
       })()}
 
       {/* ── Chamfer distance overlay ─────────────────────────────────────────── */}
       {activeTool === 'chamfer' && (() => {
-        const inputSt = { background:'#0d0d20', border:'1px solid #3344aa', color:'#cce', borderRadius:3, padding:'3px 8px', fontSize:12, width:80, fontFamily:'monospace' };
+        const INV = 25.4;
+        const unitLbl = chamferOverlayInch ? 'INCH' : 'MM';
+        const toDisp = mm => chamferOverlayInch ? +(mm / INV).toFixed(4) : +mm.toFixed(3);
+        const toMM   = v  => chamferOverlayInch ? v * INV : v;
+        const step   = chamferOverlayInch ? 0.01 : 0.5;
+        const d1MM   = drawStateRef.current?.dist1 ?? chamferDist1Ref.current;
+        const d2MM   = drawStateRef.current?.dist2 ?? chamferDist2Ref.current;
+        const inputSt = { background:'#0d0d20', border:'1px solid #3344aa', color:'#cce', borderRadius:3, padding:'3px 6px', fontSize:12, width:74, fontFamily:'monospace' };
+        const unitBtnSt = { background:'#1a1a38', border:'1px solid #3344aa', color:'#8899cc', borderRadius:3, padding:'2px 6px', fontSize:10, cursor:'pointer', fontFamily:'monospace', userSelect:'none' };
+        const lblSt = { fontSize:10, color:'#666688' };
         return (
-          <div style={{ position:'absolute', bottom:40, right:16, background:'rgba(8,8,28,0.92)', border:'1px solid #3344aa', borderRadius:5, padding:'8px 12px', zIndex:15, display:'flex', alignItems:'center', gap:8 }}>
-            <span style={{ fontSize:11, color:'#8888bb' }}>Chamfer D</span>
-            <input
-              style={inputSt}
-              type="number"
-              min="0.01"
-              step="0.5"
-              value={drawStateRef.current?.dist ?? chamferDistRef.current}
-              onChange={e => {
-                const v = parseFloat(e.target.value);
-                if (!isNaN(v) && v > 0) {
-                  chamferDistRef.current = v;
-                  if (drawStateRef.current) drawStateRef.current.dist = v;
-                }
-              }}
-            />
-            <span style={{ fontSize:10, color:'#556677' }}>mm</span>
+          <div style={{ position:'absolute', bottom:40, right:16, background:'rgba(8,8,28,0.92)', border:'1px solid #3344aa', borderRadius:5, padding:'8px 12px', zIndex:15, display:'flex', flexDirection:'column', gap:6 }}>
+            <div style={{ display:'flex', alignItems:'center', justifyContent:'space-between', marginBottom:2 }}>
+              <span style={{ fontSize:11, color:'#8888bb' }}>Chamfer</span>
+              <button style={unitBtnSt} onClick={() => setChamferOverlayInch(b => !b)}>{unitLbl}</button>
+            </div>
+            <div style={{ display:'flex', alignItems:'center', gap:6 }}>
+              <span style={lblSt}>Side 1</span>
+              <input
+                style={inputSt}
+                type="number"
+                min={chamferOverlayInch ? 0.001 : 0.01}
+                step={step}
+                value={toDisp(d1MM)}
+                onChange={e => {
+                  const v = parseFloat(e.target.value);
+                  if (!isNaN(v) && v > 0) {
+                    const mm = toMM(v);
+                    chamferDist1Ref.current = mm;
+                    if (drawStateRef.current) drawStateRef.current.dist1 = mm;
+                  }
+                }}
+              />
+            </div>
+            <div style={{ display:'flex', alignItems:'center', gap:6 }}>
+              <span style={lblSt}>Side 2</span>
+              <input
+                style={inputSt}
+                type="number"
+                min={chamferOverlayInch ? 0.001 : 0.01}
+                step={step}
+                value={toDisp(d2MM)}
+                onChange={e => {
+                  const v = parseFloat(e.target.value);
+                  if (!isNaN(v) && v > 0) {
+                    const mm = toMM(v);
+                    chamferDist2Ref.current = mm;
+                    if (drawStateRef.current) drawStateRef.current.dist2 = mm;
+                  }
+                }}
+              />
+            </div>
           </div>
         );
       })()}
