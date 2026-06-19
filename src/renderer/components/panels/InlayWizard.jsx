@@ -360,7 +360,7 @@ export default function InlayWizard({ onClose, onGenerate, selectedEntityIds = [
         </F>
         <div style={{ ...S.card, marginTop:2, marginBottom:14, fontSize:11 }}>
           <div style={{ display:'flex', justifyContent:'space-between', marginBottom:4 }}>
-            <span style={S.kvK}>Z Raise (calculated)</span>
+            <span style={S.kvK}>Plug Proud</span>
             <span style={S.kvV}>{fmt(zRaise, isInch ? 4 : 3)} {dUnit}</span>
           </div>
           <div style={{ display:'flex', justifyContent:'space-between', marginBottom:4 }}>
@@ -368,7 +368,8 @@ export default function InlayWizard({ onClose, onGenerate, selectedEntityIds = [
             <span style={{ ...S.kvV, color: fitColor }}>{engDepthIn.toFixed(3)}" — {fitLabel}</span>
           </div>
           <div style={{ fontSize:10, color:'#444466', marginTop:6 }}>
-            Range: &lt;0.030" too tight · 0.030–0.080" ideal · &gt;0.080" loose
+            Plug Proud: how far the plug sits above the surface before pressing flush.<br />
+            Engagement Depth: &lt;0.030" too tight · 0.030–0.080" ideal · &gt;0.080" loose
           </div>
         </div>
 
@@ -419,7 +420,7 @@ export default function InlayWizard({ onClose, onGenerate, selectedEntityIds = [
             <div style={S.kv}><span style={S.kvK}>Mirror X</span><span style={{ ...S.kvV, color: wiz.mirrorX ? '#44cc88' : '#cc6666' }}>{wiz.mirrorX ? 'Yes' : 'No'}</span></div>
             <div style={S.kv}><span style={S.kvK}>Taper</span><span style={S.kvV}>{wiz.angle}° / ⌀{fmt(wiz.tipDia)}{dUnit} tip</span></div>
             <div style={S.kv}><span style={S.kvK}>Depth</span><span style={S.kvV}>{fmt(wiz.pocketDepth)} {dUnit}</span></div>
-            <div style={S.kv}><span style={S.kvK}>Z Raise (calc.)</span><span style={S.kvV}>{fmt(zRaise, isInch ? 4 : 3)} {dUnit}</span></div>
+            <div style={S.kv}><span style={S.kvK}>Plug Proud</span><span style={S.kvV}>{fmt(zRaise, isInch ? 4 : 3)} {dUnit}</span></div>
           </div>
         </div>
 
