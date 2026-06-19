@@ -18,7 +18,8 @@ import InlayWizard from './components/panels/InlayWizard';
 import ToolLibraryModal from './components/panels/ToolLibraryModal';
 import MachineProfilesModal from './components/panels/MachineProfilesModal';
 import CADToolsPanel from './components/panels/CADToolsPanel';
-import { version as appVersion } from '../../package.json';
+import _pkg from '../../package.json';
+const appVersion = _pkg.version;
 
 // ── Modal styles ──────────────────────────────────────────────────────────────
 const MS = {
