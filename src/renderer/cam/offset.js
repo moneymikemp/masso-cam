@@ -131,11 +131,23 @@ export function generatePocketOffsets(outerPoints, toolRadius, stepover, islands
 
         if (islands.length > 0) {
           // Boolean-difference each ring against island exclusion zones.
-          // pointInPolygon alone misses rings that *encircle* an island (their
-          // vertices are outside the island, but their path cuts through it).
-          const segs = differencePolygons(sp, islands);
-          for (const seg of segs) {
-            if (polygonArea(seg) >= step * step * 0.5) passes.push([...seg, seg[0]]);
+          // We call Clipper directly instead of differencePolygons() so we can
+          // discard CW hole polygons. When a ring fully encircles an island,
+          // Clipper emits the island boundary as a CW "hole" path. differencePolygons()
+          // reverses it to CCW, causing the full island perimeter to be added as a
+          // pass once per encircling ring — producing many duplicate traces.
+          const dc = new ClipperLib.Clipper();
+          dc.AddPath(toClipper(stripClose([...sp])), ClipperLib.PolyType.ptSubject, true);
+          for (const isl of islands) {
+            const clip = stripClose([...isl]);
+            if (clip.length >= 3) dc.AddPath(toClipper(clip), ClipperLib.PolyType.ptClip, true);
+          }
+          const dcSol = new ClipperLib.Paths();
+          dc.Execute(ClipperLib.ClipType.ctDifference, dcSol);
+          for (const path of dcSol) {
+            const pts = fromClipper(path);
+            if (pts.length < 3 || isClockwise(pts)) continue; // CW = hole boundary, skip
+            if (polygonArea(pts) >= step * step * 0.5) passes.push([...pts, pts[0]]);
           }
         } else {
           passes.push([...sp, sp[0]]);
@@ -180,9 +192,18 @@ export function generateRestMachiningPasses(profile, currentToolRadius, previous
         if (polygonArea(sp) < step * step * 0.5) continue;
         nextQueue.push(sp);
         if (allIslands.length > 0) {
-          const segs = differencePolygons(sp, allIslands);
-          for (const seg of segs) {
-            if (polygonArea(seg) >= step * step * 0.5) passes.push([...seg, seg[0]]);
+          const dc2 = new ClipperLib.Clipper();
+          dc2.AddPath(toClipper(stripClose([...sp])), ClipperLib.PolyType.ptSubject, true);
+          for (const isl of allIslands) {
+            const clip = stripClose([...isl]);
+            if (clip.length >= 3) dc2.AddPath(toClipper(clip), ClipperLib.PolyType.ptClip, true);
+          }
+          const dcSol2 = new ClipperLib.Paths();
+          dc2.Execute(ClipperLib.ClipType.ctDifference, dcSol2);
+          for (const path of dcSol2) {
+            const pts = fromClipper(path);
+            if (pts.length < 3 || isClockwise(pts)) continue;
+            if (polygonArea(pts) >= step * step * 0.5) passes.push([...pts, pts[0]]);
           }
         } else {
           passes.push([...sp, sp[0]]);
