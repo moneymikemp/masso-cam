@@ -1097,23 +1097,14 @@ function buildTaperedPasses(selected, topZ, depth, safeZ, p, warnings, stockBoun
   const wallAngle = tc.angle ?? tk.angle ?? 10;
   const wallRad   = Math.max(0.5, wallAngle / 2) * Math.PI / 180;
 
-  // Detect user-supplied clip boundary: if the selected entities yield 2+ closed profiles
-  // and the largest fully encloses all others, treat it as a clip boundary for endmill
-  // clearing and exclude it from the taper contour pass.  This lets users select a clamping
-  // rectangle alongside the part geometry without getting unwanted taper moves on it.
+  // Build profiles from selected entities.  All profiles are machined (taper trace +
+  // clearing).  buildPocketClearing / buildPlugClearing internally sort by area so the
+  // largest profile becomes the outer clearing boundary and smaller ones become island
+  // exclusions — no need to split them here.
   const allProfiles = buildPocketProfiles(selected);
   allProfiles.sort((a, b) => Math.abs(polygonArea(b)) - Math.abs(polygonArea(a)));
-  let partProfiles = allProfiles;
-  let effectiveClipBound = stockBound;
-  if (allProfiles.length >= 2) {
-    const candidate = allProfiles[0];
-    const ccwCandidate = isClockwise(candidate) ? [...candidate].reverse() : candidate;
-    const inner = allProfiles.slice(1);
-    if (inner.every(prof => prof.some(pt => pointInPolygon(pt, ccwCandidate)))) {
-      effectiveClipBound = ccwCandidate;
-      partProfiles = inner;
-    }
-  }
+  const partProfiles = allProfiles;
+  const effectiveClipBound = stockBound;
 
   const subToolpaths = [];
 
@@ -1387,7 +1378,9 @@ function buildTaperTrace(entities, topZ, depth, safeZ, feedRate, plungeRate, tcR
 
   // Convert the user-facing interior-angle threshold to a minimum exterior turn.
   // e.g. sharpCornerAngle=170° → only turns >10° trigger a ramp.
-  const MIN_CORNER_TURN = Math.max(0, (180 - sharpCornerAngle) * Math.PI / 180);
+  // Floor at 12° so arc tessellation vertices (72-pt circles = 5°/step,
+  // 36-pt arcs = 10°/step) never trigger corner ramps regardless of sharpCornerAngle.
+  const MIN_CORNER_TURN = Math.max(12 * Math.PI / 180, (180 - sharpCornerAngle) * Math.PI / 180);
 
   const isOutside = cutSide === 'outside';
   const profiles = prebuiltProfiles ?? buildPocketProfiles(entities);
