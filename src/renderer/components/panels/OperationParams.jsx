@@ -344,6 +344,7 @@ export default function OperationParams({ op, tools, operations = [], onChange }
         </>}
         <div style={S.section}>Finish</div>
         <CheckField label="Finish Pass" value={p.finishPass} onChange={v => set('finishPass', v)} tip="Adds a final light radial pass at full depth after the main cut to improve wall surface finish." />
+        <CheckField label="Keep Down" value={p.keepDown} onChange={v => set('keepDown', v)} tip="Skip safe-Z retracts between depth passes — tool plunges directly to next depth without lifting. Only enable for simple closed profiles with no obstacles between passes." />
         {commonSpeeds}
       </>}
 
@@ -359,6 +360,7 @@ export default function OperationParams({ op, tools, operations = [], onChange }
           <NumInput value={Math.round((p.stepover || 0.45) * 100)} onChange={v => set('stepover', v / 100)} step={5} min={5} max={95} />
         </Field>
         <CheckField label="Start from Center" value={p.startFromCenter} onChange={v => set('startFromCenter', v)} tip="Begin the spiral toolpath at the center and expand outward. Gives a cleaner first engagement and avoids rubbing on the initial pass." />
+        <CheckField label="Keep Down" value={p.keepDown} onChange={v => set('keepDown', v)} tip="Skip retracts between clearing passes — tool stays at cutting depth. Always safe for simple pockets with no islands. For pockets with islands, use with care: the tool travels at floor level and may collide with island walls." />
         <div style={S.section}>Rest Machining</div>
         <CheckField label="Rest Machining" value={!!p.restMachining} onChange={v => set('restMachining', v)} tip="Only cuts areas a previous larger tool couldn't reach. Enable this when following a roughing pass with a smaller finishing bit." />
         {p.restMachining && <Field label="Prev Tool Dia" unit={distUnit} tip="Diameter of the previous (larger) tool whose leftover material this pass will clean up.">

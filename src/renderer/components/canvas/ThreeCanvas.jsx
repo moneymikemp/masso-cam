@@ -317,14 +317,23 @@ export default function ThreeCanvas() {
     dir.position.set(200, 400, 200);
     scene.add(dir);
 
-    // Tool sphere — persistent, repositioned each frame during simulation
-    const sphere = new THREE.Mesh(
-      new THREE.SphereGeometry(4, 16, 12),
-      new THREE.MeshPhongMaterial({ color: 0xffffff, emissive: 0x888800, shininess: 80 }),
+    // Tool visualisation — flat end-mill shape (cylinder + highlighted tip)
+    const toolViz = new THREE.Group();
+    const shankMesh = new THREE.Mesh(
+      new THREE.CylinderGeometry(3, 3, 35, 16),
+      new THREE.MeshPhongMaterial({ color: 0xc8c8c8, emissive: 0x111111, shininess: 120 }),
     );
-    sphere.visible = false;
-    scene.add(sphere);
-    toolSphereRef.current = sphere;
+    shankMesh.position.y = 17.5; // shift so bottom face sits at group origin (the tip)
+    const tipMesh = new THREE.Mesh(
+      new THREE.CylinderGeometry(3, 3, 2, 16),
+      new THREE.MeshPhongMaterial({ color: 0xffcc44, emissive: 0x442200, shininess: 80 }),
+    );
+    tipMesh.position.y = 1;
+    toolViz.add(shankMesh);
+    toolViz.add(tipMesh);
+    toolViz.visible = false;
+    scene.add(toolViz);
+    toolSphereRef.current = toolViz;
 
     // Height-map worker — one per component lifetime, reused across renders
     let hmWorker = null;

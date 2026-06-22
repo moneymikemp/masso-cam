@@ -283,11 +283,17 @@ function generateContour(op, entities) {
     if (closed) contours.push(stripClose([...contourPts]));
 
     const passes = buildZPasses(p.topZ ?? 0, p.totalDepth || 10, p.depthPerPass || 3);
+    const canArc = closed && contourPts.length > 2;
+    const resolvedLeadIn = (effectiveLeadIn === 'arc' && !canArc) ? 'plunge' : effectiveLeadIn;
 
-    for (const z of passes) {
-      const canArc = closed && contourPts.length > 2;
-      const resolvedLeadIn = (effectiveLeadIn === 'arc' && !canArc) ? 'plunge' : effectiveLeadIn;
-      moves.push(...buildLeadIn(contourPts, p.topZ ?? 0, z, safeZ, resolvedLeadIn, p.rampAngle || 3, leadInArcR, p.feedRate || 1500, p.plungeRate || 500, cutSide));
+    for (let zi = 0; zi < passes.length; zi++) {
+      const z = passes[zi];
+      if (zi === 0 || !p.keepDown || !closed) {
+        moves.push(...buildLeadIn(contourPts, p.topZ ?? 0, z, safeZ, resolvedLeadIn, p.rampAngle || 3, leadInArcR, p.feedRate || 1500, p.plungeRate || 500, cutSide));
+      } else {
+        // Keep down: tool is at contourPts[0] from previous pass closure — just plunge deeper
+        moves.push({ type: 'feed', x: contourPts[0].x, y: contourPts[0].y, z, f: p.plungeRate || 500 });
+      }
 
       const useTabsThisPass = tabsEnabled && closed && tabTValues.length > 0 && z < tabTopZ - 1e-6;
 
@@ -377,6 +383,7 @@ function generatePocket(op, entities, context = {}) {
     const expanded = offsetPolyline(ccw, -toolR, true)[0];
     return expanded && expanded.length >= 3 ? expanded : ccw;
   });
+  const hasIslands = islandExclusions.length > 0;
 
   const zPasses = buildZPasses(topZ, p.totalDepth || 10, p.depthPerPass || 3);
 
@@ -432,11 +439,13 @@ function generatePocket(op, entities, context = {}) {
         const pass = orderedPasses[pi];
         if (!pass || pass.length < 2) continue;
         if (pi === 0) {
-          // buildLeadIn left us at/near pass start; short hop within the already-cut pocket is safe
+          // buildLeadIn left us near pass start inside the already-cut area — short hop is safe
           moves.push({ type: 'rapid', x: pass[0].x, y: pass[0].y, z: z + 0.5 });
         } else {
-          // Retract to topZ to clear any walls or island material before repositioning
-          moves.push({ type: 'rapid', x: pass[0].x, y: pass[0].y, z: topZ });
+          // Islands: must clear island walls (topZ) unless keepDown is explicitly set.
+          // No islands: concentric rings share the floor, z+0.5 is always safe.
+          const retractZ = (hasIslands && !p.keepDown) ? topZ : z + 0.5;
+          moves.push({ type: 'rapid', x: pass[0].x, y: pass[0].y, z: retractZ });
         }
         moves.push({ type: 'feed', x: pass[0].x, y: pass[0].y, z, f: plungeRate });
         for (let i = 1; i < pass.length; i++) {
