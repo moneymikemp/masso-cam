@@ -491,6 +491,7 @@ function generateAdaptive(op, entities, context = {}) {
   const safeZ = p.safeZ || 25;
   const leadInStyle = p.leadInStyle || 'ramp';
   const leadInArcR  = p.leadInArcRadius != null ? p.leadInArcRadius : (leadInStyle === 'helical' ? toolR * 0.5 : toolR);
+  const trochR = toolR * (p.optimalLoad || 0.3);
 
   warnings.push('Adaptive: trochoidal approximation');
 
@@ -506,15 +507,19 @@ function generateAdaptive(op, entities, context = {}) {
   const islandProfiles = profiles.slice(1);
   if (islandProfiles.length > 0) warnings.push(`${islandProfiles.length} island(s) detected`);
 
-  // Expand each island outward by toolR to get the exclusion zone
+  // Expand islands by (toolR + trochR): toolR keeps the tool edge at the island wall,
+  // the extra trochR ensures the trochoidal arcs never breach the island boundary.
   const islandExclusions = islandProfiles.map(island => {
     const ccw = isClockwise(island) ? [...island].reverse() : island;
-    const expanded = offsetPolyline(ccw, -toolR, true)[0];
+    const expanded = offsetPolyline(ccw, -(toolR + trochR), true)[0];
     return expanded && expanded.length >= 3 ? expanded : ccw;
   });
 
+  // Pre-shrink the outer boundary by toolR so the tool center stays inside the profile.
+  // Without this, trochoidal arcs (radius trochR) reach outside the raw profile boundary.
+  const innerBoundary = offsetPolyline(profile, toolR, true)[0];
+
   const passes = buildZPasses(p.topZ ?? 0, p.totalDepth || 15, p.depthPerPass || 5);
-  const trochR = toolR * (p.optimalLoad || 0.3);
 
   for (const z of passes) {
     let clearPasses;
@@ -539,9 +544,10 @@ function generateAdaptive(op, entities, context = {}) {
         if (!any) break;
       }
     } else {
+      if (!innerBoundary || innerBoundary.length < 3 || polygonArea(innerBoundary) < toolR * toolR) continue;
       clearPasses = p.restMachining && (p.previousToolDiameter || 0) > 0
-        ? generateRestMachiningPasses(profile, toolR, p.previousToolDiameter / 2, stepover * 0.8, islandExclusions)
-        : generatePocketOffsets(profile, toolR, stepover * 0.8, islandExclusions);
+        ? generateRestMachiningPasses(innerBoundary, toolR, p.previousToolDiameter / 2, stepover * 0.8, islandExclusions)
+        : generatePocketOffsets(innerBoundary, toolR, stepover * 0.8, islandExclusions);
     }
     if (!clearPasses.length) continue;
 
@@ -551,8 +557,15 @@ function generateAdaptive(op, entities, context = {}) {
 
     const arcDir = p.climb === false ? -1 : 1;
     const passOrder = p.climb === false ? clearPasses : [...clearPasses].reverse();
-    for (const pass of passOrder) {
+    for (let pi = 0; pi < passOrder.length; pi++) {
+      const pass = passOrder[pi];
       if (!pass || pass.length < 2) continue;
+      // Retract and reposition between passes so the tool never traverses island
+      // material or uncut stock at cutting depth when moving to the next ring.
+      if (pi > 0) {
+        moves.push({ type: 'rapid', x: pass[0].x, y: pass[0].y, z: safeZ });
+        moves.push({ type: 'feed',  x: pass[0].x, y: pass[0].y, z, f: p.plungeRate || 500 });
+      }
       for (let i = 0; i < pass.length - 1; i++) {
         const pt = pass[i];
         const next = pass[i + 1];
