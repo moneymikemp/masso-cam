@@ -264,9 +264,10 @@ export default function ThreeCanvas() {
   const renderingRef     = useRef(false);
 
   // React state only for UI re-renders
-  const [simPlaying, setSimPlaying] = useState(false);
-  const [simSpeed,   setSimSpeed]   = useState(500); // mm/s
-  const [rendering,  setRendering]  = useState(false);
+  const [simPlaying,  setSimPlaying]  = useState(false);
+  const [simSpeed,    setSimSpeed]    = useState(500); // mm/s
+  const [rendering,   setRendering]   = useState(false);
+  const [hasToolpath, setHasToolpath] = useState(false);
 
   // Keep simRef.speed in sync with slider
   useEffect(() => { simRef.current.speed = simSpeed; }, [simSpeed]);
@@ -441,7 +442,9 @@ export default function ThreeCanvas() {
     }
 
     // Rebuild waypoints and reset simulation position
-    waypointsRef.current = buildWaypoints(operations);
+    const wps = buildWaypoints(operations);
+    waypointsRef.current = wps;
+    setHasToolpath(wps.totalDist > 0);
 
     // Stale height mesh — invalidated by any operations/stock change
     const staleHM = scene.children.find(c => c.userData.heightmap);
@@ -557,8 +560,7 @@ export default function ThreeCanvas() {
     );
   }, [operations, stockConfig]);
 
-  const hasToolpath = waypointsRef.current.totalDist > 0;
-  const speedLabel  = simSpeed >= 1000 ? `${(simSpeed / 1000).toFixed(1)}m/s` : `${simSpeed}mm/s`;
+  const speedLabel = simSpeed >= 1000 ? `${(simSpeed / 1000).toFixed(1)}m/s` : `${simSpeed}mm/s`;
 
   return (
     <div style={{ position: 'relative', width: '100%', height: '100%' }}>
