@@ -200,10 +200,10 @@ export default function OperationParams({ op, tools, operations = [], onChange }
   );
 
   const commonDirection = (
-    <Field label="Direction" tip="Climb: tool moves in the same direction as spindle rotation — smoother finish, less heat, preferred for CNC routers.\nConventional: tool moves against rotation — useful for some harder materials or where climb isn't possible.">
-      <Sel value={p.climb === false ? 'conventional' : 'climb'}
-           onChange={v => set('climb', v === 'climb')}
-           options={[['climb','Climb'],['conventional','Conventional']]} />
+    <Field label="Direction" tip="Climb: tool moves in the same direction as spindle rotation — smoother finish, less heat, preferred for CNC routers.\nConventional: tool moves against rotation — useful for some harder materials or where climb isn't possible.\nBoth: alternates climb and conventional on successive passes — reduces air travel and machining time.">
+      <Sel value={p.climb === false ? 'conventional' : p.climb === 'both' ? 'both' : 'climb'}
+           onChange={v => set('climb', v === 'climb' ? true : v === 'conventional' ? false : 'both')}
+           options={[['climb','Climb'],['conventional','Conventional'],['both','Both']]} />
     </Field>
   );
 

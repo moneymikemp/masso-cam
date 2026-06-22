@@ -279,6 +279,7 @@ function generateContour(op, entities) {
       if (offsets[0]?.length >= 3) contourPts = offsets[0];
     }
     if (p.climb === false) contourPts = [...contourPts].reverse();
+    // For p.climb === 'both', contourPts stays in climb (CCW) direction; direction alternates per pass.
 
     if (closed) contours.push(stripClose([...contourPts]));
 
@@ -288,23 +289,29 @@ function generateContour(op, entities) {
 
     for (let zi = 0; zi < passes.length; zi++) {
       const z = passes[zi];
+      // For 'both': odd passes reverse direction while keeping the same start point (P0) so
+      // keepDown transitions are seamless — the closed loop always returns to P0.
+      const passProfile = (p.climb === 'both' && zi % 2 === 1 && contourPts.length > 1)
+        ? [contourPts[0], ...[...contourPts].slice(1).reverse()]
+        : contourPts;
+
       if (zi === 0 || !p.keepDown || !closed) {
-        moves.push(...buildLeadIn(contourPts, p.topZ ?? 0, z, safeZ, resolvedLeadIn, p.rampAngle || 3, leadInArcR, p.feedRate || 1500, p.plungeRate || 500, cutSide));
+        moves.push(...buildLeadIn(passProfile, p.topZ ?? 0, z, safeZ, resolvedLeadIn, p.rampAngle || 3, leadInArcR, p.feedRate || 1500, p.plungeRate || 500, cutSide));
       } else {
-        // Keep down: tool is at contourPts[0] from previous pass closure — just plunge deeper
-        moves.push({ type: 'feed', x: contourPts[0].x, y: contourPts[0].y, z, f: p.plungeRate || 500 });
+        // Keep down: tool is at passProfile[0] (always contourPts[0]) — just plunge deeper
+        moves.push({ type: 'feed', x: passProfile[0].x, y: passProfile[0].y, z, f: p.plungeRate || 500 });
       }
 
       const useTabsThisPass = tabsEnabled && closed && tabTValues.length > 0 && z < tabTopZ - 1e-6;
 
       if (useTabsThisPass) {
-        moves.push(...insertTabsIntoContour(contourPts, z, tabTopZ, p.tabWidth || 6, tabTValues, p.feedRate || 1500, p.tabProfile || 'flat'));
+        moves.push(...insertTabsIntoContour(passProfile, z, tabTopZ, p.tabWidth || 6, tabTValues, p.feedRate || 1500, p.tabProfile || 'flat'));
       } else {
-        for (let i = 1; i < contourPts.length; i++) {
-          moves.push({ type: 'feed', x: contourPts[i].x, y: contourPts[i].y, z, f: p.feedRate || 1500 });
+        for (let i = 1; i < passProfile.length; i++) {
+          moves.push({ type: 'feed', x: passProfile[i].x, y: passProfile[i].y, z, f: p.feedRate || 1500 });
         }
         if (closed) {
-          moves.push({ type: 'feed', x: contourPts[0].x, y: contourPts[0].y, z, f: p.feedRate || 1500 });
+          moves.push({ type: 'feed', x: passProfile[0].x, y: passProfile[0].y, z, f: p.feedRate || 1500 });
         }
       }
     }
@@ -436,7 +443,8 @@ function generatePocket(op, entities, context = {}) {
       moves.push(...buildLeadIn(orderedPasses[0], topZ, z, safeZ, leadInStyle, p.rampAngle || 3, leadInArcR, feedRate, plungeRate, pocketCutSide));
 
       for (let pi = 0; pi < orderedPasses.length; pi++) {
-        const pass = orderedPasses[pi];
+        // For 'both': alternate climb/conventional on each successive ring pass
+        const pass = (p.climb === 'both' && pi % 2 === 1) ? [...orderedPasses[pi]].reverse() : orderedPasses[pi];
         if (!pass || pass.length < 2) continue;
         if (pi === 0) {
           // buildLeadIn left us near pass start inside the already-cut area — short hop is safe
@@ -730,10 +738,11 @@ function generateEngrave(op, entities) {
   const safeZ = p.safeZ || 25;
   const selected = getSelectedEntities(entities, op.selectedIds);
 
-  for (const entity of selected) {
+  for (let ei = 0; ei < selected.length; ei++) {
+    const entity = selected[ei];
     let profile = entityToProfile(entity);
     if (!profile || profile.length < 2) continue;
-    if (p.climb === false) profile = [...profile].reverse();
+    if (p.climb === false || (p.climb === 'both' && ei % 2 === 1)) profile = [...profile].reverse();
     moves.push({ type: 'rapid', x: profile[0].x, y: profile[0].y, z: safeZ });
     moves.push({ type: 'feed', x: profile[0].x, y: profile[0].y, z, f: p.plungeRate || 300 });
     for (let i = 1; i < profile.length; i++) {
@@ -758,24 +767,27 @@ function generateSlot(op, entities) {
   for (const entity of selected) {
     let profile = entityToProfile(entity);
     if (!profile || profile.length < 2) continue;
-    if (p.climb === false) profile = [...profile].reverse();
+    const baseProfile = p.climb === false ? [...profile].reverse() : profile;
     const passes = buildZPasses(p.topZ ?? 0, p.totalDepth || 10, p.depthPerPass || 3);
 
-    for (const z of passes) {
-      moves.push({ type: 'rapid', x: profile[0].x, y: profile[0].y, z: safeZ });
+    for (let zi = 0; zi < passes.length; zi++) {
+      const z = passes[zi];
+      // For 'both': alternate direction each depth pass
+      const passProfile = (p.climb === 'both' && zi % 2 === 1) ? [...baseProfile].reverse() : baseProfile;
+      moves.push({ type: 'rapid', x: passProfile[0].x, y: passProfile[0].y, z: safeZ });
       if (p.rampEntry) {
-        moves.push(...buildRampEntry(profile, p.topZ ?? 0, z, p.rampAngle || 3, p.feedRate || 1000, p.plungeRate || 300));
+        moves.push(...buildRampEntry(passProfile, p.topZ ?? 0, z, p.rampAngle || 3, p.feedRate || 1000, p.plungeRate || 300));
       } else {
-        moves.push({ type: 'feed', x: profile[0].x, y: profile[0].y, z, f: p.plungeRate || 300 });
+        moves.push({ type: 'feed', x: passProfile[0].x, y: passProfile[0].y, z, f: p.plungeRate || 300 });
       }
-      for (let i = 1; i < profile.length; i++) {
-        moves.push({ type: 'feed', x: profile[i].x, y: profile[i].y, z, f: p.feedRate || 1000 });
+      for (let i = 1; i < passProfile.length; i++) {
+        moves.push({ type: 'feed', x: passProfile[i].x, y: passProfile[i].y, z, f: p.feedRate || 1000 });
       }
       if (isEntityClosed(entity)) {
-        moves.push({ type: 'feed', x: profile[0].x, y: profile[0].y, z, f: p.feedRate || 1000 });
+        moves.push({ type: 'feed', x: passProfile[0].x, y: passProfile[0].y, z, f: p.feedRate || 1000 });
       }
     }
-    moves.push({ type: 'rapid', x: profile[0].x, y: profile[0].y, z: safeZ });
+    moves.push({ type: 'rapid', x: baseProfile[0].x, y: baseProfile[0].y, z: safeZ });
   }
   return { moves, warnings: [] };
 }
