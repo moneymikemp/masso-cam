@@ -167,6 +167,68 @@ function interpolatePosition(dist, waypoints) {
   };
 }
 
+// Build flat array of feed-move segments for the height-map worker.
+// 7 floats per segment: [fx, fy, fz, tx, ty, tz, toolR]
+function buildHeightMapSegments(operations) {
+  const raw = [];
+  for (const op of operations) {
+    if (!op.enabled || !op.toolpath) continue;
+    const toolR = (op.params?.toolDiameter || 6.35) / 2;
+    const moveLists = op.toolpath.subToolpaths?.length
+      ? op.toolpath.subToolpaths.map(st => st.moves)
+      : [op.toolpath.moves];
+    for (const moves of moveLists) {
+      if (!moves?.length) continue;
+      let px = 0, py = 0, pz = 0;
+      for (const m of moves) {
+        const x = m.x ?? px, y = m.y ?? py, z = m.z ?? pz;
+        if (m.type === 'feed' && Math.hypot(x - px, y - py, z - pz) > 0.001)
+          raw.push(px, py, pz, x, y, z, toolR);
+        px = x; py = y; pz = z;
+      }
+    }
+  }
+  return new Float64Array(raw);
+}
+
+// Build a Three.js Mesh from a height-map result received from the worker.
+function buildHeightMesh({ heights, gridW, gridH, minX, maxX, minY, maxY }) {
+  const vertCount = gridW * gridH;
+  const positions = new Float32Array(vertCount * 3);
+  for (let j = 0; j < gridH; j++) {
+    for (let i = 0; i < gridW; i++) {
+      const idx = j * gridW + i;
+      const p3  = idx * 3;
+      positions[p3]     = wx(minX + (i / (gridW - 1)) * (maxX - minX));
+      positions[p3 + 1] = wy(heights[idx]);
+      positions[p3 + 2] = wz(minY + (j / (gridH - 1)) * (maxY - minY));
+    }
+  }
+  const idxArr = new Uint32Array((gridW - 1) * (gridH - 1) * 6);
+  let q = 0;
+  for (let j = 0; j < gridH - 1; j++) {
+    for (let i = 0; i < gridW - 1; i++) {
+      const a = j * gridW + i, b = a + 1, c = a + gridW, d = c + 1;
+      idxArr[q++] = a; idxArr[q++] = b; idxArr[q++] = c;
+      idxArr[q++] = b; idxArr[q++] = d; idxArr[q++] = c;
+    }
+  }
+  const geo = new THREE.BufferGeometry();
+  geo.setAttribute('position', new THREE.BufferAttribute(positions, 3));
+  geo.setIndex(new THREE.BufferAttribute(idxArr, 1));
+  geo.computeVertexNormals();
+  const mat = new THREE.MeshPhongMaterial({
+    color: 0xc8a46e,
+    shininess: 15,
+    polygonOffset: true,
+    polygonOffsetFactor: 1,
+    polygonOffsetUnits: 1,
+  });
+  const mesh = new THREE.Mesh(geo, mat);
+  mesh.userData.heightmap = true;
+  return mesh;
+}
+
 // ── Component ────────────────────────────────────────────────────────────────
 
 const BTN = {
@@ -196,10 +258,14 @@ export default function ThreeCanvas() {
   const progressFillRef  = useRef(null); // fill div — updated directly from RAF
   const progressLabelRef = useRef(null); // text label — updated directly from RAF
   const isDraggingRef    = useRef(false);
+  const workerRef        = useRef(null);
+  const heightMeshRef    = useRef(null);
+  const renderingRef     = useRef(false);
 
   // React state only for UI re-renders
   const [simPlaying, setSimPlaying] = useState(false);
   const [simSpeed,   setSimSpeed]   = useState(500); // mm/s
+  const [rendering,  setRendering]  = useState(false);
 
   // Keep simRef.speed in sync with slider
   useEffect(() => { simRef.current.speed = simSpeed; }, [simSpeed]);
@@ -258,6 +324,22 @@ export default function ThreeCanvas() {
     scene.add(sphere);
     toolSphereRef.current = sphere;
 
+    // Height-map worker — one per component lifetime, reused across renders
+    const hmWorker = new Worker(new URL('./heightmap.worker.js', import.meta.url));
+    hmWorker.onmessage = (e) => {
+      const sc = sceneRef.current;
+      if (sc) {
+        const old = sc.children.find(c => c.userData.heightmap);
+        if (old) { sc.remove(old); old.geometry.dispose(); old.material.dispose(); }
+        const mesh = buildHeightMesh(e.data);
+        sc.add(mesh);
+        heightMeshRef.current = mesh;
+      }
+      renderingRef.current = false;
+      setRendering(false);
+    };
+    workerRef.current = hmWorker;
+
     lastTimeRef.current = performance.now();
 
     const animate = () => {
@@ -315,6 +397,7 @@ export default function ThreeCanvas() {
       controls.dispose();
       renderer.dispose();
       if (mount.contains(renderer.domElement)) mount.removeChild(renderer.domElement);
+      hmWorker.terminate();
       sceneRef.current = cameraRef.current = controlsRef.current = rendererRef.current = null;
       fittedRef.current = false;
     };
@@ -346,6 +429,16 @@ export default function ThreeCanvas() {
 
     // Rebuild waypoints and reset simulation position
     waypointsRef.current = buildWaypoints(operations);
+
+    // Stale height mesh — invalidated by any operations/stock change
+    const staleHM = scene.children.find(c => c.userData.heightmap);
+    if (staleHM) {
+      scene.remove(staleHM);
+      staleHM.geometry.dispose();
+      staleHM.material.dispose();
+      heightMeshRef.current = null;
+    }
+
     simRef.current.dist    = 0;
     simRef.current.playing = false;
     setSimPlaying(false);
@@ -419,6 +512,25 @@ export default function ThreeCanvas() {
     if (r) fitCamera(r.bounds);
   };
 
+  const computeHeightMap = useCallback(() => {
+    if (renderingRef.current || !workerRef.current) return;
+    const { width, length, thickness, topZ, datum,
+            stockOriginX: ox = 0, stockOriginY: oy = 0 } = stockConfig;
+    if (!width || !length || !thickness) return;
+    const xFrac = datum[1] === 'l' ? 0 : datum[1] === 'c' ? 0.5 : 1;
+    const yFrac = datum[0] === 'b' ? 0 : datum[0] === 'm' ? 0.5 : 1;
+    const minX = ox - xFrac * width, maxX = minX + width;
+    const minY = oy - yFrac * length, maxY = minY + length;
+    const segs = buildHeightMapSegments(operations);
+    if (!segs.length) return;
+    renderingRef.current = true;
+    setRendering(true);
+    workerRef.current.postMessage(
+      { segs, minX, maxX, minY, maxY, topZ, gridW: 512, gridH: 512 },
+      [segs.buffer],
+    );
+  }, [operations, stockConfig]);
+
   const hasToolpath = waypointsRef.current.totalDist > 0;
   const speedLabel  = simSpeed >= 1000 ? `${(simSpeed / 1000).toFixed(1)}m/s` : `${simSpeed}mm/s`;
 
@@ -429,6 +541,12 @@ export default function ThreeCanvas() {
       {/* HUD — top right */}
       <div style={{ position: 'absolute', top: 8, right: 8, display: 'flex', flexDirection: 'column', gap: 4, alignItems: 'flex-end' }}>
         <button onClick={handleFit} style={BTN} title="Fit view to stock">⊡ Fit</button>
+        <button
+          onClick={computeHeightMap}
+          style={rendering ? BTN_ACTIVE : BTN}
+          disabled={!hasToolpath || rendering}
+          title="Compute material removal simulation"
+        >{rendering ? '⟳ Computing…' : '◼ Render 3D'}</button>
 
         {/* Simulation controls */}
         <div style={{ background: 'rgba(8,8,28,0.92)', border: '1px solid #2a2a50', borderRadius: 4, padding: '6px 8px', display: 'flex', flexDirection: 'column', gap: 5 }}>
