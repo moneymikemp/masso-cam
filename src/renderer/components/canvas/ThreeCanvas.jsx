@@ -2,6 +2,7 @@ import React, { useEffect, useRef, useCallback, useState } from 'react';
 import * as THREE from 'three';
 import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls';
 import { useApp } from '../../store/AppContext';
+import { createHeightMapWorker } from './createHeightMapWorker';
 
 // Coordinate mapping: world (X right, Y forward, Z up) → Three.js (X right, Y up, Z toward viewer)
 function wx(x) { return x; }
@@ -325,7 +326,12 @@ export default function ThreeCanvas() {
     toolSphereRef.current = sphere;
 
     // Height-map worker — one per component lifetime, reused across renders
-    const hmWorker = new Worker(new URL('./heightmap.worker.js', import.meta.url));
+    const hmWorker = createHeightMapWorker();
+    hmWorker.onerror = (err) => {
+      console.error('[heightmap worker]', err);
+      renderingRef.current = false;
+      setRendering(false);
+    };
     hmWorker.onmessage = (e) => {
       const sc = sceneRef.current;
       if (sc) {
