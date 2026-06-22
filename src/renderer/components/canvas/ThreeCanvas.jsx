@@ -326,25 +326,32 @@ export default function ThreeCanvas() {
     toolSphereRef.current = sphere;
 
     // Height-map worker — one per component lifetime, reused across renders
-    const hmWorker = createHeightMapWorker();
-    hmWorker.onerror = (err) => {
-      console.error('[heightmap worker]', err);
-      renderingRef.current = false;
-      setRendering(false);
-    };
-    hmWorker.onmessage = (e) => {
-      const sc = sceneRef.current;
-      if (sc) {
-        const old = sc.children.find(c => c.userData.heightmap);
-        if (old) { sc.remove(old); old.geometry.dispose(); old.material.dispose(); }
-        const mesh = buildHeightMesh(e.data);
-        sc.add(mesh);
-        heightMeshRef.current = mesh;
-      }
-      renderingRef.current = false;
-      setRendering(false);
-    };
-    workerRef.current = hmWorker;
+    let hmWorker = null;
+    try {
+      hmWorker = createHeightMapWorker();
+      console.log('[heightmap] worker created', hmWorker);
+      hmWorker.onerror = (err) => {
+        console.error('[heightmap] worker error', err);
+        renderingRef.current = false;
+        setRendering(false);
+      };
+      hmWorker.onmessage = (e) => {
+        console.log('[heightmap] worker responded, building mesh');
+        const sc = sceneRef.current;
+        if (sc) {
+          const old = sc.children.find(c => c.userData.heightmap);
+          if (old) { sc.remove(old); old.geometry.dispose(); old.material.dispose(); }
+          const mesh = buildHeightMesh(e.data);
+          sc.add(mesh);
+          heightMeshRef.current = mesh;
+        }
+        renderingRef.current = false;
+        setRendering(false);
+      };
+      workerRef.current = hmWorker;
+    } catch (err) {
+      console.error('[heightmap] worker creation failed', err);
+    }
 
     lastTimeRef.current = performance.now();
 
@@ -403,7 +410,7 @@ export default function ThreeCanvas() {
       controls.dispose();
       renderer.dispose();
       if (mount.contains(renderer.domElement)) mount.removeChild(renderer.domElement);
-      hmWorker.terminate();
+      if (hmWorker) hmWorker.terminate();
       sceneRef.current = cameraRef.current = controlsRef.current = rendererRef.current = null;
       fittedRef.current = false;
     };
@@ -519,16 +526,29 @@ export default function ThreeCanvas() {
   };
 
   const computeHeightMap = useCallback(() => {
-    if (renderingRef.current || !workerRef.current) return;
+    console.log('[heightmap] computeHeightMap called, workerRef=', workerRef.current, 'renderingRef=', renderingRef.current);
+    if (renderingRef.current || !workerRef.current) {
+      console.log('[heightmap] early exit — rendering or no worker');
+      return;
+    }
     const { width, length, thickness, topZ, datum,
             stockOriginX: ox = 0, stockOriginY: oy = 0 } = stockConfig;
-    if (!width || !length || !thickness) return;
+    console.log('[heightmap] stock:', { width, length, thickness, topZ, datum });
+    if (!width || !length || !thickness) {
+      console.log('[heightmap] early exit — stock not configured');
+      return;
+    }
     const xFrac = datum[1] === 'l' ? 0 : datum[1] === 'c' ? 0.5 : 1;
     const yFrac = datum[0] === 'b' ? 0 : datum[0] === 'm' ? 0.5 : 1;
     const minX = ox - xFrac * width, maxX = minX + width;
     const minY = oy - yFrac * length, maxY = minY + length;
     const segs = buildHeightMapSegments(operations);
-    if (!segs.length) return;
+    console.log('[heightmap] segs count:', segs.length / 7, 'bounds:', { minX, maxX, minY, maxY, topZ });
+    if (!segs.length) {
+      console.log('[heightmap] early exit — no feed segments');
+      return;
+    }
+    console.log('[heightmap] posting to worker…');
     renderingRef.current = true;
     setRendering(true);
     workerRef.current.postMessage(
