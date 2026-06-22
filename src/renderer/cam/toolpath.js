@@ -307,6 +307,29 @@ function generateContour(op, entities) {
   return { moves, warnings, contours, tabTValues };
 }
 
+// Reorder passes so each next pass starts closest to where the previous one ended.
+// This minimises rapid travel without reversing individual passes (which would
+// flip climb/conventional direction).
+function sortPassesByProximity(passes) {
+  if (passes.length <= 1) return passes;
+  const used = new Uint8Array(passes.length);
+  const result = [];
+  let cx = passes[0][0].x, cy = passes[0][0].y;
+  for (let n = 0; n < passes.length; n++) {
+    let best = -1, bestD = Infinity;
+    for (let i = 0; i < passes.length; i++) {
+      if (used[i]) continue;
+      const d = Math.hypot(passes[i][0].x - cx, passes[i][0].y - cy);
+      if (d < bestD) { bestD = d; best = i; }
+    }
+    used[best] = 1;
+    result.push(passes[best]);
+    const last = passes[best][passes[best].length - 1];
+    cx = last.x; cy = last.y;
+  }
+  return result;
+}
+
 // ── Pocket ────────────────────────────────────────────────────────────────────
 
 function generatePocket(op, entities, context = {}) {
@@ -399,14 +422,22 @@ function generatePocket(op, entities, context = {}) {
 
     const sortedPasses = p.startFromCenter ? [...clearPasses].reverse() : clearPasses;
     const directedPasses = p.climb === false ? sortedPasses.map(pass => [...pass].reverse()) : sortedPasses;
+    const orderedPasses = sortPassesByProximity(directedPasses);
 
-    if (directedPasses.length > 0) {
+    if (orderedPasses.length > 0) {
       const pocketCutSide = p.cutSide === 'outside' ? 'outside' : 'inside';
-      moves.push(...buildLeadIn(directedPasses[0], topZ, z, safeZ, leadInStyle, p.rampAngle || 3, leadInArcR, feedRate, plungeRate, pocketCutSide));
+      moves.push(...buildLeadIn(orderedPasses[0], topZ, z, safeZ, leadInStyle, p.rampAngle || 3, leadInArcR, feedRate, plungeRate, pocketCutSide));
 
-      for (const pass of directedPasses) {
+      for (let pi = 0; pi < orderedPasses.length; pi++) {
+        const pass = orderedPasses[pi];
         if (!pass || pass.length < 2) continue;
-        moves.push({ type: 'rapid', x: pass[0].x, y: pass[0].y, z: z + 0.5 });
+        if (pi === 0) {
+          // buildLeadIn left us at/near pass start; short hop within the already-cut pocket is safe
+          moves.push({ type: 'rapid', x: pass[0].x, y: pass[0].y, z: z + 0.5 });
+        } else {
+          // Retract to topZ to clear any walls or island material before repositioning
+          moves.push({ type: 'rapid', x: pass[0].x, y: pass[0].y, z: topZ });
+        }
         moves.push({ type: 'feed', x: pass[0].x, y: pass[0].y, z, f: plungeRate });
         for (let i = 1; i < pass.length; i++) {
           moves.push({ type: 'feed', x: pass[i].x, y: pass[i].y, z, f: feedRate });
