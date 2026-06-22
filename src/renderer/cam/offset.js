@@ -129,12 +129,17 @@ export function generatePocketOffsets(outerPoints, toolRadius, stepover, islands
         if (polygonArea(sp) < step * step * 0.5) continue;
         nextQueue.push(sp);
 
-        const closed = [...sp, sp[0]];
-        if (islands.length > 0 &&
-            closed.some(pt => islands.some(isl => pointInPolygon(pt, isl)))) {
-          continue;
+        if (islands.length > 0) {
+          // Boolean-difference each ring against island exclusion zones.
+          // pointInPolygon alone misses rings that *encircle* an island (their
+          // vertices are outside the island, but their path cuts through it).
+          const segs = differencePolygons(sp, islands);
+          for (const seg of segs) {
+            if (polygonArea(seg) >= step * step * 0.5) passes.push([...seg, seg[0]]);
+          }
+        } else {
+          passes.push([...sp, sp[0]]);
         }
-        passes.push(closed);
       }
     }
 
@@ -174,12 +179,14 @@ export function generateRestMachiningPasses(profile, currentToolRadius, previous
       for (const sp of clipperClosedOffset(poly, step)) {
         if (polygonArea(sp) < step * step * 0.5) continue;
         nextQueue.push(sp);
-        const closed = [...sp, sp[0]];
-        if (allIslands.length > 0 &&
-            closed.some(pt => allIslands.some(isl => pointInPolygon(pt, isl)))) {
-          continue;
+        if (allIslands.length > 0) {
+          const segs = differencePolygons(sp, allIslands);
+          for (const seg of segs) {
+            if (polygonArea(seg) >= step * step * 0.5) passes.push([...seg, seg[0]]);
+          }
+        } else {
+          passes.push([...sp, sp[0]]);
         }
-        passes.push(closed);
       }
     }
     queue = nextQueue;

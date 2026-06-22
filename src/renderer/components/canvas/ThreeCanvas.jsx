@@ -190,8 +190,12 @@ export default function ThreeCanvas() {
   // Simulation — all mutable state lives in a ref so the RAF loop never has stale closures
   const waypointsRef = useRef({ waypoints: [], totalDist: 0 });
   const simRef       = useRef({ playing: false, dist: 0, speed: 500 }); // speed = mm/s
-  const toolSphereRef = useRef(null);
-  const lastTimeRef   = useRef(null);
+  const toolSphereRef    = useRef(null);
+  const lastTimeRef      = useRef(null);
+  const progressBarRef   = useRef(null); // container for pointer events
+  const progressFillRef  = useRef(null); // fill div — updated directly from RAF
+  const progressLabelRef = useRef(null); // text label — updated directly from RAF
+  const isDraggingRef    = useRef(false);
 
   // React state only for UI re-renders
   const [simPlaying, setSimPlaying] = useState(false);
@@ -276,6 +280,18 @@ export default function ThreeCanvas() {
         if (sim.dist >= totalDist) {
           sim.playing = false;
           setSimPlaying(false);
+        }
+      }
+
+      // Update progress bar DOM directly — avoid triggering React re-renders
+      if (totalDist > 0) {
+        const pct = Math.min(sim.dist / totalDist, 1);
+        if (progressFillRef.current)
+          progressFillRef.current.style.width = `${(pct * 100).toFixed(1)}%`;
+        if (progressLabelRef.current) {
+          const d = sim.dist, td = totalDist;
+          const fmt = v => v >= 1000 ? `${(v / 1000).toFixed(2)}m` : `${v.toFixed(0)}mm`;
+          progressLabelRef.current.textContent = `${(pct * 100).toFixed(0)}%  ·  ${fmt(d)} / ${fmt(td)}`;
         }
       }
 
@@ -368,6 +384,35 @@ export default function ThreeCanvas() {
     }
   };
 
+  const seekTo = useCallback((clientX) => {
+    if (!progressBarRef.current) return;
+    const rect = progressBarRef.current.getBoundingClientRect();
+    const pct  = Math.max(0, Math.min(1, (clientX - rect.left) / rect.width));
+    const { waypoints, totalDist } = waypointsRef.current;
+    if (!totalDist) return;
+    simRef.current.dist = pct * totalDist;
+    const pos = interpolatePosition(simRef.current.dist, waypoints);
+    if (pos && toolSphereRef.current) {
+      toolSphereRef.current.position.set(wx(pos.x), wy(pos.z), wz(pos.y));
+      toolSphereRef.current.visible = true;
+    }
+  }, []);
+
+  const handleProgressPointerDown = useCallback((e) => {
+    e.currentTarget.setPointerCapture(e.pointerId);
+    isDraggingRef.current = true;
+    seekTo(e.clientX);
+  }, [seekTo]);
+
+  const handleProgressPointerMove = useCallback((e) => {
+    if (!isDraggingRef.current) return;
+    seekTo(e.clientX);
+  }, [seekTo]);
+
+  const handleProgressPointerUp = useCallback(() => {
+    isDraggingRef.current = false;
+  }, []);
+
   const handleFit = () => {
     fittedRef.current = false;
     const r = buildStockMesh(stockConfig);
@@ -406,6 +451,28 @@ export default function ThreeCanvas() {
             />
             <span style={{ fontSize: 9, color: '#8888aa', width: 40, textAlign: 'right' }}>{speedLabel}</span>
           </div>
+
+          {/* Scrubable progress bar */}
+          {hasToolpath && (
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 3 }}>
+              <div
+                ref={progressBarRef}
+                onPointerDown={handleProgressPointerDown}
+                onPointerMove={handleProgressPointerMove}
+                onPointerUp={handleProgressPointerUp}
+                style={{ position: 'relative', width: '100%', height: 8, background: '#111130', borderRadius: 4, cursor: 'pointer', overflow: 'hidden' }}
+              >
+                <div
+                  ref={progressFillRef}
+                  style={{ position: 'absolute', left: 0, top: 0, height: '100%', width: '0%', background: '#4455cc', borderRadius: 4, pointerEvents: 'none' }}
+                />
+              </div>
+              <div ref={progressLabelRef} style={{ fontSize: 9, color: '#555577', textAlign: 'center' }}>
+                0%  ·  0mm / 0mm
+              </div>
+            </div>
+          )}
+
         </div>
       </div>
 
