@@ -497,64 +497,74 @@ function generateAdaptive(op, entities, context = {}) {
   const selected = getSelectedEntities(entities, op.selectedIds);
   if (!selected.length) return { moves: [], warnings: ['No entities selected'] };
 
-  for (const entity of selected) {
-    let profile = entityToProfile(entity);
-    if (!profile || profile.length < 3) continue;
-    if (isClockwise(profile)) profile = [...profile].reverse();
+  // Build profiles and separate outer boundary from islands (same approach as pocket)
+  const profiles = buildPocketProfiles(selected);
+  if (!profiles.length) return { moves: [], warnings: ['No valid closed entities selected'] };
+  profiles.sort((a, b) => polygonArea(b) - polygonArea(a));
 
-    const passes = buildZPasses(p.topZ ?? 0, p.totalDepth || 15, p.depthPerPass || 5);
-    const trochR = toolR * (p.optimalLoad || 0.3);
+  const profile = isClockwise(profiles[0]) ? [...profiles[0]].reverse() : profiles[0];
+  const islandProfiles = profiles.slice(1);
+  if (islandProfiles.length > 0) warnings.push(`${islandProfiles.length} island(s) detected`);
 
-    for (const z of passes) {
-      let clearPasses;
-      if (p.cutSide === 'outside') {
-        // Expand outward from profile, clipped to boundary (same logic as pocket outside)
-        clearPasses = [];
-        const step = toolR * 2 * stepover * 0.8;
-        const clipBound = getStockBoundary(context, op, context.allEntities);
-        for (let i = 0, dist = toolR; i < 200; i++, dist += step) {
-          const rawRings = offsetPolyline(profile, -dist, true);
-          let any = false;
-          for (const rawRing of rawRings) {
-            if (!rawRing || rawRing.length < 3 || polygonArea(rawRing) < step * step * 0.5) continue;
-            const ringPts = stripClose([...rawRing]);
-            const clippedRings = clipBound ? clipPolygonToRegion(ringPts, clipBound) : [ringPts];
-            for (const clipped of clippedRings) {
-              if (!clipped || clipped.length < 3) continue;
-              clearPasses.push([...clipped, clipped[0]]);
-              any = true;
-            }
+  // Expand each island outward by toolR to get the exclusion zone
+  const islandExclusions = islandProfiles.map(island => {
+    const ccw = isClockwise(island) ? [...island].reverse() : island;
+    const expanded = offsetPolyline(ccw, -toolR, true)[0];
+    return expanded && expanded.length >= 3 ? expanded : ccw;
+  });
+
+  const passes = buildZPasses(p.topZ ?? 0, p.totalDepth || 15, p.depthPerPass || 5);
+  const trochR = toolR * (p.optimalLoad || 0.3);
+
+  for (const z of passes) {
+    let clearPasses;
+    if (p.cutSide === 'outside') {
+      // Expand outward from profile, clipped to boundary
+      clearPasses = [];
+      const step = toolR * 2 * stepover * 0.8;
+      const clipBound = getStockBoundary(context, op, context.allEntities);
+      for (let i = 0, dist = toolR; i < 200; i++, dist += step) {
+        const rawRings = offsetPolyline(profile, -dist, true);
+        let any = false;
+        for (const rawRing of rawRings) {
+          if (!rawRing || rawRing.length < 3 || polygonArea(rawRing) < step * step * 0.5) continue;
+          const ringPts = stripClose([...rawRing]);
+          const clippedRings = clipBound ? clipPolygonToRegion(ringPts, clipBound) : [ringPts];
+          for (const clipped of clippedRings) {
+            if (!clipped || clipped.length < 3) continue;
+            clearPasses.push([...clipped, clipped[0]]);
+            any = true;
           }
-          if (!any) break;
         }
-      } else {
-        clearPasses = p.restMachining && (p.previousToolDiameter || 0) > 0
-          ? generateRestMachiningPasses(profile, toolR, p.previousToolDiameter / 2, stepover * 0.8)
-          : generatePocketOffsets(profile, toolR, stepover * 0.8);
+        if (!any) break;
       }
-      if (!clearPasses.length) continue;
+    } else {
+      clearPasses = p.restMachining && (p.previousToolDiameter || 0) > 0
+        ? generateRestMachiningPasses(profile, toolR, p.previousToolDiameter / 2, stepover * 0.8, islandExclusions)
+        : generatePocketOffsets(profile, toolR, stepover * 0.8, islandExclusions);
+    }
+    if (!clearPasses.length) continue;
 
-      const adaptRampProfile = clearPasses[clearPasses.length - 1] || profile;
-      const adaptCutSide = p.cutSide === 'outside' ? 'outside' : 'inside';
-      moves.push(...buildLeadIn(adaptRampProfile, p.topZ ?? 0, z, safeZ, leadInStyle, p.rampAngle || 2, leadInArcR, p.feedRate || 2000, p.plungeRate || 500, adaptCutSide));
+    const adaptRampProfile = clearPasses[clearPasses.length - 1] || profile;
+    const adaptCutSide = p.cutSide === 'outside' ? 'outside' : 'inside';
+    moves.push(...buildLeadIn(adaptRampProfile, p.topZ ?? 0, z, safeZ, leadInStyle, p.rampAngle || 2, leadInArcR, p.feedRate || 2000, p.plungeRate || 500, adaptCutSide));
 
-      const arcDir = p.climb === false ? -1 : 1;
-      const passOrder = p.climb === false ? clearPasses : [...clearPasses].reverse();
-      for (const pass of passOrder) {
-        if (!pass || pass.length < 2) continue;
-        for (let i = 0; i < pass.length - 1; i++) {
-          const pt = pass[i];
-          const next = pass[i + 1];
-          const angle = Math.atan2(next.y - pt.y, next.x - pt.x);
-          for (let t = 0; t <= 1; t += 0.2) {
-            const arcA = angle + arcDir * (Math.PI / 2 + t * Math.PI * 2);
-            moves.push({ type: 'feed', x: pt.x + t * (next.x - pt.x) + Math.cos(arcA) * trochR, y: pt.y + t * (next.y - pt.y) + Math.sin(arcA) * trochR, z, f: p.feedRate || 2000 });
-          }
+    const arcDir = p.climb === false ? -1 : 1;
+    const passOrder = p.climb === false ? clearPasses : [...clearPasses].reverse();
+    for (const pass of passOrder) {
+      if (!pass || pass.length < 2) continue;
+      for (let i = 0; i < pass.length - 1; i++) {
+        const pt = pass[i];
+        const next = pass[i + 1];
+        const angle = Math.atan2(next.y - pt.y, next.x - pt.x);
+        for (let t = 0; t <= 1; t += 0.2) {
+          const arcA = angle + arcDir * (Math.PI / 2 + t * Math.PI * 2);
+          moves.push({ type: 'feed', x: pt.x + t * (next.x - pt.x) + Math.cos(arcA) * trochR, y: pt.y + t * (next.y - pt.y) + Math.sin(arcA) * trochR, z, f: p.feedRate || 2000 });
         }
       }
     }
-    moves.push({ type: 'rapid', x: profile[0].x, y: profile[0].y, z: safeZ });
   }
+  moves.push({ type: 'rapid', x: profile[0].x, y: profile[0].y, z: safeZ });
   return { moves, warnings };
 }
 
