@@ -157,7 +157,7 @@ export default function InlayWizard({ onClose, onGenerate, selectedEntityIds = [
     bulkFeed:         1500,
     bulkPlunge:       500,
     bulkWallStock:    0.254,
-    fitTolerance:     0.127,
+    engagementDepth:  0.057 * MM,   // mm — 0.057" is middle of ideal range
     mirrorX:          true,
   }));
 
@@ -182,13 +182,14 @@ export default function InlayWizard({ onClose, onGenerate, selectedEntityIds = [
     }));
   }
 
-  // Fit preview
-  const taperRad   = Math.max(0.5, wiz.angle / 2) * Math.PI / 180;
-  const zRaise     = wiz.fitTolerance / Math.tan(taperRad);
-  const engDepthIn = zRaise / MM;
-  const fitQuality = engDepthIn < 0.030 ? 'tight' : engDepthIn > 0.080 ? 'loose' : 'ideal';
-  const fitColor   = { tight:'#ff4444', ideal:'#44cc88', loose:'#ffaa33' }[fitQuality];
-  const fitLabel   = { tight:'Too Tight', ideal:'Ideal', loose:'Loose' }[fitQuality];
+  // Fit calculations — fitTolerance is derived, never stored directly
+  const taperRad     = Math.max(0.5, wiz.angle / 2) * Math.PI / 180;
+  const fitTolerance = wiz.engagementDepth * Math.tan(taperRad);  // mm, back-calculated
+  const plugProud    = wiz.engagementDepth;                        // mm — same value, different framing
+  const engDepthIn   = wiz.engagementDepth / MM;
+  const fitQuality   = engDepthIn < 0.030 ? 'tight' : engDepthIn > 0.100 ? 'loose' : engDepthIn > 0.080 ? 'getting_loose' : 'ideal';
+  const fitColor     = { tight:'#ff4444', ideal:'#44cc88', getting_loose:'#ffaa33', loose:'#ff4444' }[fitQuality];
+  const fitLabel     = { tight:'Too Tight', ideal:'Ideal', getting_loose:'Getting Loose', loose:'Too Loose' }[fitQuality];
 
   function buildPasses() {
     return {
@@ -212,7 +213,7 @@ export default function InlayWizard({ onClose, onGenerate, selectedEntityIds = [
       type: 'taperedplug',
       name: `${wiz.jobName} — Plug`,
       selectedIds: wiz.entityIds,
-      params: { ...base, mirrorX: wiz.mirrorX, fitTolerance: wiz.fitTolerance, cutSide: 'outside' },
+      params: { ...base, mirrorX: wiz.mirrorX, fitTolerance, cutSide: 'outside' },
     };
     onGenerate(pocketOp, plugOp);
     setCreated({ pocketName: pocketOp.name, plugName: plugOp.name });
@@ -352,24 +353,81 @@ export default function InlayWizard({ onClose, onGenerate, selectedEntityIds = [
   }
 
   function renderStep3() {
+    // Slider bounds in display units
+    const engMinIn = 0.010, engMaxIn = 0.120;
+    const engMin   = isInch ? engMinIn       : engMinIn * MM;
+    const engMax   = isInch ? engMaxIn       : engMaxIn * MM;
+    const engVal   = isInch ? plugProud / MM : plugProud;
+    const engStp   = isInch ? 0.001          : 0.01;
+    const engPct   = Math.min(100, Math.max(0, (engVal - engMin) / (engMax - engMin) * 100));
+
+    // Zone gradient: tight(red) 0–18.18% | ideal(green) 18.18–63.64% | getting loose(yellow) 63.64–81.82% | too loose(red) 81.82–100%
+    const trackGrad = 'linear-gradient(to right,#6b1f1f 0%,#6b1f1f 18.18%,#1a4a2a 18.18%,#1a4a2a 63.64%,#5a4000 63.64%,#5a4000 81.82%,#6b1f1f 81.82%,#6b1f1f 100%)';
+
     return (
       <>
-        <div style={S.sec}>Fit</div>
-        <F label="Fit Tolerance" unit={dUnit}>
-          <Num value={d(wiz.fitTolerance)} onChange={v => set('fitTolerance', m(v))} min={0} step={dStep} />
-        </F>
-        <div style={{ ...S.card, marginTop:2, marginBottom:14, fontSize:11 }}>
-          <div style={{ display:'flex', justifyContent:'space-between', marginBottom:4 }}>
+        <div style={S.sec}>Engagement Depth</div>
+        <div style={{ ...S.info, fontSize:10, marginTop:-4, marginBottom:10 }}>
+          How far the plug travels into the pocket before the taper walls make contact.
+          Drag the slider or type a value to control press-fit tightness.
+        </div>
+
+        {/* Color zone strip with position indicator */}
+        <div style={{ position:'relative', height:10, borderRadius:5, marginBottom:4, background:trackGrad }}>
+          <div style={{
+            position:'absolute', top:-3, width:3, height:16, background:'#ffffff',
+            borderRadius:2, transform:'translateX(-50%)', left:`${engPct}%`,
+            boxShadow:'0 0 4px rgba(0,0,0,0.7)',
+          }} />
+        </div>
+
+        {/* Zone labels aligned to zone centers */}
+        <div style={{ position:'relative', height:14, marginBottom:8, fontSize:9 }}>
+          <span style={{ position:'absolute', left:0,       color:'#aa4444' }}>Too Tight</span>
+          <span style={{ position:'absolute', left:'40.9%', color:'#44aa66', transform:'translateX(-50%)' }}>Ideal</span>
+          <span style={{ position:'absolute', left:'72.7%', color:'#aa8833', transform:'translateX(-50%)' }}>Getting Loose</span>
+          <span style={{ position:'absolute', right:0,      color:'#aa4444' }}>Too Loose</span>
+        </div>
+
+        {/* Slider + numeric input row */}
+        <div style={{ display:'flex', alignItems:'center', gap:10, marginBottom:12 }}>
+          <input
+            type="range" min={engMin} max={engMax} step={engStp}
+            value={+engVal.toFixed(isInch ? 3 : 2)}
+            onChange={e => {
+              const v = parseFloat(e.target.value);
+              set('engagementDepth', isInch ? v * MM : v);
+            }}
+            style={{ flex:1, accentColor:fitColor, cursor:'pointer' }}
+          />
+          <input
+            type="number" min={engMin} max={engMax} step={engStp}
+            value={engVal.toFixed(isInch ? 3 : 2)}
+            onChange={e => {
+              const v = parseFloat(e.target.value);
+              if (!isNaN(v)) {
+                const clamped = Math.max(engMinIn * MM, Math.min(engMaxIn * MM, isInch ? v * MM : v));
+                set('engagementDepth', clamped);
+              }
+            }}
+            style={{ ...S.inp, width:80, flex:'none', textAlign:'right' }}
+          />
+          <span style={{ ...S.unit, width:'auto' }}>{dUnit}</span>
+        </div>
+
+        {/* Read-only calculated outputs */}
+        <div style={{ ...S.card, marginBottom:14 }}>
+          <div style={{ display:'flex', justifyContent:'space-between', alignItems:'center', marginBottom:6 }}>
             <span style={S.kvK}>Plug Proud</span>
-            <span style={S.kvV}>{fmt(zRaise, isInch ? 4 : 3)} {dUnit}</span>
+            <span style={S.kvV}>{fmt(plugProud, isInch ? 3 : 2)} {dUnit}</span>
           </div>
-          <div style={{ display:'flex', justifyContent:'space-between', marginBottom:4 }}>
-            <span style={S.kvK}>Engagement Depth</span>
-            <span style={{ ...S.kvV, color: fitColor }}>{engDepthIn.toFixed(3)}" — {fitLabel}</span>
+          <div style={{ display:'flex', justifyContent:'space-between', alignItems:'center' }}>
+            <span style={S.kvK}>Fit Quality</span>
+            <span style={{ color:fitColor, fontWeight:700, fontSize:12 }}>● {fitLabel}</span>
           </div>
-          <div style={{ fontSize:10, color:'#444466', marginTop:6 }}>
-            Plug Proud: how far the plug sits above the surface before pressing flush.<br />
-            Engagement Depth: &lt;0.030" too tight · 0.030–0.080" ideal · &gt;0.080" loose
+          <div style={{ fontSize:9, color:'#444466', marginTop:8, lineHeight:1.5 }}>
+            Plug Proud: how far the plug sits above the surface before pressing flush.
+            Ideal range: {isInch ? '0.030–0.080"' : '0.76–2.03 mm'}.
           </div>
         </div>
 
@@ -416,11 +474,11 @@ export default function InlayWizard({ onClose, onGenerate, selectedEntityIds = [
           </div>
           <div style={S.card}>
             <div style={S.cardT}>Plug — {wiz.jobName}</div>
-            <div style={S.kv}><span style={S.kvK}>Fit Tolerance</span><span style={S.kvV}>{fmt(wiz.fitTolerance, isInch ? 4 : 3)} {dUnit}</span></div>
+            <div style={S.kv}><span style={S.kvK}>Engagement Depth</span><span style={{ ...S.kvV, color:fitColor }}>{fmt(plugProud, isInch ? 3 : 2)} {dUnit}</span></div>
+            <div style={S.kv}><span style={S.kvK}>Fit Quality</span><span style={{ color:fitColor, fontWeight:700 }}>● {fitLabel}</span></div>
             <div style={S.kv}><span style={S.kvK}>Mirror X</span><span style={{ ...S.kvV, color: wiz.mirrorX ? '#44cc88' : '#cc6666' }}>{wiz.mirrorX ? 'Yes' : 'No'}</span></div>
             <div style={S.kv}><span style={S.kvK}>Taper</span><span style={S.kvV}>{wiz.angle}° / ⌀{fmt(wiz.tipDia)}{dUnit} tip</span></div>
             <div style={S.kv}><span style={S.kvK}>Depth</span><span style={S.kvV}>{fmt(wiz.pocketDepth)} {dUnit}</span></div>
-            <div style={S.kv}><span style={S.kvK}>Plug Proud</span><span style={S.kvV}>{fmt(zRaise, isInch ? 4 : 3)} {dUnit}</span></div>
           </div>
         </div>
 
@@ -429,19 +487,19 @@ export default function InlayWizard({ onClose, onGenerate, selectedEntityIds = [
           <div style={{ display:'grid', gridTemplateColumns:'1fr 1fr 1fr', gap:8, fontSize:11 }}>
             <div>
               <div style={{ color:'#444466', marginBottom:3 }}>Engagement Depth</div>
-              <div style={{ color: fitColor, fontWeight:700, fontSize:15 }}>{engDepthIn.toFixed(3)}"</div>
+              <div style={{ color:fitColor, fontWeight:700, fontSize:15 }}>{fmt(plugProud, isInch ? 3 : 2)} {dUnit}</div>
             </div>
             <div>
-              <div style={{ color:'#444466', marginBottom:3 }}>Interference</div>
-              <div style={{ color:'#ccccee', fontWeight:700, fontSize:15 }}>{fmt(wiz.fitTolerance, isInch ? 4 : 3)} {dUnit}</div>
+              <div style={{ color:'#444466', marginBottom:3 }}>Plug Proud</div>
+              <div style={{ color:'#ccccee', fontWeight:700, fontSize:15 }}>{fmt(plugProud, isInch ? 3 : 2)} {dUnit}</div>
             </div>
             <div>
               <div style={{ color:'#444466', marginBottom:3 }}>Fit Quality</div>
-              <div style={{ color: fitColor, fontWeight:700, fontSize:15 }}>● {fitLabel}</div>
+              <div style={{ color:fitColor, fontWeight:700, fontSize:15 }}>● {fitLabel}</div>
             </div>
           </div>
           <div style={{ fontSize:10, color:'#335533', marginTop:10 }}>
-            Ideal range: 0.030–0.080" engagement · Adjust Fit Tolerance or Taper Angle to tune
+            Ideal range: {isInch ? '0.030–0.080"' : '0.76–2.03 mm'} engagement · Adjust Taper Angle to shift the range for your material
           </div>
         </div>
 
