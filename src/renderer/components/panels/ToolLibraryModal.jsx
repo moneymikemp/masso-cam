@@ -691,12 +691,12 @@ export default function ToolLibraryModal({ onClose }) {
                         <span style={S.unitTag}>{dUnit}</span>
                       </div>
 
-                      <span style={S.label}>{isVBit ? 'V-Angle (half °)' : 'Taper Angle (°)'}</span>
+                      <span style={S.label}>{isVBit ? 'V-Angle' : 'Taper Angle'} (per side)</span>
                       <div style={S.inlineRow}>
                         <input style={{ ...S.input, flex:1 }} type="number" min="0.5" max="89" step="0.5"
                           value={editTool.taperAngle ?? 0}
                           onChange={e => set('taperAngle', parseFloat(e.target.value) || 0)} />
-                        <span style={S.unitTag}>° half-angle{isVBit ? ` (${((editTool.taperAngle ?? 0) * 2).toFixed(0)}° included)` : ''}</span>
+                        <span style={S.unitTag}>° per side ({((editTool.taperAngle ?? 0) * 2).toFixed(1)}° included)</span>
                       </div>
                     </>}
                   </div>

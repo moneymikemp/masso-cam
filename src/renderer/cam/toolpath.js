@@ -964,6 +964,47 @@ function mirrorEntitiesX(entities) {
   }));
 }
 
+// Mirror entities across the Y axis (reflect X around the centroid X of all profiles).
+// Same logic as mirrorEntitiesX but flips left-right instead of top-bottom.
+function mirrorEntitiesY(entities) {
+  const profiles = buildPocketProfiles(entities);
+  if (!profiles.length) return entities;
+  const cleanProfiles = profiles.map(p => stripClose([...p]));
+  const allPts = cleanProfiles.flat();
+  if (!allPts.length) return entities;
+  const minX = Math.min(...allPts.map(p => p.x));
+  const maxX = Math.max(...allPts.map(p => p.x));
+  const minY = Math.min(...allPts.map(p => p.y));
+  const maxY = Math.max(...allPts.map(p => p.y));
+  const origCx = (minX + maxX) / 2;
+  const origCy = (minY + maxY) / 2;
+  const mirrored = cleanProfiles.map(pts =>
+    pts.map(pt => ({ x: 2 * origCx - pt.x, y: pt.y }))
+  );
+  const mirPts = mirrored.flat();
+  const mirMinX = Math.min(...mirPts.map(p => p.x));
+  const mirMaxX = Math.max(...mirPts.map(p => p.x));
+  const mirMinY = Math.min(...mirPts.map(p => p.y));
+  const mirMaxY = Math.max(...mirPts.map(p => p.y));
+  const dx = origCx - (mirMinX + mirMaxX) / 2;
+  const dy = origCy - (mirMinY + mirMaxY) / 2;
+  return mirrored.map((pts, i) => ({
+    id: `__mirror_${i}`,
+    type: 'polyline',
+    vertices: pts.map(pt => ({ x: pt.x + dx, y: pt.y + dy })),
+    closed: true,
+  }));
+}
+
+// Apply mirror transform from op params. Supports new `mirror` string ('x'|'y'|'none')
+// and old boolean `mirrorX` for backwards compatibility with saved project files.
+function applyMirror(selected, p) {
+  const mirror = p.mirror ?? (p.mirrorX ? 'x' : 'none');
+  if (mirror === 'x') return mirrorEntitiesX(selected);
+  if (mirror === 'y') return mirrorEntitiesY(selected);
+  return selected;
+}
+
 // ── V-Carve ───────────────────────────────────────────────────────────────────
 //
 // Generates inward-offset concentric passes, each at the depth dictated by the
@@ -1122,7 +1163,7 @@ function generateTaperedPocket(op, entities, context = {}) {
   }
   let selected = getSelectedEntities(entities, op.selectedIds);
   if (!selected.length) return { moves: [], subToolpaths: [], warnings: ['No entities found for selected IDs'] };
-  if (p.mirrorX) selected = mirrorEntitiesX(selected);
+  selected = applyMirror(selected, p);
 
   const topZ   = p.topZ ?? 0;
   const depth  = Math.abs(p.pocketDepth || 5);
@@ -1138,7 +1179,7 @@ function generateTaperedPlug(op, entities, context = {}) {
   }
   let selected = getSelectedEntities(entities, op.selectedIds);
   if (!selected.length) return { moves: [], subToolpaths: [], warnings: ['No entities found for selected IDs'] };
-  if (p.mirrorX) selected = mirrorEntitiesX(selected);
+  selected = applyMirror(selected, p);
 
   const depth   = Math.abs(p.pocketDepth || 5);
   const safeZ   = p.safeZ ?? 10;
