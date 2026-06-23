@@ -9,7 +9,8 @@ const PRESET_KEYS = [
   'bulkEnabled','bulkToolId','bulkDiameter','bulkRpm','bulkFeed','bulkPlunge','bulkWallStock',
   'plugDetailEnabled','plugDetailToolId','plugDetailDiameter','plugDetailRpm','plugDetailFeed','plugDetailPlunge','plugDetailWallStock',
   'plugBulkEnabled','plugBulkToolId','plugBulkDiameter','plugBulkRpm','plugBulkFeed','plugBulkPlunge','plugBulkWallStock',
-  'pocketDepth','topZ','safeZ','engagementDepth','mirror',
+  'pocketDepth','pocketTopZ','pocketSafeZ','pocketStockW','pocketStockH',
+  'plugTopZ','plugSafeZ','plugStockW','plugStockH','engagementDepth','mirror',
 ];
 
 // ─── Styles ───────────────────────────────────────────────────────────────────
@@ -144,8 +145,14 @@ export default function InlayWizard({ onClose, onGenerate, selectedEntityIds = [
     jobName:          'Inlay',
     entityIds:        [...selectedEntityIds],
     pocketDepth:      5,
-    topZ:             0,
-    safeZ:            10,
+    pocketTopZ:       0,
+    pocketSafeZ:      10,
+    pocketStockW:     0,
+    pocketStockH:     0,
+    plugTopZ:         0,
+    plugSafeZ:        10,
+    plugStockW:       0,
+    plugStockH:       0,
     taperToolId:      null,
     angle:            10,
     tipDia:           0.5,
@@ -287,18 +294,25 @@ export default function InlayWizard({ onClose, onGenerate, selectedEntityIds = [
   }
 
   function handleGenerate() {
-    const base = { topZ: wiz.topZ, safeZ: wiz.safeZ, pocketDepth: wiz.pocketDepth };
     const pocketOp = {
       type: 'taperedpocket',
       name: `${wiz.jobName} — Pocket`,
       selectedIds: wiz.entityIds,
-      params: { ...base, passes: buildPocketPasses(), mirror: 'none', cutSide: 'inside' },
+      params: {
+        pocketDepth: wiz.pocketDepth, topZ: wiz.pocketTopZ, safeZ: wiz.pocketSafeZ,
+        stockW: wiz.pocketStockW, stockH: wiz.pocketStockH,
+        passes: buildPocketPasses(), mirror: 'none', cutSide: 'inside',
+      },
     };
     const plugOp = {
       type: 'taperedplug',
       name: `${wiz.jobName} — Plug`,
       selectedIds: wiz.entityIds,
-      params: { ...base, passes: buildPlugPasses(), mirror: wiz.mirror, fitTolerance, cutSide: 'outside' },
+      params: {
+        pocketDepth: wiz.pocketDepth, topZ: wiz.plugTopZ, safeZ: wiz.plugSafeZ,
+        stockW: wiz.plugStockW, stockH: wiz.plugStockH,
+        passes: buildPlugPasses(), mirror: wiz.mirror, fitTolerance, cutSide: 'outside',
+      },
     };
     onGenerate(pocketOp, plugOp);
     setCreated({ pocketName: pocketOp.name, plugName: plugOp.name });
@@ -346,14 +360,6 @@ export default function InlayWizard({ onClose, onGenerate, selectedEntityIds = [
           <button style={{ ...S.btn, ...S.btnRed, opacity: selectedPresetId ? 1 : 0.4 }}
             disabled={!selectedPresetId} onClick={handleDeletePreset}>Delete</button>
         </div>
-        <div style={{ display:'flex', gap:6, marginBottom:12 }}>
-          <input style={{ ...S.inp, flex:1 }} placeholder="Preset name to save..."
-            value={presetName} onChange={e => setPresetName(e.target.value)} />
-          <button style={{ ...S.btn, ...S.btnSec, opacity: presetName.trim() ? 1 : 0.4 }}
-            disabled={!presetName.trim()} onClick={handleSavePreset}>
-            {presets.find(p => p.name === presetName.trim()) ? 'Update' : 'Save'}
-          </button>
-        </div>
 
         <div style={S.sec}>Job</div>
         <F label="Job Name">
@@ -377,10 +383,23 @@ export default function InlayWizard({ onClose, onGenerate, selectedEntityIds = [
             <Num value={d(wiz.pocketDepth)} onChange={v => set('pocketDepth', m(v))} min={0} step={dStep} />
           </F>
           <F label="Top of Stock" unit={dUnit}>
-            <Num value={d(wiz.topZ)} onChange={v => set('topZ', m(v))} step={dStep} />
+            <Num value={d(wiz.pocketTopZ)} onChange={v => set('pocketTopZ', m(v))} step={dStep} />
           </F>
           <F label="Safe Z" unit={dUnit}>
-            <Num value={d(wiz.safeZ)} onChange={v => set('safeZ', m(v))} min={0} step={dStep} />
+            <Num value={d(wiz.pocketSafeZ)} onChange={v => set('pocketSafeZ', m(v))} min={0} step={dStep} />
+          </F>
+        </div>
+
+        <div style={S.sec}>Pocket Stock Size (optional)</div>
+        <div style={{ ...S.info, fontSize:10, marginTop:-4, marginBottom:10 }}>
+          Stock dimensions for wrapping. Leave at 0 to use geometry bounding box.
+        </div>
+        <div style={S.grid2}>
+          <F label="Stock Width" unit={dUnit}>
+            <Num value={d(wiz.pocketStockW)} onChange={v => set('pocketStockW', m(v))} min={0} step={dStep} />
+          </F>
+          <F label="Stock Height" unit={dUnit}>
+            <Num value={d(wiz.pocketStockH)} onChange={v => set('pocketStockH', m(v))} min={0} step={dStep} />
           </F>
         </div>
 
@@ -480,6 +499,25 @@ export default function InlayWizard({ onClose, onGenerate, selectedEntityIds = [
 
     return (
       <>
+        <div style={S.sec}>Plug Stock Setup</div>
+        <div style={S.grid2}>
+          <F label="Top of Stock" unit={dUnit}>
+            <Num value={d(wiz.plugTopZ)} onChange={v => set('plugTopZ', m(v))} step={dStep} />
+          </F>
+          <F label="Safe Z" unit={dUnit}>
+            <Num value={d(wiz.plugSafeZ)} onChange={v => set('plugSafeZ', m(v))} min={0} step={dStep} />
+          </F>
+          <F label="Stock Width" unit={dUnit}>
+            <Num value={d(wiz.plugStockW)} onChange={v => set('plugStockW', m(v))} min={0} step={dStep} />
+          </F>
+          <F label="Stock Height" unit={dUnit}>
+            <Num value={d(wiz.plugStockH)} onChange={v => set('plugStockH', m(v))} min={0} step={dStep} />
+          </F>
+        </div>
+        <div style={{ ...S.info, fontSize:10, marginTop:-4, marginBottom:10 }}>
+          Stock Width/Height: leave at 0 to use geometry bounding box.
+        </div>
+
         <div style={{ ...S.row, marginTop:4 }}>
           <input type="checkbox" style={{ marginRight:6, cursor:'pointer' }}
             checked={wiz.plugDetailEnabled} onChange={e => set('plugDetailEnabled', e.target.checked)} />
@@ -643,7 +681,11 @@ export default function InlayWizard({ onClose, onGenerate, selectedEntityIds = [
           <div style={S.card}>
             <div style={S.cardT}>Pocket — {wiz.jobName}</div>
             <div style={S.kv}><span style={S.kvK}>Depth</span><span style={S.kvV}>{fmt(wiz.pocketDepth)} {dUnit}</span></div>
-            <div style={S.kv}><span style={S.kvK}>Top of Stock</span><span style={S.kvV}>{fmt(wiz.topZ)} {dUnit}</span></div>
+            <div style={S.kv}><span style={S.kvK}>Top of Stock</span><span style={S.kvV}>{fmt(wiz.pocketTopZ)} {dUnit}</span></div>
+            <div style={S.kv}><span style={S.kvK}>Safe Z</span><span style={S.kvV}>{fmt(wiz.pocketSafeZ)} {dUnit}</span></div>
+            {(wiz.pocketStockW > 0 || wiz.pocketStockH > 0) && (
+              <div style={S.kv}><span style={S.kvK}>Stock</span><span style={S.kvV}>{fmt(wiz.pocketStockW)} × {fmt(wiz.pocketStockH)} {dUnit}</span></div>
+            )}
             <div style={S.kv}><span style={S.kvK}>Taper</span><span style={S.kvV}>{wiz.angle}° incl. ({(wiz.angle / 2).toFixed(1)}°/side) / ⌀{fmt(wiz.tipDia)}{dUnit} tip</span></div>
             <div style={S.kv}><span style={S.kvK}>Feed</span><span style={S.kvV}>{fmt(wiz.taperFeed, isInch ? 2 : 0)} {fUnit}</span></div>
             <div style={S.kv}><span style={S.kvK}>Plunge</span><span style={S.kvV}>{fmt(wiz.taperPlunge, isInch ? 2 : 0)} {fUnit}</span></div>
@@ -656,6 +698,11 @@ export default function InlayWizard({ onClose, onGenerate, selectedEntityIds = [
             <div style={S.kv}><span style={S.kvK}>Engagement Depth</span><span style={{ ...S.kvV, color:fitColor }}>{fmt(plugProud, isInch ? 3 : 2)} {dUnit}</span></div>
             <div style={S.kv}><span style={S.kvK}>Fit Quality</span><span style={{ color:fitColor, fontWeight:700 }}>● {fitLabel}</span></div>
             <div style={S.kv}><span style={S.kvK}>Mirror</span><span style={{ ...S.kvV, color: wiz.mirror === 'none' ? '#cc6666' : '#44cc88' }}>{{ x:'Mirror X', y:'Mirror Y', none:'None' }[wiz.mirror]}</span></div>
+            <div style={S.kv}><span style={S.kvK}>Top of Stock</span><span style={S.kvV}>{fmt(wiz.plugTopZ)} {dUnit}</span></div>
+            <div style={S.kv}><span style={S.kvK}>Safe Z</span><span style={S.kvV}>{fmt(wiz.plugSafeZ)} {dUnit}</span></div>
+            {(wiz.plugStockW > 0 || wiz.plugStockH > 0) && (
+              <div style={S.kv}><span style={S.kvK}>Stock</span><span style={S.kvV}>{fmt(wiz.plugStockW)} × {fmt(wiz.plugStockH)} {dUnit}</span></div>
+            )}
             <div style={S.kv}><span style={S.kvK}>Taper</span><span style={S.kvV}>{wiz.angle}° incl. ({(wiz.angle / 2).toFixed(1)}°/side) / ⌀{fmt(wiz.tipDia)}{dUnit} tip</span></div>
             <div style={S.kv}><span style={S.kvK}>Depth</span><span style={S.kvV}>{fmt(wiz.pocketDepth)} {dUnit}</span></div>
             <div style={{ marginTop:8, fontSize:10, color:'#444466', lineHeight:1.6 }}>
@@ -683,6 +730,16 @@ export default function InlayWizard({ onClose, onGenerate, selectedEntityIds = [
           <div style={{ fontSize:10, color:'#335533', marginTop:10 }}>
             Ideal range: {isInch ? '0.030–0.080"' : '0.76–2.03 mm'} engagement · Adjust Taper Angle to shift the range for your material
           </div>
+        </div>
+
+        <div style={S.sec}>Save as Preset</div>
+        <div style={{ display:'flex', gap:6 }}>
+          <input style={{ ...S.inp, flex:1 }} placeholder="Preset name..."
+            value={presetName} onChange={e => setPresetName(e.target.value)} />
+          <button style={{ ...S.btn, ...S.btnSec, opacity: presetName.trim() ? 1 : 0.4 }}
+            disabled={!presetName.trim()} onClick={handleSavePreset}>
+            {presets.find(p => p.name === presetName.trim()) ? 'Update' : 'Save'}
+          </button>
         </div>
 
         {wiz.entityIds.length === 0 && (
