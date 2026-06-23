@@ -156,7 +156,7 @@ const S = {
 
 export default function App() {
   const { state, dispatch, getProject } = useApp();
-  const { activePanelTab, statusMessage, selectedEntityIds, entities, operations, postConfig, activeTool, cadMode, refImage } = state;
+  const { activePanelTab, statusMessage, selectedEntityIds, entities, operations, postConfig, activeTool, cadMode, refImage, workspaces, activeWorkspaceId } = state;
   const isInch = postConfig.units === 'inch';
   const MM_PER_INCH = 25.4;
   const [modal, setModal] = useState(null); // 'profiles' | 'tool-library' | 'about' | 'inlay-wizard'
@@ -317,27 +317,34 @@ export default function App() {
       stockOriginY: state.stockConfig.stockOriginY ?? 0,
     };
 
-    const pocketOps = enabled.filter(op => op.type === 'taperedpocket');
-    const plugOps   = enabled.filter(op => op.type === 'taperedplug');
-    const isInlay   = pocketOps.length > 0 && plugOps.length > 0;
     const toolsList = state.tools || [];
+    const slugify = s => s.toLowerCase().replace(/[^a-z0-9]+/g, '_').replace(/^_|_$/, '');
+
+    // Group enabled ops by workspace, preserving workspace order.
+    const wsGroups = (workspaces || []).map(ws => ({
+      name: ws.name,
+      slug: slugify(ws.name),
+      ops: enabled.filter(op => (op.workspaceId ?? 'default') === ws.id),
+    })).filter(g => g.ops.length > 0);
+
+    // Fall back to ungrouped if no workspace info (old projects).
+    const isMultiWorkspace = wsGroups.length > 1;
 
     // Build the complete list of {seg, suffix, gcode} to save.
-    // seg = '' | 'pocket' | 'plug';  suffix = '' | '_T1' | '_T2' ...
     let fileList;
-    if (isInlay) {
-      const pocketGroups = generateGcodeByTool(pocketOps, toolsList, gcfg);
-      const plugGroups   = generateGcodeByTool(plugOps,   toolsList, gcfg);
-      fileList = [
-        ...pocketGroups.map(g => ({ seg: 'pocket', suffix: g.suffix, gcode: g.gcode })),
-        ...plugGroups.map(g =>   ({ seg: 'plug',   suffix: g.suffix, gcode: g.gcode })),
-      ];
+    if (isMultiWorkspace) {
+      fileList = [];
+      for (const { slug, ops } of wsGroups) {
+        const groups = generateGcodeByTool(ops, toolsList, gcfg);
+        for (const g of groups) fileList.push({ seg: slug, suffix: g.suffix, gcode: g.gcode });
+      }
     } else {
-      const groups = generateGcodeByTool(enabled, toolsList, gcfg);
+      const ops = wsGroups[0]?.ops ?? enabled;
+      const groups = generateGcodeByTool(ops, toolsList, gcfg);
       fileList = groups.map(g => ({ seg: '', suffix: g.suffix, gcode: g.gcode }));
     }
 
-    const isMulti = fileList.length > 1 || isInlay;
+    const isMulti = fileList.length > 1 || isMultiWorkspace;
     dispatch({ type: 'SET_PANEL_TAB', payload: 'gcode' });
 
     if (!isMulti) {
@@ -356,11 +363,11 @@ export default function App() {
     // Multi-file — ask for base filename once, derive all paths from it.
     let base;
     if (window.electron) {
-      const chosenPath = await window.electron.saveGcodeInlay(isInlay ? 'inlay.nc' : 'toolpath.nc');
+      const chosenPath = await window.electron.saveGcodeInlay(isMultiWorkspace ? 'inlay.nc' : 'toolpath.nc');
       if (!chosenPath) return;
       base = chosenPath.replace(/\.[^.\\/]+$/, '');
     } else {
-      base = isInlay ? 'inlay' : 'toolpath';
+      base = isMultiWorkspace ? 'inlay' : 'toolpath';
     }
 
     const saved = [];
@@ -484,8 +491,13 @@ export default function App() {
   }, [getProject, state.projectPath, dispatch]);
 
   function handleInlayGenerate(pocketOp, plugOp) {
-    dispatch({ type: 'ADD_OPERATION', payload: pocketOp });
-    dispatch({ type: 'ADD_OPERATION', payload: plugOp });
+    const pocketWsId = uuid();
+    const plugWsId   = uuid();
+    dispatch({ type: 'ADD_WORKSPACE', payload: { id: pocketWsId, name: pocketOp.name, color: '#1a5a2a' } });
+    dispatch({ type: 'ADD_WORKSPACE', payload: { id: plugWsId,   name: plugOp.name,   color: '#1a2a5a' } });
+    dispatch({ type: 'ADD_OPERATION', payload: { ...pocketOp, workspaceId: pocketWsId } });
+    dispatch({ type: 'ADD_OPERATION', payload: { ...plugOp,   workspaceId: plugWsId   } });
+    dispatch({ type: 'SET_ACTIVE_WORKSPACE', payload: pocketWsId });
     dispatch({ type: 'SET_PANEL_TAB', payload: 'operations' });
     dispatch({ type: 'SET_STATUS', payload: `Inlay wizard: created "${pocketOp.name}" and "${plugOp.name}"` });
   }
@@ -610,6 +622,45 @@ export default function App() {
             onClick={() => setView3d(v => !v)}
           >◈ 3D</button>
         </div>
+      </div>
+
+      {/* Workspace Tabs */}
+      <div style={{ display:'flex', alignItems:'flex-end', background:'#0a0a18', borderBottom:'1px solid #2a2a50', paddingLeft:8, flexShrink:0, minHeight:28 }}>
+        {(workspaces || []).map(ws => {
+          const isActive = ws.id === activeWorkspaceId;
+          const wsOpCount = operations.filter(op => (op.workspaceId ?? 'default') === ws.id).length;
+          return (
+            <div key={ws.id}
+              title={`${ws.name} · ${wsOpCount} operation${wsOpCount !== 1 ? 's' : ''}`}
+              onClick={() => dispatch({ type:'SET_ACTIVE_WORKSPACE', payload:ws.id })}
+              style={{
+                display:'flex', alignItems:'center', gap:5,
+                padding:'4px 10px 3px', cursor:'pointer', userSelect:'none',
+                fontSize:11, fontWeight: isActive ? 600 : 400,
+                color: isActive ? '#ccccff' : '#555577',
+                background: isActive ? '#1a1a38' : '#0d0d20',
+                borderLeft:  `1px solid ${isActive ? '#2a2a50' : '#1a1a30'}`,
+                borderRight: `1px solid ${isActive ? '#2a2a50' : '#1a1a30'}`,
+                borderTop:   `2px solid ${isActive ? (ws.color || '#5555cc') : 'transparent'}`,
+                borderBottom: isActive ? '1px solid #1a1a38' : '1px solid transparent',
+                marginBottom: isActive ? -1 : 0,
+              }}>
+              <span style={{ width:6, height:6, borderRadius:'50%', background: ws.color || '#5555cc', flexShrink:0 }} />
+              {ws.name}
+              {wsOpCount > 0 && <span style={{ fontSize:9, color: isActive ? '#5555aa' : '#333355' }}>({wsOpCount})</span>}
+              {(workspaces || []).length > 1 && (
+                <span style={{ color:'#333355', fontSize:13, lineHeight:1, marginLeft:1, paddingLeft:2 }}
+                  onClick={e => { e.stopPropagation(); dispatch({ type:'DELETE_WORKSPACE', payload:ws.id }); }}>×</span>
+              )}
+            </div>
+          );
+        })}
+        <button
+          title="Add workspace"
+          style={{ marginLeft:4, padding:'3px 7px', fontSize:12, background:'none', border:'none', color:'#333355', cursor:'pointer', lineHeight:1 }}
+          onClick={() => dispatch({ type:'ADD_WORKSPACE', payload:{ name:`Workspace ${(workspaces||[]).length + 1}`, color:'#5555cc' } })}>
+          +
+        </button>
       </div>
 
       <div style={S.main}>

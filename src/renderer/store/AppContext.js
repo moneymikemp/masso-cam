@@ -63,6 +63,10 @@ const initialState = {
   selectedEntityIds: [],
   hoveredEntityId: null,
 
+  // Workspaces (named setups — each has its own operations)
+  workspaces: [{ id: 'default', name: 'Default', color: '#5555cc' }],
+  activeWorkspaceId: 'default',
+
   // Operations
   operations: [],
   selectedOperationId: null,
@@ -189,9 +193,34 @@ function reducer(state, action) {
     case 'HOVER_ENTITY':
       return { ...state, hoveredEntityId: action.payload };
 
+    // Workspaces
+    case 'ADD_WORKSPACE': {
+      const ws = { id: uuid(), name: 'Workspace', color: '#5555cc', ...action.payload };
+      return { ...state, workspaces: [...state.workspaces, ws], activeWorkspaceId: ws.id };
+    }
+    case 'SET_ACTIVE_WORKSPACE':
+      return { ...state, activeWorkspaceId: action.payload };
+    case 'DELETE_WORKSPACE': {
+      if (state.workspaces.length <= 1) return state;
+      const remaining = state.workspaces.filter(w => w.id !== action.payload);
+      const fallbackId = remaining[0].id;
+      const operations = state.operations.map(op =>
+        op.workspaceId === action.payload ? { ...op, workspaceId: fallbackId } : op
+      );
+      const newActiveId = state.activeWorkspaceId === action.payload ? fallbackId : state.activeWorkspaceId;
+      return { ...state, workspaces: remaining, activeWorkspaceId: newActiveId, operations };
+    }
+    case 'RENAME_WORKSPACE': {
+      const workspaces = state.workspaces.map(w =>
+        w.id === action.payload.id ? { ...w, name: action.payload.name } : w
+      );
+      return { ...state, workspaces };
+    }
+
     // Operations
     case 'ADD_OPERATION': {
       const op = {
+        workspaceId: action.payload.workspaceId ?? state.activeWorkspaceId,
         id: uuid(),
         name: action.payload.name || `Operation ${state.operations.length + 1}`,
         type: action.payload.type || 'contour',
@@ -491,12 +520,18 @@ function reducer(state, action) {
     case 'SET_DIRTY':        return { ...state, dirty: action.payload };
     case 'LOAD_PROJECT': {
       const p = action.payload;
+      const workspaces = p.workspaces?.length
+        ? p.workspaces
+        : [{ id: 'default', name: 'Default', color: '#5555cc' }];
+      const operations = (p.operations || []).map(op => ({ workspaceId: 'default', ...op }));
       return {
         ...state,
         entities:      p.entities || [],
         layers:        p.layers || {},
         bounds:        p.bounds || null,
-        operations:    p.operations || [],
+        operations,
+        workspaces,
+        activeWorkspaceId: workspaces[0].id,
         postConfig:    p.postConfig || state.postConfig,
         machineConfig: p.machineConfig || state.machineConfig,
         stockConfig:   p.stockConfig || state.stockConfig,
@@ -554,6 +589,7 @@ export function AppProvider({ children }) {
     layers: state.layers,
     bounds: state.bounds,
     operations: state.operations,
+    workspaces: state.workspaces,
     postConfig: state.postConfig,
     machineConfig: state.machineConfig,
     stockConfig: state.stockConfig,

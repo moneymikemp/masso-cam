@@ -835,7 +835,8 @@ export default function CAMCanvas() {
     statusTimerRef.current = setTimeout(() => setStatusMsg(''), 2000);
   }
 
-  const { viewport, entities, layers, operations, selectedEntityIds, hoveredEntityId, showToolpaths, showRapids, bounds, stockConfig, tabPlacementActive, tabPlacementOpId, dogboneSelectionActive, dogboneSelectionOpId, textPlacementActive, textPlacementOpId, medialAxisPolylines, postConfig, activeTool, gridSnap, refImage, previewEntities, zSliderPos } = state;
+  const { viewport, entities, layers, operations: allOperations, selectedEntityIds, hoveredEntityId, showToolpaths, showRapids, bounds, stockConfig, tabPlacementActive, tabPlacementOpId, dogboneSelectionActive, dogboneSelectionOpId, textPlacementActive, textPlacementOpId, medialAxisPolylines, postConfig, activeTool, gridSnap, refImage, previewEntities, zSliderPos, activeWorkspaceId } = state;
+  const operations = allOperations.filter(op => !op.workspaceId || op.workspaceId === activeWorkspaceId);
   const isInch = postConfig?.units === 'inch';
 
   const [canvasDims, setCanvasDims] = useState({ w: 0, h: 0 });

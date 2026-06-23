@@ -54,7 +54,8 @@ const S = {
 
 export default function OperationsPanel() {
   const { state, dispatch } = useApp();
-  const { operations, selectedOperationId, entities, tools, selectedEntityIds } = state;
+  const { operations: allOperations, selectedOperationId, entities, tools, selectedEntityIds, activeWorkspaceId } = state;
+  const operations = allOperations.filter(op => (op.workspaceId ?? 'default') === activeWorkspaceId);
   const [showAddMenu, setShowAddMenu] = useState(false);
   const [showSkeleton, setShowSkeleton] = useState(false);
 
@@ -92,7 +93,7 @@ export default function OperationsPanel() {
 
   function duplicateOp(id, e) {
     e.stopPropagation();
-    const op = operations.find(o => o.id === id);
+    const op = allOperations.find(o => o.id === id);
     if (!op) return;
     dispatch({ type: 'ADD_OPERATION', payload: { ...op, id: undefined, name: op.name + ' (copy)', toolpath: null } });
   }
