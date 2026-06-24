@@ -1519,7 +1519,16 @@ function buildTaperTrace(entities, topZ, depth, safeZ, feedRate, plungeRate, tcR
   const isOutside = cutSide === 'outside';
   const profiles = prebuiltProfiles ?? buildPocketProfiles(entities);
 
+  // Identify the outermost profile so inner profiles (holes in a boss, islands in a pocket)
+  // can be traced from the correct side.
+  const outerProfileRef = [...profiles].sort((a, b) => Math.abs(polygonArea(b)) - Math.abs(polygonArea(a)))[0];
+
   for (const rawProfile of profiles) {
+    // Inner profiles of a plug must be traced from INSIDE the hole (not from outside into the
+    // boss ring).  Flip traceOffset sign for non-outer profiles when isOutside is true.
+    const isInnerProfile = rawProfile !== outerProfileRef;
+    const profileTraceOffset = (isInnerProfile && isOutside) ? -traceOffset : traceOffset;
+
     // Normalise winding to CCW before offsetting.  mirrorEntitiesX Y-flips the
     // polygon, reversing its winding to CW.  Clipper's ClipperOffset treats CW
     // paths as holes and applies the delta in the opposite direction, so a CW
@@ -1530,8 +1539,8 @@ function buildTaperTrace(entities, topZ, depth, safeZ, feedRate, plungeRate, tcR
     if (rawStripped.length < 3) continue;
     const rawCCW = isClockwise(rawStripped) ? [...rawStripped].reverse() : rawStripped;
 
-    const traceRaw = traceOffset !== 0
-      ? (offsetPolyline(rawCCW, traceOffset, true)[0] ?? rawCCW)
+    const traceRaw = profileTraceOffset !== 0
+      ? (offsetPolyline(rawCCW, profileTraceOffset, true)[0] ?? rawCCW)
       : rawCCW;
     if (!traceRaw || traceRaw.length < 2) continue;
     const ptsRaw = stripClose([...traceRaw]);
