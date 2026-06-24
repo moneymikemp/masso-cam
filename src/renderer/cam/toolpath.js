@@ -1519,7 +1519,20 @@ function buildTaperTrace(entities, topZ, depth, safeZ, feedRate, plungeRate, tcR
   const isOutside = cutSide === 'outside';
   const profiles = prebuiltProfiles ?? buildPocketProfiles(entities);
 
+  // Identify the outermost profile so inner profiles (holes in a ring boss) can be
+  // traced from inside the hole rather than from outside into the boss ring.
+  const outerProfileRef = profiles.length > 1
+    ? [...profiles].sort((a, b) => Math.abs(polygonArea(b)) - Math.abs(polygonArea(a)))[0]
+    : profiles[0];
+
   for (const rawProfile of profiles) {
+    // For inner profiles of a plug (ring boss holes), flip the trace offset so the
+    // taper bit approaches from inside the hole rather than through the boss ring.
+    // If the inward offset collapses (hole too small for the taper), skip the profile
+    // instead of falling back to the raw boundary (which would cut the boss ring).
+    const isInnerProfile = profiles.length > 1 && rawProfile !== outerProfileRef;
+    const profileTraceOffset = (isInnerProfile && isOutside) ? -traceOffset : traceOffset;
+
     // Normalise winding to CCW before offsetting.  mirrorEntitiesX Y-flips the
     // polygon, reversing its winding to CW.  Clipper's ClipperOffset treats CW
     // paths as holes and applies the delta in the opposite direction, so a CW
@@ -1530,9 +1543,13 @@ function buildTaperTrace(entities, topZ, depth, safeZ, feedRate, plungeRate, tcR
     if (rawStripped.length < 3) continue;
     const rawCCW = isClockwise(rawStripped) ? [...rawStripped].reverse() : rawStripped;
 
-    const traceRaw = traceOffset !== 0
-      ? (offsetPolyline(rawCCW, traceOffset, true)[0] ?? rawCCW)
-      : rawCCW;
+    const offsetResult = profileTraceOffset !== 0
+      ? offsetPolyline(rawCCW, profileTraceOffset, true)[0]
+      : null;
+    // Inner plug profiles: if inward offset collapses skip rather than fall back to
+    // the boundary (boundary fallback traces the boss ring wall, cutting into the boss).
+    // Outer profiles: fall back to rawCCW so the trace is never lost.
+    const traceRaw = offsetResult ?? (isInnerProfile && isOutside ? null : rawCCW);
     if (!traceRaw || traceRaw.length < 2) continue;
     const ptsRaw = stripClose([...traceRaw]);
     if (ptsRaw.length < 3) continue;
@@ -1771,16 +1788,17 @@ function buildPlugClearing(entities, topZ, depth, safeZ, toolR, depthPerPass, wa
   }
   moves.push({ type: 'rapid', x: outerProfile[0].x, y: outerProfile[0].y, z: safeZ });
 
-  // If there are inner profiles (separate bosses nested within the outer boss area),
-  // pocket-clear the gap between them.  The outer profile is the gap's outer boundary;
-  // inner profiles are island exclusions so neither boss is cut.
-  if (profiles.length > 1) {
-    const gapMoves = buildPocketClearing(
+  // Inner profiles = holes in the boss (counters of a ring-shaped letter).
+  // Pocket-clear each hole independently so the endmill removes material from
+  // inside each enclosed hole before the taper bit traces the inner wall.
+  for (const innerProfRaw of profiles.slice(1)) {
+    const innerProfile = isClockwise(innerProfRaw) ? [...innerProfRaw].reverse() : innerProfRaw;
+    const holeMoves = buildPocketClearing(
       [], topZ, depth, safeZ, toolR, depthPerPass, wallStock,
       feedRate, plungeRate, taperRad, passLabel, warnings, prevToolR,
-      null, leadInStyle, leadInArcRadius, profiles
+      null, leadInStyle, leadInArcRadius, [innerProfile]
     );
-    moves.push(...gapMoves);
+    moves.push(...holeMoves);
   }
 
   return moves;
