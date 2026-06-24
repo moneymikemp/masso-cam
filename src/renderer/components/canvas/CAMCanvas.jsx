@@ -919,17 +919,17 @@ export default function CAMCanvas() {
   // Resolved index into zLevels (null = show all).
   const filterZIndex = zSliderPos === 0 ? null : zSliderPos - 1;
 
-  // Mirrored plug contour overlay — shown when active workspace contains a taperedplug op.
-  const plugMirrorOverlay = useMemo(() => {
+  // On a plug workspace tab: show only the plug's selected geometry, mirrored as it will be cut.
+  const plugCanvasEntities = useMemo(() => {
     const plugOp = operations.find(op => op.type === 'taperedplug');
     if (!plugOp) return null;
-    const mirror = plugOp.params?.mirror ?? 'none';
-    if (mirror === 'none') return null;
     const selEntities = entities.filter(e => plugOp.selectedIds?.includes(e.id));
     if (!selEntities.length) return null;
+    const mirror = plugOp.params?.mirror ?? 'none';
     try {
+      if (mirror === 'none') return selEntities;
       return mirror === 'x' ? mirrorEntitiesX(selEntities) : mirrorEntitiesY(selEntities);
-    } catch { return null; }
+    } catch { return selEntities; }
   }, [operations, entities]);
 
   // Reset slider whenever the toolpath depth structure changes.
@@ -1119,7 +1119,6 @@ export default function CAMCanvas() {
     if (showToolpaths && showOnionSkin) drawOnionSkin(ctx);
     drawOrigin(ctx);
     drawEntities(ctx);
-    drawPlugMirrorOverlay(ctx);
     drawPreviewEntities(ctx);
     if (showToolpaths) {
       drawToolpaths(ctx);
@@ -1208,30 +1207,11 @@ export default function CAMCanvas() {
     ctx.setLineDash([]);
   }
 
-  function drawPlugMirrorOverlay(ctx) {
-    if (!plugMirrorOverlay?.length) return;
-    ctx.strokeStyle = '#aa66ff';
-    ctx.lineWidth = 1.5;
-    ctx.setLineDash([6, 4]);
-    for (const e of plugMirrorOverlay) {
-      if (e.type !== 'polyline' || !e.vertices?.length) continue;
-      ctx.beginPath();
-      const f = w2c(e.vertices[0].x, e.vertices[0].y);
-      ctx.moveTo(f.x, f.y);
-      for (let i = 1; i < e.vertices.length; i++) {
-        const p = w2c(e.vertices[i].x, e.vertices[i].y);
-        ctx.lineTo(p.x, p.y);
-      }
-      if (e.closed) ctx.closePath();
-      ctx.stroke();
-    }
-    ctx.setLineDash([]);
-  }
-
   function drawEntities(ctx) {
     const xf = xfRef.current;
     const gd = gripDragRef.current;
-    for (const entity of entities) {
+    const entityList = plugCanvasEntities || entities;
+    for (const entity of entityList) {
       const layer = layers[entity.layer];
       if (layer && !layer.visible) continue;
 
@@ -1972,7 +1952,7 @@ export default function CAMCanvas() {
     drawSnapIndicator(ctx, cur, snapType);
   }
 
-  useEffect(() => { draw(); }, [entities, layers, operations, viewport, selectedEntityIds, hoveredEntityId, showToolpaths, showRapids, mousePos, stockConfig, zSliderPos, zLevels, showOnionSkin, tabPlacementActive, tabPlacementOpId, dogboneSelectionActive, dogboneSelectionOpId, textPlacementActive, textPlacementOpId, medialAxisPolylines, liveXf, drawPhase, refImage, previewEntities, plugMirrorOverlay]);
+  useEffect(() => { draw(); }, [entities, layers, operations, viewport, selectedEntityIds, hoveredEntityId, showToolpaths, showRapids, mousePos, stockConfig, zSliderPos, zLevels, showOnionSkin, tabPlacementActive, tabPlacementOpId, dogboneSelectionActive, dogboneSelectionOpId, textPlacementActive, textPlacementOpId, medialAxisPolylines, liveXf, drawPhase, refImage, previewEntities, plugCanvasEntities]);
 
   // Mouse events
   const onMouseDown = useCallback((e) => {
