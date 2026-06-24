@@ -2,7 +2,7 @@ import React, { useRef, useEffect, useCallback, useState, useMemo } from 'react'
 import { v4 as uuid } from 'uuid';
 import { useApp } from '../../store/AppContext';
 import { circleToPoints, arcToPoints, polylineToPoints } from '../../dxf/parser';
-import { computeAutoTabPositions } from '../../cam/toolpath';
+import { computeAutoTabPositions, mirrorEntitiesX, mirrorEntitiesY } from '../../cam/toolpath';
 
 const COLORS = {
   background: '#1a1a2e',
@@ -919,6 +919,19 @@ export default function CAMCanvas() {
   // Resolved index into zLevels (null = show all).
   const filterZIndex = zSliderPos === 0 ? null : zSliderPos - 1;
 
+  // Mirrored plug contour overlay — shown when active workspace contains a taperedplug op.
+  const plugMirrorOverlay = useMemo(() => {
+    const plugOp = operations.find(op => op.type === 'taperedplug');
+    if (!plugOp) return null;
+    const mirror = plugOp.params?.mirror ?? 'none';
+    if (mirror === 'none') return null;
+    const selEntities = entities.filter(e => plugOp.selectedIds?.includes(e.id));
+    if (!selEntities.length) return null;
+    try {
+      return mirror === 'x' ? mirrorEntitiesX(selEntities) : mirrorEntitiesY(selEntities);
+    } catch { return null; }
+  }, [operations, entities]);
+
   // Reset slider whenever the toolpath depth structure changes.
   useEffect(() => {
     setZSliderPos(0);
@@ -1106,6 +1119,7 @@ export default function CAMCanvas() {
     if (showToolpaths && showOnionSkin) drawOnionSkin(ctx);
     drawOrigin(ctx);
     drawEntities(ctx);
+    drawPlugMirrorOverlay(ctx);
     drawPreviewEntities(ctx);
     if (showToolpaths) {
       drawToolpaths(ctx);
@@ -1191,6 +1205,26 @@ export default function CAMCanvas() {
     ctx.lineWidth = 1;
     ctx.setLineDash([4, 3]);
     for (const e of previewEntities) drawEntity(ctx, e);
+    ctx.setLineDash([]);
+  }
+
+  function drawPlugMirrorOverlay(ctx) {
+    if (!plugMirrorOverlay?.length) return;
+    ctx.strokeStyle = '#aa66ff';
+    ctx.lineWidth = 1.5;
+    ctx.setLineDash([6, 4]);
+    for (const e of plugMirrorOverlay) {
+      if (e.type !== 'polyline' || !e.vertices?.length) continue;
+      ctx.beginPath();
+      const f = w2c(e.vertices[0].x, e.vertices[0].y);
+      ctx.moveTo(f.x, f.y);
+      for (let i = 1; i < e.vertices.length; i++) {
+        const p = w2c(e.vertices[i].x, e.vertices[i].y);
+        ctx.lineTo(p.x, p.y);
+      }
+      if (e.closed) ctx.closePath();
+      ctx.stroke();
+    }
     ctx.setLineDash([]);
   }
 
@@ -1938,7 +1972,7 @@ export default function CAMCanvas() {
     drawSnapIndicator(ctx, cur, snapType);
   }
 
-  useEffect(() => { draw(); }, [entities, layers, operations, viewport, selectedEntityIds, hoveredEntityId, showToolpaths, showRapids, mousePos, stockConfig, zSliderPos, zLevels, showOnionSkin, tabPlacementActive, tabPlacementOpId, dogboneSelectionActive, dogboneSelectionOpId, textPlacementActive, textPlacementOpId, medialAxisPolylines, liveXf, drawPhase, refImage, previewEntities]);
+  useEffect(() => { draw(); }, [entities, layers, operations, viewport, selectedEntityIds, hoveredEntityId, showToolpaths, showRapids, mousePos, stockConfig, zSliderPos, zLevels, showOnionSkin, tabPlacementActive, tabPlacementOpId, dogboneSelectionActive, dogboneSelectionOpId, textPlacementActive, textPlacementOpId, medialAxisPolylines, liveXf, drawPhase, refImage, previewEntities, plugMirrorOverlay]);
 
   // Mouse events
   const onMouseDown = useCallback((e) => {

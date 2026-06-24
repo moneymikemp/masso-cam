@@ -912,7 +912,7 @@ function generateThread(op, entities) {
 // fits when physically flipped over and glued in.
 // Chains LINE/ARC segments first (same as buildPocketProfiles) so the centroid is
 // computed from the closed profile, not individual segment midpoints.
-function mirrorEntitiesX(entities) {
+export function mirrorEntitiesX(entities) {
   const profiles = buildPocketProfiles(entities);
   if (!profiles.length) return entities;
 
@@ -966,7 +966,7 @@ function mirrorEntitiesX(entities) {
 
 // Mirror entities across the Y axis (reflect X around the centroid X of all profiles).
 // Same logic as mirrorEntitiesX but flips left-right instead of top-bottom.
-function mirrorEntitiesY(entities) {
+export function mirrorEntitiesY(entities) {
   const profiles = buildPocketProfiles(entities);
   if (!profiles.length) return entities;
   const cleanProfiles = profiles.map(p => stripClose([...p]));
