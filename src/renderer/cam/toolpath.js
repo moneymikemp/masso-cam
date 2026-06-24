@@ -1256,17 +1256,17 @@ function buildTaperedPasses(selected, topZ, depth, safeZ, p, warnings, stockBoun
   if (tk.enabled !== false) {
     const tkRad = Math.max(0.5, (tk.angle || 10) / 2) * Math.PI / 180;
     const tipR  = (tk.tipDia || 0.5) / 2;
-    const tkPrevR = tk.restMachining && (tk.prevDiameter || 0) > 0 ? tk.prevDiameter / 2 : 0;
     subToolpaths.push({
       name: 'Taper Cleanup', color: '#ffcc44',
-      // Share toolKey with contour when same tool, so postprocessor skips M0 between them.
       toolKey:  tk.toolId ?? 'taper',
       toolDesc: `Taper bit — tip ⌀${tk.tipDia || 0.5}mm  ${tk.angle || 10}° half-angle`,
       rpm: tk.rpm || 24000,
-      // Single Z pass at full depth — walls were established by the contour pass.
-      moves: clearFn(selected, topZ, depth, safeZ,
-        tipR, depth, tk.wallStock || 0.254, tk.feed || 1000, tk.plunge || 300,
-        tkRad, 'Taper Cleanup', warnings, tkPrevR, effectiveClipBound, 'plunge', 0, partProfiles),
+      // Single contour trace at final wall position — not a clearing pass.
+      // Reaches all profiles (including inner contours) unlike clearFn which treats
+      // inner profiles as island exclusions.
+      moves: buildTaperTrace(selected, topZ, depth, safeZ,
+        tk.feed || 1000, tk.plunge || 300, tkRad, cutSide, tipR,
+        p.sharpCornerAngle ?? 180, tk.leadInStyle || 'plunge', tk.leadInRampAngle || 3, tk.leadInArcRadius || 0, partProfiles),
     });
   }
 

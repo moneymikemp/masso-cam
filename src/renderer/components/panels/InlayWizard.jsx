@@ -281,7 +281,7 @@ export default function InlayWizard({ onClose, onGenerate, onSelectEntities, sel
 
   const taperPasses = {
     taperContour: { enabled: true, toolId: wiz.taperToolId, angle: wiz.angle, tipDia: wiz.tipDia, rpm: wiz.taperRpm, feed: wiz.taperFeed, plunge: wiz.taperPlunge },
-    taperCleanup: { enabled: true, toolId: wiz.taperToolId, angle: wiz.angle, tipDia: wiz.tipDia, rpm: wiz.taperRpm, feed: wiz.taperFeed, plunge: wiz.taperPlunge, wallStock: wiz.cleanupWallStock },
+    taperCleanup: { enabled: true, toolId: wiz.taperToolId, angle: wiz.angle, tipDia: wiz.tipDia, rpm: wiz.taperRpm, feed: wiz.taperFeed, plunge: wiz.taperPlunge, wallStock: wiz.cleanupWallStock, restMachining: true, prevDiameter: isInch ? 0.0625 * MM : 1.5875 },
   };
 
   function buildPocketPasses() {

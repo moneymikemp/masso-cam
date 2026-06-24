@@ -163,6 +163,7 @@ export default function App() {
   const [view3d, setView3d] = useState(false);
   const [showArrayModal, setShowArrayModal] = useState(false);
   const [offsetModal, setOffsetModal] = useState(null); // null | { distance: '', direction: 'both' }
+  const [wcsPopover, setWcsPopover] = useState(null); // workspace id whose settings are open
   const refImageElRef = useRef(null); // cached HTMLImageElement for tracing
 
   useEffect(() => {
@@ -303,6 +304,26 @@ export default function App() {
     }
   }, [entities, state.layers, operations, dispatch]);
 
+  function applyWCSOffset(ops, ws) {
+    const ox = ws.wcsX || 0, oy = ws.wcsY || 0, oz = ws.wcsZ || 0;
+    if (!ox && !oy && !oz) return ops;
+    return ops.map(op => {
+      if (!op.toolpath?.moves?.length) return op;
+      return {
+        ...op,
+        toolpath: {
+          ...op.toolpath,
+          moves: op.toolpath.moves.map(m => ({
+            ...m,
+            ...(m.x !== undefined && { x: +(m.x - ox).toFixed(4) }),
+            ...(m.y !== undefined && { y: +(m.y - oy).toFixed(4) }),
+            ...(m.z !== undefined && { z: +(m.z - oz).toFixed(4) }),
+          })),
+        },
+      };
+    });
+  }
+
   const exportGcode = useCallback(async () => {
     const enabled = operations.filter(op => op.enabled && op.toolpath?.moves?.length > 0);
     if (enabled.length === 0) {
@@ -322,6 +343,7 @@ export default function App() {
 
     // Group enabled ops by workspace, preserving workspace order.
     const wsGroups = (workspaces || []).map(ws => ({
+      ws,
       name: ws.name,
       slug: slugify(ws.name),
       ops: enabled.filter(op => (op.workspaceId ?? 'default') === ws.id),
@@ -330,18 +352,28 @@ export default function App() {
     // Fall back to ungrouped if no workspace info (old projects).
     const isMultiWorkspace = wsGroups.length > 1;
 
+    const wcsHeader = (ws) => {
+      const ox = ws.wcsX || 0, oy = ws.wcsY || 0, oz = ws.wcsZ || 0;
+      if (!ox && !oy && !oz) return '';
+      return `; WCS Offset: X${ox.toFixed(4)} Y${oy.toFixed(4)} Z${oz.toFixed(4)}\n; Zero your machine at that canvas position before running this file.\n`;
+    };
+
     // Build the complete list of {seg, suffix, gcode} to save.
     let fileList;
     if (isMultiWorkspace) {
       fileList = [];
-      for (const { slug, ops } of wsGroups) {
-        const groups = generateGcodeByTool(ops, toolsList, gcfg);
-        for (const g of groups) fileList.push({ seg: slug, suffix: g.suffix, gcode: g.gcode });
+      for (const { ws, slug, ops } of wsGroups) {
+        const adjusted = applyWCSOffset(ops, ws);
+        const groups = generateGcodeByTool(adjusted, toolsList, gcfg);
+        const hdr = wcsHeader(ws);
+        for (const g of groups) fileList.push({ seg: slug, suffix: g.suffix, gcode: hdr + g.gcode });
       }
     } else {
-      const ops = wsGroups[0]?.ops ?? enabled;
-      const groups = generateGcodeByTool(ops, toolsList, gcfg);
-      fileList = groups.map(g => ({ seg: '', suffix: g.suffix, gcode: g.gcode }));
+      const { ws, ops } = wsGroups[0] ?? { ws: { wcsX: 0, wcsY: 0, wcsZ: 0 }, ops: enabled };
+      const adjusted = applyWCSOffset(ops, ws);
+      const groups = generateGcodeByTool(adjusted, toolsList, gcfg);
+      const hdr = wcsHeader(ws);
+      fileList = groups.map(g => ({ seg: '', suffix: g.suffix, gcode: hdr + g.gcode }));
     }
 
     const isMulti = fileList.length > 1 || isMultiWorkspace;
@@ -628,42 +660,127 @@ export default function App() {
       </div>
 
       {/* Workspace Tabs */}
-      <div style={{ display:'flex', alignItems:'flex-end', background:'#0a0a18', borderBottom:'1px solid #2a2a50', paddingLeft:8, flexShrink:0, minHeight:28 }}>
-        {(workspaces || []).map(ws => {
-          const isActive = ws.id === activeWorkspaceId;
-          const wsOpCount = operations.filter(op => (op.workspaceId ?? 'default') === ws.id).length;
+      <div style={{ position:'relative', flexShrink:0 }}>
+        <div style={{ display:'flex', alignItems:'flex-end', background:'#0a0a18', borderBottom:'1px solid #2a2a50', paddingLeft:8, minHeight:28 }}>
+          {(workspaces || []).map(ws => {
+            const isActive = ws.id === activeWorkspaceId;
+            const wsOpCount = operations.filter(op => (op.workspaceId ?? 'default') === ws.id).length;
+            const hasWCS = (ws.wcsX || 0) !== 0 || (ws.wcsY || 0) !== 0 || (ws.wcsZ || 0) !== 0;
+            return (
+              <div key={ws.id}
+                title={`${ws.name} · ${wsOpCount} operation${wsOpCount !== 1 ? 's' : ''}${hasWCS ? ` · WCS offset active` : ''}`}
+                onClick={() => dispatch({ type:'SET_ACTIVE_WORKSPACE', payload:ws.id })}
+                style={{
+                  display:'flex', alignItems:'center', gap:5,
+                  padding:'4px 10px 3px', cursor:'pointer', userSelect:'none',
+                  fontSize:11, fontWeight: isActive ? 600 : 400,
+                  color: isActive ? '#ccccff' : '#555577',
+                  background: isActive ? '#1a1a38' : '#0d0d20',
+                  borderLeft:  `1px solid ${isActive ? '#2a2a50' : '#1a1a30'}`,
+                  borderRight: `1px solid ${isActive ? '#2a2a50' : '#1a1a30'}`,
+                  borderTop:   `2px solid ${isActive ? (ws.color || '#5555cc') : 'transparent'}`,
+                  borderBottom: isActive ? '1px solid #1a1a38' : '1px solid transparent',
+                  marginBottom: isActive ? -1 : 0,
+                }}>
+                <span style={{ width:6, height:6, borderRadius:'50%', background: ws.color || '#5555cc', flexShrink:0 }} />
+                {ws.name}
+                {wsOpCount > 0 && <span style={{ fontSize:9, color: isActive ? '#5555aa' : '#333355' }}>({wsOpCount})</span>}
+                {hasWCS && <span title="WCS offset active" style={{ fontSize:9, color:'#6688ff' }}>⊕</span>}
+                <span
+                  title="Workspace settings (WCS offset, name)"
+                  style={{ color: wcsPopover === ws.id ? '#8888ff' : '#333355', fontSize:10, lineHeight:1, paddingLeft:1, cursor:'pointer' }}
+                  onClick={e => { e.stopPropagation(); setWcsPopover(v => v === ws.id ? null : ws.id); }}>⚙</span>
+                {(workspaces || []).length > 1 && (
+                  <span style={{ color:'#333355', fontSize:13, lineHeight:1, marginLeft:1, paddingLeft:2 }}
+                    onClick={e => { e.stopPropagation(); dispatch({ type:'DELETE_WORKSPACE', payload:ws.id }); }}>×</span>
+                )}
+              </div>
+            );
+          })}
+          <button
+            title="Add workspace"
+            style={{ marginLeft:4, padding:'3px 7px', fontSize:12, background:'none', border:'none', color:'#333355', cursor:'pointer', lineHeight:1 }}
+            onClick={() => dispatch({ type:'ADD_WORKSPACE', payload:{ name:`Workspace ${(workspaces||[]).length + 1}`, color:'#5555cc' } })}>
+            +
+          </button>
+        </div>
+
+        {/* WCS settings popover */}
+        {wcsPopover && (() => {
+          const ws = (workspaces || []).find(w => w.id === wcsPopover);
+          if (!ws) return null;
+          const d = v => isInch ? +(v / 25.4).toFixed(5) : +v.toFixed(4);
+          const m = v => isInch ? v * 25.4 : v;
+          const unit = isInch ? 'in' : 'mm';
+          const inpS = { width:80, background:'#0d0d20', border:'1px solid #2a2a50', color:'#ccccee', borderRadius:3, padding:'3px 6px', fontSize:11 };
+          const rowS = { display:'flex', alignItems:'center', gap:8, marginBottom:5 };
+          const lblS = { fontSize:10, color:'#8888aa', width:50, flexShrink:0 };
+
+          function autoCenterWCS() {
+            const wsOps = operations.filter(op => (op.workspaceId ?? 'default') === ws.id);
+            const ids = [...new Set(wsOps.flatMap(op => op.selectedIds || []))];
+            const ents = entities.filter(e => ids.includes(e.id));
+            if (!ents.length) return;
+            let minX = Infinity, maxX = -Infinity, minY = Infinity, maxY = -Infinity;
+            for (const e of ents) {
+              if (e.type === 'line') {
+                for (const p of [e.start, e.end]) { minX = Math.min(minX, p.x); maxX = Math.max(maxX, p.x); minY = Math.min(minY, p.y); maxY = Math.max(maxY, p.y); }
+              } else if (e.type === 'circle') {
+                minX = Math.min(minX, e.center.x - e.radius); maxX = Math.max(maxX, e.center.x + e.radius);
+                minY = Math.min(minY, e.center.y - e.radius); maxY = Math.max(maxY, e.center.y + e.radius);
+              } else if (e.type === 'arc') {
+                minX = Math.min(minX, e.center.x - e.radius); maxX = Math.max(maxX, e.center.x + e.radius);
+                minY = Math.min(minY, e.center.y - e.radius); maxY = Math.max(maxY, e.center.y + e.radius);
+              } else if (e.type === 'polyline' && e.vertices?.length) {
+                for (const v of e.vertices) { minX = Math.min(minX, v.x); maxX = Math.max(maxX, v.x); minY = Math.min(minY, v.y); maxY = Math.max(maxY, v.y); }
+              }
+            }
+            if (!isFinite(minX)) return;
+            dispatch({ type:'UPDATE_WORKSPACE', payload:{ id:ws.id, wcsX: +((minX + maxX) / 2).toFixed(4), wcsY: +((minY + maxY) / 2).toFixed(4) } });
+          }
+
           return (
-            <div key={ws.id}
-              title={`${ws.name} · ${wsOpCount} operation${wsOpCount !== 1 ? 's' : ''}`}
-              onClick={() => dispatch({ type:'SET_ACTIVE_WORKSPACE', payload:ws.id })}
-              style={{
-                display:'flex', alignItems:'center', gap:5,
-                padding:'4px 10px 3px', cursor:'pointer', userSelect:'none',
-                fontSize:11, fontWeight: isActive ? 600 : 400,
-                color: isActive ? '#ccccff' : '#555577',
-                background: isActive ? '#1a1a38' : '#0d0d20',
-                borderLeft:  `1px solid ${isActive ? '#2a2a50' : '#1a1a30'}`,
-                borderRight: `1px solid ${isActive ? '#2a2a50' : '#1a1a30'}`,
-                borderTop:   `2px solid ${isActive ? (ws.color || '#5555cc') : 'transparent'}`,
-                borderBottom: isActive ? '1px solid #1a1a38' : '1px solid transparent',
-                marginBottom: isActive ? -1 : 0,
-              }}>
-              <span style={{ width:6, height:6, borderRadius:'50%', background: ws.color || '#5555cc', flexShrink:0 }} />
-              {ws.name}
-              {wsOpCount > 0 && <span style={{ fontSize:9, color: isActive ? '#5555aa' : '#333355' }}>({wsOpCount})</span>}
-              {(workspaces || []).length > 1 && (
-                <span style={{ color:'#333355', fontSize:13, lineHeight:1, marginLeft:1, paddingLeft:2 }}
-                  onClick={e => { e.stopPropagation(); dispatch({ type:'DELETE_WORKSPACE', payload:ws.id }); }}>×</span>
-              )}
+            <div style={{ position:'absolute', top:'100%', left:0, zIndex:500, background:'#1a1a38', border:'1px solid #3a3a70', borderRadius:6, padding:'12px 14px', minWidth:300, boxShadow:'0 4px 20px rgba(0,0,0,0.6)' }}
+              onClick={e => e.stopPropagation()}>
+              <div style={{ display:'flex', justifyContent:'space-between', alignItems:'center', marginBottom:10 }}>
+                <span style={{ fontSize:11, fontWeight:700, color:'#8888cc' }}>Workspace Settings</span>
+                <button style={{ background:'none', border:'none', color:'#555577', cursor:'pointer', fontSize:13 }} onClick={() => setWcsPopover(null)}>✕</button>
+              </div>
+              <div style={rowS}>
+                <span style={lblS}>Name</span>
+                <input style={{ ...inpS, flex:1, width:'auto' }} value={ws.name}
+                  onChange={e => dispatch({ type:'UPDATE_WORKSPACE', payload:{ id:ws.id, name:e.target.value } })} />
+              </div>
+              <div style={{ fontSize:10, color:'#5555aa', textTransform:'uppercase', letterSpacing:1, margin:'10px 0 6px', borderBottom:'1px solid #1a1a38', paddingBottom:3 }}>
+                WCS Offset — G-code origin
+              </div>
+              <div style={{ fontSize:10, color:'#555577', marginBottom:8, lineHeight:1.5 }}>
+                Subtracts this point from all coordinates on export. Set to where your machine zero will be on this piece.
+              </div>
+              <div style={rowS}>
+                <span style={lblS}>X</span>
+                <input type="number" style={inpS} step={isInch ? 0.001 : 0.01} value={d(ws.wcsX || 0)}
+                  onChange={e => { const v = parseFloat(e.target.value); if (!isNaN(v)) dispatch({ type:'UPDATE_WORKSPACE', payload:{ id:ws.id, wcsX: m(v) } }); }} />
+                <span style={lblS}>Y</span>
+                <input type="number" style={inpS} step={isInch ? 0.001 : 0.01} value={d(ws.wcsY || 0)}
+                  onChange={e => { const v = parseFloat(e.target.value); if (!isNaN(v)) dispatch({ type:'UPDATE_WORKSPACE', payload:{ id:ws.id, wcsY: m(v) } }); }} />
+                <span style={{ fontSize:10, color:'#555577' }}>{unit}</span>
+              </div>
+              <div style={rowS}>
+                <span style={lblS}>Z</span>
+                <input type="number" style={inpS} step={isInch ? 0.001 : 0.01} value={d(ws.wcsZ || 0)}
+                  onChange={e => { const v = parseFloat(e.target.value); if (!isNaN(v)) dispatch({ type:'UPDATE_WORKSPACE', payload:{ id:ws.id, wcsZ: m(v) } }); }} />
+                <span style={{ fontSize:10, color:'#555577' }}>{unit}</span>
+              </div>
+              <div style={{ display:'flex', gap:6, marginTop:10 }}>
+                <button style={{ flex:1, padding:'5px 0', background:'#22224a', border:'1px solid #3a3a60', color:'#9999cc', borderRadius:3, fontSize:11, cursor:'pointer' }}
+                  onClick={autoCenterWCS}>Auto-center on geometry</button>
+                <button style={{ padding:'5px 10px', background:'#2a1a1a', border:'1px solid #5a2a2a', color:'#cc6666', borderRadius:3, fontSize:11, cursor:'pointer' }}
+                  onClick={() => dispatch({ type:'UPDATE_WORKSPACE', payload:{ id:ws.id, wcsX:0, wcsY:0, wcsZ:0 } })}>Clear</button>
+              </div>
             </div>
           );
-        })}
-        <button
-          title="Add workspace"
-          style={{ marginLeft:4, padding:'3px 7px', fontSize:12, background:'none', border:'none', color:'#333355', cursor:'pointer', lineHeight:1 }}
-          onClick={() => dispatch({ type:'ADD_WORKSPACE', payload:{ name:`Workspace ${(workspaces||[]).length + 1}`, color:'#5555cc' } })}>
-          +
-        </button>
+        })()}
       </div>
 
       <div style={S.main}>

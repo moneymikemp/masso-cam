@@ -791,7 +791,7 @@ export default function OperationParams({ op, tools, operations = [], onChange }
             </Field>
             <CheckField label="Rest Machining" value={!!tk.restMachining} onChange={v => setPass('taperCleanup', 'restMachining', v)} tip="Only cuts areas the previous (larger) tool couldn't reach." />
             {tk.restMachining && <Field label="Prev Tool Dia" unit={distUnit} tip="Diameter of the previous tool whose leftover material this pass will clean up.">
-              <NumInput value={toDisp(tk.prevDiameter ?? 6.35)} onChange={v => setPass('taperCleanup', 'prevDiameter', toMM(v))} min={isInch ? 0.004 : 0.1} step={isInch ? 0.001 : 0.01} />
+              <NumInput value={toDisp(tk.prevDiameter ?? 1.5875)} onChange={v => setPass('taperCleanup', 'prevDiameter', toMM(v))} min={isInch ? 0.004 : 0.1} step={isInch ? 0.001 : 0.01} />
             </Field>}
           </>}
 

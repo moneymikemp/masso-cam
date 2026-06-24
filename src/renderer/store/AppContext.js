@@ -64,7 +64,7 @@ const initialState = {
   hoveredEntityId: null,
 
   // Workspaces (named setups — each has its own operations)
-  workspaces: [{ id: 'default', name: 'Default', color: '#5555cc' }],
+  workspaces: [{ id: 'default', name: 'Default', color: '#5555cc', wcsX: 0, wcsY: 0, wcsZ: 0 }],
   activeWorkspaceId: 'default',
 
   // Operations
@@ -195,7 +195,7 @@ function reducer(state, action) {
 
     // Workspaces
     case 'ADD_WORKSPACE': {
-      const ws = { id: uuid(), name: 'Workspace', color: '#5555cc', ...action.payload };
+      const ws = { id: uuid(), name: 'Workspace', color: '#5555cc', wcsX: 0, wcsY: 0, wcsZ: 0, ...action.payload };
       return { ...state, workspaces: [...state.workspaces, ws], activeWorkspaceId: ws.id };
     }
     case 'SET_ACTIVE_WORKSPACE':
@@ -209,6 +209,12 @@ function reducer(state, action) {
       );
       const newActiveId = state.activeWorkspaceId === action.payload ? fallbackId : state.activeWorkspaceId;
       return { ...state, workspaces: remaining, activeWorkspaceId: newActiveId, operations };
+    }
+    case 'UPDATE_WORKSPACE': {
+      const workspaces = state.workspaces.map(w =>
+        w.id === action.payload.id ? { ...w, ...action.payload } : w
+      );
+      return { ...state, workspaces };
     }
     case 'RENAME_WORKSPACE': {
       const workspaces = state.workspaces.map(w =>
@@ -520,9 +526,10 @@ function reducer(state, action) {
     case 'SET_DIRTY':        return { ...state, dirty: action.payload };
     case 'LOAD_PROJECT': {
       const p = action.payload;
-      const workspaces = p.workspaces?.length
+      const rawWorkspaces = p.workspaces?.length
         ? p.workspaces
         : [{ id: 'default', name: 'Default', color: '#5555cc' }];
+      const workspaces = rawWorkspaces.map(w => ({ wcsX: 0, wcsY: 0, wcsZ: 0, ...w }));
       const operations = (p.operations || []).map(op => ({ workspaceId: 'default', ...op }));
       return {
         ...state,
