@@ -1519,20 +1519,16 @@ function buildTaperTrace(entities, topZ, depth, safeZ, feedRate, plungeRate, tcR
   const isOutside = cutSide === 'outside';
   const profiles = prebuiltProfiles ?? buildPocketProfiles(entities);
 
-  // Identify the outermost profile so inner profiles (holes in a ring boss) can be
-  // traced from inside the hole rather than from outside into the boss ring.
+  // Identify the outermost profile. Ring-boss counters (nested inside the outer profile)
+  // get a flipped trace offset so the taper approaches from inside the hole. Separate
+  // bosses (two circles apart) are NOT nested and are traced from the outside like the
+  // outer profile — their offset must not be flipped.
   const outerProfileRef = profiles.length > 1
     ? [...profiles].sort((a, b) => Math.abs(polygonArea(b)) - Math.abs(polygonArea(a)))[0]
     : profiles[0];
+  const outerProfileCCW = isClockwise(outerProfileRef) ? [...outerProfileRef].reverse() : outerProfileRef;
 
   for (const rawProfile of profiles) {
-    // For inner profiles of a plug (ring boss holes), flip the trace offset so the
-    // taper bit approaches from inside the hole rather than through the boss ring.
-    // If the inward offset collapses (hole too small for the taper), skip the profile
-    // instead of falling back to the raw boundary (which would cut the boss ring).
-    const isInnerProfile = profiles.length > 1 && rawProfile !== outerProfileRef;
-    const profileTraceOffset = (isInnerProfile && isOutside) ? -traceOffset : traceOffset;
-
     // Normalise winding to CCW before offsetting.  mirrorEntitiesX Y-flips the
     // polygon, reversing its winding to CW.  Clipper's ClipperOffset treats CW
     // paths as holes and applies the delta in the opposite direction, so a CW
@@ -1543,13 +1539,24 @@ function buildTaperTrace(entities, topZ, depth, safeZ, feedRate, plungeRate, tcR
     if (rawStripped.length < 3) continue;
     const rawCCW = isClockwise(rawStripped) ? [...rawStripped].reverse() : rawStripped;
 
+    // Detect ring-boss counter: an inner profile whose midpoint lies inside the outer profile.
+    // Separate bosses (two circles apart) fail this test and use the standard outward offset.
+    const isInnerProfile = profiles.length > 1 && rawProfile !== outerProfileRef;
+    const testPt = rawCCW[Math.floor(rawCCW.length / 2)];
+    const isNestedInner = isInnerProfile && isOutside && !!testPt && pointInPolygon(testPt, outerProfileCCW);
+
+    // Ring-boss counters: flip offset so the taper approaches from inside the hole.
+    // All other profiles (outer profile + separate bosses): standard outward offset.
+    const profileTraceOffset = isNestedInner ? -traceOffset : traceOffset;
+
     const offsetResult = profileTraceOffset !== 0
       ? offsetPolyline(rawCCW, profileTraceOffset, true)[0]
       : null;
-    // Inner plug profiles: if inward offset collapses skip rather than fall back to
-    // the boundary (boundary fallback traces the boss ring wall, cutting into the boss).
-    // Outer profiles: fall back to rawCCW so the trace is never lost.
-    const traceRaw = offsetResult ?? (isInnerProfile && isOutside ? null : rawCCW);
+    // Nested ring-boss counters: if the inward offset collapses (hole too small for the taper),
+    // skip rather than fall back to the raw boundary — the boundary fallback would trace the
+    // boss ring wall and cut into the boss material.
+    // All other profiles: fall back to rawCCW so the trace is never lost.
+    const traceRaw = offsetResult ?? (isNestedInner ? null : rawCCW);
     if (!traceRaw || traceRaw.length < 2) continue;
     const ptsRaw = stripClose([...traceRaw]);
     if (ptsRaw.length < 3) continue;
@@ -1743,62 +1750,108 @@ function buildPlugClearing(entities, topZ, depth, safeZ, toolR, depthPerPass, wa
     ];
   }
 
-  // Rest-machining: only clear the strip between outset and prevOutset (the band the
-  // previous larger tool could not reach because it was too close to the plug wall).
   const prevOutset = prevToolR > 0 ? prevToolR + wallLeave : null;
 
-  // Expand rings outward from the profile, clip each ring to clipBound.
-  // This matches the 2D Pocket outside-boss loop exactly.
-  const clearPasses = [];
-  for (let i = 0, dist = outset; i < 200; i++, dist += step) {
-    if (prevOutset !== null && dist >= prevOutset) break;
+  if (profiles.length === 1) {
+    // Single boss: expand rings outward from the profile boundary, clip each to the
+    // stock boundary. More efficient than stock-inward clearing for a lone boss.
+    const clearPasses = [];
+    for (let i = 0, dist = outset; i < 200; i++, dist += step) {
+      if (prevOutset !== null && dist >= prevOutset) break;
 
-    const rawRings = offsetPolyline(outerProfile, -dist, true); // negative = expand outward
-    let any = false;
-    for (const rawRing of rawRings) {
-      if (!rawRing || rawRing.length < 3 || polygonArea(rawRing) < step * step * 0.5) continue;
-      const ringPts = stripClose([...rawRing]);
-      const clipped = clipPolygonToRegion(ringPts, clipBound);
-      for (const c of clipped) {
-        if (!c || c.length < 3) continue;
-        clearPasses.push([...c, c[0]]);
-        any = true;
+      const rawRings = offsetPolyline(outerProfile, -dist, true); // negative = expand outward
+      let any = false;
+      for (const rawRing of rawRings) {
+        if (!rawRing || rawRing.length < 3 || polygonArea(rawRing) < step * step * 0.5) continue;
+        const ringPts = stripClose([...rawRing]);
+        const clipped = clipPolygonToRegion(ringPts, clipBound);
+        for (const c of clipped) {
+          if (!c || c.length < 3) continue;
+          clearPasses.push([...c, c[0]]);
+          any = true;
+        }
+      }
+      if (!any) break;
+    }
+
+    if (!clearPasses.length) {
+      warnings.push(`${passLabel}: no outside clearing passes generated`);
+      return moves;
+    }
+
+    const helixR = leadInArcRadius || toolR * 0.5;
+    moves.push(...buildLeadIn(clearPasses[0], topZ, zPasses[0], safeZ, leadInStyle, 3, helixR, feedRate, plungeRate, 'outside'));
+
+    for (const z of zPasses) {
+      for (const pass of clearPasses) {
+        if (!pass || pass.length < 2) continue;
+        moves.push({ type: 'rapid', x: pass[0].x, y: pass[0].y, z: z + 0.5 });
+        moves.push({ type: 'feed',  x: pass[0].x, y: pass[0].y, z, f: plungeRate });
+        for (let i = 1; i < pass.length; i++) {
+          moves.push({ type: 'feed', x: pass[i].x, y: pass[i].y, z, f: feedRate });
+        }
       }
     }
-    if (!any) break; // expansion has moved entirely outside clipBound
-  }
-
-  if (!clearPasses.length) {
-    warnings.push(`${passLabel}: no outside clearing passes generated`);
+    moves.push({ type: 'rapid', x: outerProfile[0].x, y: outerProfile[0].y, z: safeZ });
     return moves;
   }
 
-  const helixR = leadInArcRadius || toolR * 0.5;
-  moves.push(...buildLeadIn(clearPasses[0], topZ, zPasses[0], safeZ, leadInStyle, 3, helixR, feedRate, plungeRate, 'outside'));
+  // Multiple boss profiles: sweep inward from the stock boundary treating every boss as
+  // an island exclusion zone. This handles both topologies without any topology detection
+  // in the clearing loop:
+  //   - Separate bosses (two circles apart): clearing fills the stock area, stops near
+  //     each boss independently — neither boss is cut through.
+  //   - Ring bosses (letter with counter): clearing stops outside the outer ring; the
+  //     interior hole is pocket-cleared separately below.
+  const inset = toolR + wallLeave;
+  const allBossExclusions = profiles.map(prof => {
+    const ccw = isClockwise(prof) ? [...prof].reverse() : prof;
+    const expanded = offsetPolyline(ccw, -inset, true)[0];
+    return (expanded && expanded.length >= 3) ? expanded : ccw;
+  });
 
-  for (const z of zPasses) {
-    for (const pass of clearPasses) {
-      if (!pass || pass.length < 2) continue;
-      moves.push({ type: 'rapid', x: pass[0].x, y: pass[0].y, z: z + 0.5 });
-      moves.push({ type: 'feed',  x: pass[0].x, y: pass[0].y, z, f: plungeRate });
-      for (let i = 1; i < pass.length; i++) {
-        moves.push({ type: 'feed', x: pass[i].x, y: pass[i].y, z, f: feedRate });
+  const clipBoundaryCCW = isClockwise(clipBound) ? [...clipBound].reverse() : [...clipBound];
+  const stockBoundaryInset = offsetPolyline(clipBoundaryCCW, toolR, true)[0];
+
+  if (!stockBoundaryInset || stockBoundaryInset.length < 3) {
+    warnings.push(`${passLabel}: stock boundary too small for multi-boss clearing`);
+    return moves;
+  }
+
+  const multiClearPasses = prevToolR > 0
+    ? generateRestMachiningPasses(clipBoundaryCCW, toolR, prevToolR, 0.45, allBossExclusions)
+    : generatePocketOffsets(stockBoundaryInset, toolR, 0.45, allBossExclusions);
+
+  if (multiClearPasses.length) {
+    const helixR = leadInArcRadius || toolR * 0.5;
+    moves.push(...buildLeadIn(multiClearPasses[0], topZ, zPasses[0], safeZ, leadInStyle, 3, helixR, feedRate, plungeRate, 'outside'));
+    for (const z of zPasses) {
+      for (const pass of multiClearPasses) {
+        if (!pass || pass.length < 2) continue;
+        moves.push({ type: 'rapid', x: pass[0].x, y: pass[0].y, z: z + 0.5 });
+        moves.push({ type: 'feed',  x: pass[0].x, y: pass[0].y, z, f: plungeRate });
+        for (let i = 1; i < pass.length; i++) {
+          moves.push({ type: 'feed', x: pass[i].x, y: pass[i].y, z, f: feedRate });
+        }
       }
     }
+  } else {
+    warnings.push(`${passLabel}: no multi-boss clearing passes generated`);
   }
-  moves.push({ type: 'rapid', x: outerProfile[0].x, y: outerProfile[0].y, z: safeZ });
 
-  // Inner profiles = holes in the boss (counters of a ring-shaped letter).
-  // Pocket-clear each hole independently so the endmill removes material from
-  // inside each enclosed hole before the taper bit traces the inner wall.
+  // Hole-clear any inner profiles nested inside the outer profile (ring-boss counters like
+  // letter "O"). Separate bosses (two circles apart) won't pass the pointInPolygon test.
   for (const innerProfRaw of profiles.slice(1)) {
     const innerProfile = isClockwise(innerProfRaw) ? [...innerProfRaw].reverse() : innerProfRaw;
-    const holeMoves = buildPocketClearing(
-      [], topZ, depth, safeZ, toolR, depthPerPass, wallStock,
-      feedRate, plungeRate, taperRad, passLabel, warnings, prevToolR,
-      null, leadInStyle, leadInArcRadius, [innerProfile]
-    );
-    moves.push(...holeMoves);
+    const testPt = innerProfile[Math.floor(innerProfile.length / 2)];
+    if (testPt && pointInPolygon(testPt, outerProfile)) {
+      const holeMoves = buildPocketClearing(
+        [], topZ, depth, safeZ, toolR, depthPerPass, wallStock,
+        feedRate, plungeRate, taperRad, passLabel, warnings, prevToolR,
+        null, leadInStyle, leadInArcRadius, [innerProfile]
+      );
+      moves.push(...holeMoves);
+    }
   }
 
   return moves;
