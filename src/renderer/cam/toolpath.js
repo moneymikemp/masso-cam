@@ -1189,7 +1189,25 @@ function generateTaperedPlug(op, entities, context = {}) {
   // Raise topZ so the plug engages the pocket walls fractionally higher,
   // leaving a fitTolerance gap uniformly around the perimeter.
   const plugTopZ = (p.topZ ?? 0) + (p.fitTolerance || 0.127) / Math.tan(wallRad);
-  const stockBound = getStockBoundary(context, op, context.allEntities);
+
+  // Build clip boundary: per-op stock dimensions (centered on geometry) take precedence
+  // over the global stock panel. This lets each plug specify its own blank size.
+  let stockBound;
+  if (p.stockW > 0 || p.stockH > 0) {
+    const b = getEntityBounds(selected);
+    const cx = (b.minX + b.maxX) / 2;
+    const cy = (b.minY + b.maxY) / 2;
+    const hw = (p.stockW > 0 ? p.stockW : (b.maxX - b.minX) * 3) / 2;
+    const hh = (p.stockH > 0 ? p.stockH : (b.maxY - b.minY) * 3) / 2;
+    // CCW rectangle
+    stockBound = [
+      { x: cx - hw, y: cy - hh }, { x: cx + hw, y: cy - hh },
+      { x: cx + hw, y: cy + hh }, { x: cx - hw, y: cy + hh },
+    ];
+  } else {
+    stockBound = getStockBoundary(context, op, context.allEntities);
+  }
+
   // Default cutSide for plug is 'outside'; the UI displays this default but only
   // writes p.cutSide when the user explicitly changes the dropdown, so p.cutSide
   // may be undefined on operations created before the field existed.
