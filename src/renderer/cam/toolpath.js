@@ -1770,6 +1770,21 @@ function buildPlugClearing(entities, topZ, depth, safeZ, toolR, depthPerPass, wa
     }
   }
   moves.push({ type: 'rapid', x: outerProfile[0].x, y: outerProfile[0].y, z: safeZ });
+
+  // Inner profiles = holes in the boss ring (e.g. the bowl of a letter "P").
+  // Each hole needs pocket-style clearing (inward from the hole boundary),
+  // not boss-style clearing (outward). Treat each inner profile as an independent pocket.
+  const innerProfiles = profiles.slice(1);
+  for (const innerProfRaw of innerProfiles) {
+    const innerProfile = isClockwise(innerProfRaw) ? [...innerProfRaw].reverse() : innerProfRaw;
+    const innerMoves = buildPocketClearing(
+      [], topZ, depth, safeZ, toolR, depthPerPass, wallStock,
+      feedRate, plungeRate, taperRad, passLabel, warnings, prevToolR,
+      null, leadInStyle, leadInArcRadius, [innerProfile]
+    );
+    moves.push(...innerMoves);
+  }
+
   return moves;
 }
 
