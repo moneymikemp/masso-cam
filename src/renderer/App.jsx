@@ -490,16 +490,18 @@ export default function App() {
     }
   }, [getProject, state.projectPath, dispatch]);
 
-  function handleInlayGenerate(pocketOp, plugOp) {
+  function handleInlayGenerate(pocketOp, plugOps) {
     const pocketWsId = uuid();
-    const plugWsId   = uuid();
     dispatch({ type: 'ADD_WORKSPACE', payload: { id: pocketWsId, name: pocketOp.name, color: '#1a5a2a' } });
-    dispatch({ type: 'ADD_WORKSPACE', payload: { id: plugWsId,   name: plugOp.name,   color: '#1a2a5a' } });
     dispatch({ type: 'ADD_OPERATION', payload: { ...pocketOp, workspaceId: pocketWsId } });
-    dispatch({ type: 'ADD_OPERATION', payload: { ...plugOp,   workspaceId: plugWsId   } });
+    for (const plugOp of plugOps) {
+      const plugWsId = uuid();
+      dispatch({ type: 'ADD_WORKSPACE', payload: { id: plugWsId, name: plugOp.name, color: '#1a2a5a' } });
+      dispatch({ type: 'ADD_OPERATION', payload: { ...plugOp, workspaceId: plugWsId } });
+    }
     dispatch({ type: 'SET_ACTIVE_WORKSPACE', payload: pocketWsId });
     dispatch({ type: 'SET_PANEL_TAB', payload: 'operations' });
-    dispatch({ type: 'SET_STATUS', payload: `Inlay wizard: created "${pocketOp.name}" and "${plugOp.name}"` });
+    dispatch({ type: 'SET_STATUS', payload: `Inlay: Pocket + ${plugOps.length} plug workspace${plugOps.length > 1 ? 's' : ''} created` });
   }
 
   const enabledOpsCount = operations.filter(o => o.enabled).length;
@@ -553,6 +555,7 @@ export default function App() {
         <InlayWizard
           onClose={() => setModal(null)}
           onGenerate={handleInlayGenerate}
+          onSelectEntities={ids => dispatch({ type: 'SELECT_ENTITIES', payload: ids })}
           selectedEntityIds={selectedEntityIds}
           entities={entities}
           tools={state.tools || []}

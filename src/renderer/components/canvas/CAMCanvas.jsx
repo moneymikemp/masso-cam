@@ -2128,13 +2128,12 @@ export default function CAMCanvas() {
     if (e.button === 0) {
       const hit = findEntityAt(world, 10 / viewport.zoom);
       if (hit) {
-        if (e.ctrlKey || e.shiftKey) {
-          dispatch({ type: 'TOGGLE_ENTITY_SELECT', payload: hit.id });
-        } else if (selectedEntityIds.includes(hit.id) && selectedEntityIds.length > 0) {
+        if (selectedEntityIds.includes(hit.id) && selectedEntityIds.length > 0 && !e.ctrlKey && !e.shiftKey) {
           // Click on already-selected entity → start move drag
           startDrag(e, 'move', {});
         } else {
-          dispatch({ type: 'SELECT_ENTITIES', payload: [hit.id] });
+          // Click any entity: toggle in/out of selection (additive by default)
+          dispatch({ type: 'TOGGLE_ENTITY_SELECT', payload: hit.id });
         }
       } else if (!e.ctrlKey) {
         dispatch({ type: 'SELECT_ENTITIES', payload: [] });

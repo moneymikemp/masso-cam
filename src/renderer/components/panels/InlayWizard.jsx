@@ -10,7 +10,7 @@ const PRESET_KEYS = [
   'plugDetailEnabled','plugDetailToolId','plugDetailDiameter','plugDetailRpm','plugDetailFeed','plugDetailPlunge','plugDetailWallStock',
   'plugBulkEnabled','plugBulkToolId','plugBulkDiameter','plugBulkRpm','plugBulkFeed','plugBulkPlunge','plugBulkWallStock',
   'pocketDepth','pocketTopZ','pocketSafeZ','pocketStockW','pocketStockH',
-  'plugTopZ','plugSafeZ','plugStockW','plugStockH','engagementDepth','mirror',
+  'engagementDepth','mirror',
 ];
 
 // ─── Styles ───────────────────────────────────────────────────────────────────
@@ -126,7 +126,7 @@ function ToolSel({ value, onChange, tools, dUnit, isInch }) {
 
 // ─── Main Component ───────────────────────────────────────────────────────────
 
-export default function InlayWizard({ onClose, onGenerate, selectedEntityIds = [], entities = [], tools = [], isInch = false }) {
+export default function InlayWizard({ onClose, onGenerate, onSelectEntities, selectedEntityIds = [], entities = [], tools = [], isInch = false }) {
   const [step, setStep]     = useState(1);
   const [created, setCreated] = useState(null);
 
@@ -149,10 +149,7 @@ export default function InlayWizard({ onClose, onGenerate, selectedEntityIds = [
     pocketSafeZ:      10,
     pocketStockW:     0,
     pocketStockH:     0,
-    plugTopZ:         0,
-    plugSafeZ:        10,
-    plugStockW:       0,
-    plugStockH:       0,
+    plugs: [{ id: 'plug-1', name: 'Plug 1', entityIds: [], topZ: 0, safeZ: 10, stockW: 0, stockH: 0 }],
     taperToolId:      null,
     angle:            10,
     tipDia:           0.5,
@@ -195,7 +192,8 @@ export default function InlayWizard({ onClose, onGenerate, selectedEntityIds = [
   const [presets, setPresets]               = useState([]);
   const [selectedPresetId, setSelectedPresetId] = useState('');
   const [presetName, setPresetName]         = useState('');
-  const [picking, setPicking]               = useState(false);
+  const [pickingFor, setPickingFor]         = useState(null); // null | 'pocket' | plugId
+  const picking = pickingFor !== null;
 
   useEffect(() => {
     window.electron.storeGet('inlayPresets').then(data => {
@@ -204,6 +202,15 @@ export default function InlayWizard({ onClose, onGenerate, selectedEntityIds = [
   }, []);
 
   function set(key, val) { setWiz(w => ({ ...w, [key]: val })); }
+
+  function addPlug() {
+    setWiz(w => ({
+      ...w,
+      plugs: [...w.plugs, { id: `plug-${Date.now()}`, name: `Plug ${w.plugs.length + 1}`, entityIds: [], topZ: 0, safeZ: 10, stockW: 0, stockH: 0 }],
+    }));
+  }
+  function removePlug(id) { setWiz(w => ({ ...w, plugs: w.plugs.filter(p => p.id !== id) })); }
+  function updatePlug(id, key, val) { setWiz(w => ({ ...w, plugs: w.plugs.map(p => p.id === id ? { ...p, [key]: val } : p) })); }
 
   function selectTaperTool(id) {
     const t = id ? tools.find(t => String(t.id) === id) : null;
@@ -304,18 +311,18 @@ export default function InlayWizard({ onClose, onGenerate, selectedEntityIds = [
         passes: buildPocketPasses(), mirror: 'none', cutSide: 'inside',
       },
     };
-    const plugOp = {
+    const plugOps = wiz.plugs.map(plug => ({
       type: 'taperedplug',
-      name: `${wiz.jobName} — Plug`,
-      selectedIds: wiz.entityIds,
+      name: `${wiz.jobName} — ${plug.name}`,
+      selectedIds: plug.entityIds,
       params: {
-        pocketDepth: wiz.pocketDepth, topZ: wiz.plugTopZ, safeZ: wiz.plugSafeZ,
-        stockW: wiz.plugStockW, stockH: wiz.plugStockH,
+        pocketDepth: wiz.pocketDepth, topZ: plug.topZ, safeZ: plug.safeZ,
+        stockW: plug.stockW, stockH: plug.stockH,
         passes: buildPlugPasses(), mirror: wiz.mirror, fitTolerance, cutSide: 'outside',
       },
-    };
-    onGenerate(pocketOp, plugOp);
-    setCreated({ pocketName: pocketOp.name, plugName: plugOp.name });
+    }));
+    onGenerate(pocketOp, plugOps);
+    setCreated({ pocketName: pocketOp.name, plugNames: plugOps.map(p => p.name) });
     setStep(5);
   }
 
@@ -334,16 +341,6 @@ export default function InlayWizard({ onClose, onGenerate, selectedEntityIds = [
 
     return (
       <>
-        {nSel === 0 ? (
-          <div style={S.warn}>No entities selected — click "Select Geometry" to pick entities from the canvas.</div>
-        ) : (
-          <div style={S.info}>{nSel} {nSel === 1 ? 'entity' : 'entities'} selected{typeSummary ? `: ${typeSummary}` : ''}</div>
-        )}
-        <button style={{ ...S.btn, ...S.btnSec, marginBottom:10, fontSize:11 }}
-          onClick={() => setPicking(true)}>
-          {nSel === 0 ? 'Select Geometry' : 'Change Selection'}
-        </button>
-
         <div style={S.sec}>Preset</div>
         <div style={{ display:'flex', gap:6, marginBottom:6 }}>
           <select style={{ ...S.sel, flex:1 }} value={selectedPresetId}
@@ -367,9 +364,57 @@ export default function InlayWizard({ onClose, onGenerate, selectedEntityIds = [
             onChange={e => set('jobName', e.target.value)} />
         </F>
 
-        <div style={{ ...S.info, marginTop:12, marginBottom:0, fontSize:10 }}>
-          Both the Pocket and Plug operations will use the currently selected entities as their geometry. You can reassign geometry from the Operations panel afterwards.
-        </div>
+        <div style={S.sec}>Pocket Geometry</div>
+        {nSel === 0 ? (
+          <div style={{ ...S.warn, fontSize:10, marginBottom:8 }}>No entities selected for the pocket.</div>
+        ) : (
+          <div style={{ ...S.info, fontSize:10, marginBottom:8 }}>{nSel} {nSel === 1 ? 'entity' : 'entities'} selected{typeSummary ? `: ${typeSummary}` : ''}</div>
+        )}
+        <button style={{ ...S.btn, ...S.btnSec, marginBottom:12, fontSize:11 }}
+          onClick={() => { if (onSelectEntities) onSelectEntities(wiz.entityIds); setPickingFor('pocket'); }}>
+          {nSel === 0 ? 'Select Pocket Geometry' : 'Change Pocket Selection'}
+        </button>
+
+        <div style={S.sec}>Plugs</div>
+        {wiz.plugs.map(plug => {
+          const nPl = plug.entityIds.length;
+          return (
+            <div key={plug.id} style={{ ...S.card, marginBottom:10 }}>
+              <div style={{ display:'flex', alignItems:'center', gap:6, marginBottom:8 }}>
+                <input style={{ ...S.inp, flex:1 }} value={plug.name}
+                  onChange={e => updatePlug(plug.id, 'name', e.target.value)} />
+                {wiz.plugs.length > 1 && (
+                  <button style={{ ...S.btn, ...S.btnRed, padding:'3px 8px', fontSize:11 }}
+                    onClick={() => removePlug(plug.id)}>Remove</button>
+                )}
+              </div>
+              {nPl === 0 ? (
+                <div style={{ ...S.warn, fontSize:10, marginBottom:8 }}>No geometry selected for this plug.</div>
+              ) : (
+                <div style={{ ...S.info, fontSize:10, marginBottom:8 }}>{nPl} {nPl === 1 ? 'entity' : 'entities'} selected</div>
+              )}
+              <button style={{ ...S.btn, ...S.btnSec, marginBottom:10, fontSize:11 }}
+                onClick={() => { if (onSelectEntities) onSelectEntities(plug.entityIds); setPickingFor(plug.id); }}>
+                {nPl === 0 ? 'Select Geometry' : 'Change Selection'}
+              </button>
+              <div style={S.grid2}>
+                <F label="Top of Stock" unit={dUnit}>
+                  <Num value={d(plug.topZ)} onChange={v => updatePlug(plug.id, 'topZ', m(v))} step={dStep} />
+                </F>
+                <F label="Safe Z" unit={dUnit}>
+                  <Num value={d(plug.safeZ)} onChange={v => updatePlug(plug.id, 'safeZ', m(v))} min={0} step={dStep} />
+                </F>
+                <F label="Stock Width" unit={dUnit}>
+                  <Num value={d(plug.stockW)} onChange={v => updatePlug(plug.id, 'stockW', m(v))} min={0} step={dStep} />
+                </F>
+                <F label="Stock Height" unit={dUnit}>
+                  <Num value={d(plug.stockH)} onChange={v => updatePlug(plug.id, 'stockH', m(v))} min={0} step={dStep} />
+                </F>
+              </div>
+            </div>
+          );
+        })}
+        <button style={{ ...S.btn, ...S.btnSec, width:'100%' }} onClick={addPlug}>+ Add Plug</button>
       </>
     );
   }
@@ -499,25 +544,6 @@ export default function InlayWizard({ onClose, onGenerate, selectedEntityIds = [
 
     return (
       <>
-        <div style={S.sec}>Plug Stock Setup</div>
-        <div style={S.grid2}>
-          <F label="Top of Stock" unit={dUnit}>
-            <Num value={d(wiz.plugTopZ)} onChange={v => set('plugTopZ', m(v))} step={dStep} />
-          </F>
-          <F label="Safe Z" unit={dUnit}>
-            <Num value={d(wiz.plugSafeZ)} onChange={v => set('plugSafeZ', m(v))} min={0} step={dStep} />
-          </F>
-          <F label="Stock Width" unit={dUnit}>
-            <Num value={d(wiz.plugStockW)} onChange={v => set('plugStockW', m(v))} min={0} step={dStep} />
-          </F>
-          <F label="Stock Height" unit={dUnit}>
-            <Num value={d(wiz.plugStockH)} onChange={v => set('plugStockH', m(v))} min={0} step={dStep} />
-          </F>
-        </div>
-        <div style={{ ...S.info, fontSize:10, marginTop:-4, marginBottom:10 }}>
-          Stock Width/Height: leave at 0 to use geometry bounding box.
-        </div>
-
         <div style={{ ...S.row, marginTop:4 }}>
           <input type="checkbox" style={{ marginRight:6, cursor:'pointer' }}
             checked={wiz.plugDetailEnabled} onChange={e => set('plugDetailEnabled', e.target.checked)} />
@@ -674,45 +700,47 @@ export default function InlayWizard({ onClose, onGenerate, selectedEntityIds = [
       wiz.plugDetailEnabled && 'Detail Endmill',
       wiz.plugBulkEnabled   && 'Bulk Endmill',
     ].filter(Boolean);
+    const mirrorLabels = { x:'Mirror X', y:'Mirror Y', none:'None' };
 
     return (
       <>
-        <div style={{ display:'grid', gridTemplateColumns:'1fr 1fr', gap:14 }}>
+        <div style={{ display:'grid', gridTemplateColumns:'1fr 1fr', gap:14, marginBottom:14 }}>
           <div style={S.card}>
             <div style={S.cardT}>Pocket — {wiz.jobName}</div>
+            <div style={S.kv}><span style={S.kvK}>Entities</span><span style={S.kvV}>{wiz.entityIds.length}</span></div>
             <div style={S.kv}><span style={S.kvK}>Depth</span><span style={S.kvV}>{fmt(wiz.pocketDepth)} {dUnit}</span></div>
             <div style={S.kv}><span style={S.kvK}>Top of Stock</span><span style={S.kvV}>{fmt(wiz.pocketTopZ)} {dUnit}</span></div>
             <div style={S.kv}><span style={S.kvK}>Safe Z</span><span style={S.kvV}>{fmt(wiz.pocketSafeZ)} {dUnit}</span></div>
             {(wiz.pocketStockW > 0 || wiz.pocketStockH > 0) && (
               <div style={S.kv}><span style={S.kvK}>Stock</span><span style={S.kvV}>{fmt(wiz.pocketStockW)} × {fmt(wiz.pocketStockH)} {dUnit}</span></div>
             )}
-            <div style={S.kv}><span style={S.kvK}>Taper</span><span style={S.kvV}>{wiz.angle}° incl. ({(wiz.angle / 2).toFixed(1)}°/side) / ⌀{fmt(wiz.tipDia)}{dUnit} tip</span></div>
-            <div style={S.kv}><span style={S.kvK}>Feed</span><span style={S.kvV}>{fmt(wiz.taperFeed, isInch ? 2 : 0)} {fUnit}</span></div>
-            <div style={S.kv}><span style={S.kvK}>Plunge</span><span style={S.kvV}>{fmt(wiz.taperPlunge, isInch ? 2 : 0)} {fUnit}</span></div>
+            <div style={S.kv}><span style={S.kvK}>Taper</span><span style={S.kvV}>{wiz.angle}° / ⌀{fmt(wiz.tipDia)}{dUnit} tip</span></div>
             <div style={{ marginTop:8, fontSize:10, color:'#444466', lineHeight:1.6 }}>
               Passes: {pocketPassList.join(' · ')}
             </div>
           </div>
-          <div style={S.card}>
-            <div style={S.cardT}>Plug — {wiz.jobName}</div>
-            <div style={S.kv}><span style={S.kvK}>Engagement Depth</span><span style={{ ...S.kvV, color:fitColor }}>{fmt(plugProud, isInch ? 3 : 2)} {dUnit}</span></div>
-            <div style={S.kv}><span style={S.kvK}>Fit Quality</span><span style={{ color:fitColor, fontWeight:700 }}>● {fitLabel}</span></div>
-            <div style={S.kv}><span style={S.kvK}>Mirror</span><span style={{ ...S.kvV, color: wiz.mirror === 'none' ? '#cc6666' : '#44cc88' }}>{{ x:'Mirror X', y:'Mirror Y', none:'None' }[wiz.mirror]}</span></div>
-            <div style={S.kv}><span style={S.kvK}>Top of Stock</span><span style={S.kvV}>{fmt(wiz.plugTopZ)} {dUnit}</span></div>
-            <div style={S.kv}><span style={S.kvK}>Safe Z</span><span style={S.kvV}>{fmt(wiz.plugSafeZ)} {dUnit}</span></div>
-            {(wiz.plugStockW > 0 || wiz.plugStockH > 0) && (
-              <div style={S.kv}><span style={S.kvK}>Stock</span><span style={S.kvV}>{fmt(wiz.plugStockW)} × {fmt(wiz.plugStockH)} {dUnit}</span></div>
-            )}
-            <div style={S.kv}><span style={S.kvK}>Taper</span><span style={S.kvV}>{wiz.angle}° incl. ({(wiz.angle / 2).toFixed(1)}°/side) / ⌀{fmt(wiz.tipDia)}{dUnit} tip</span></div>
-            <div style={S.kv}><span style={S.kvK}>Depth</span><span style={S.kvV}>{fmt(wiz.pocketDepth)} {dUnit}</span></div>
-            <div style={{ marginTop:8, fontSize:10, color:'#444466', lineHeight:1.6 }}>
-              Passes: {plugPassList.join(' · ')}
-            </div>
+          <div style={{ display:'flex', flexDirection:'column', gap:14 }}>
+            {wiz.plugs.map(plug => (
+              <div key={plug.id} style={S.card}>
+                <div style={S.cardT}>{plug.name} — {wiz.jobName}</div>
+                <div style={S.kv}><span style={S.kvK}>Entities</span><span style={{ ...S.kvV, color: plug.entityIds.length === 0 ? '#cc6666' : S.kvV.color }}>{plug.entityIds.length === 0 ? 'none' : plug.entityIds.length}</span></div>
+                <div style={S.kv}><span style={S.kvK}>Top of Stock</span><span style={S.kvV}>{fmt(plug.topZ)} {dUnit}</span></div>
+                <div style={S.kv}><span style={S.kvK}>Safe Z</span><span style={S.kvV}>{fmt(plug.safeZ)} {dUnit}</span></div>
+                {(plug.stockW > 0 || plug.stockH > 0) && (
+                  <div style={S.kv}><span style={S.kvK}>Stock</span><span style={S.kvV}>{fmt(plug.stockW)} × {fmt(plug.stockH)} {dUnit}</span></div>
+                )}
+                <div style={S.kv}><span style={S.kvK}>Mirror</span><span style={{ ...S.kvV, color: wiz.mirror === 'none' ? '#cc6666' : '#44cc88' }}>{mirrorLabels[wiz.mirror]}</span></div>
+                <div style={S.kv}><span style={S.kvK}>Engagement</span><span style={{ ...S.kvV, color:fitColor }}>{fmt(plugProud, isInch ? 3 : 2)} {dUnit} ({fitLabel})</span></div>
+                <div style={{ marginTop:8, fontSize:10, color:'#444466', lineHeight:1.6 }}>
+                  Passes: {plugPassList.join(' · ')}
+                </div>
+              </div>
+            ))}
           </div>
         </div>
 
         <div style={S.fitCard}>
-          <div style={S.fitTit}>Fit Preview</div>
+          <div style={S.fitTit}>Fit Preview — applies to all plugs</div>
           <div style={{ display:'grid', gridTemplateColumns:'1fr 1fr 1fr', gap:8, fontSize:11 }}>
             <div>
               <div style={{ color:'#444466', marginBottom:3 }}>Engagement Depth</div>
@@ -728,7 +756,7 @@ export default function InlayWizard({ onClose, onGenerate, selectedEntityIds = [
             </div>
           </div>
           <div style={{ fontSize:10, color:'#335533', marginTop:10 }}>
-            Ideal range: {isInch ? '0.030–0.080"' : '0.76–2.03 mm'} engagement · Adjust Taper Angle to shift the range for your material
+            Ideal range: {isInch ? '0.030–0.080"' : '0.76–2.03 mm'} engagement · Adjust Taper Angle to shift the range
           </div>
         </div>
 
@@ -743,8 +771,11 @@ export default function InlayWizard({ onClose, onGenerate, selectedEntityIds = [
         </div>
 
         {wiz.entityIds.length === 0 && (
-          <div style={{ ...S.warn, marginTop:12 }}>
-            No geometry selected — operations will be created without entity assignments. You can assign geometry from the Operations panel.
+          <div style={{ ...S.warn, marginTop:12 }}>No pocket geometry selected.</div>
+        )}
+        {wiz.plugs.some(p => p.entityIds.length === 0) && (
+          <div style={{ ...S.warn, marginTop:6 }}>
+            Plugs with no geometry: {wiz.plugs.filter(p => p.entityIds.length === 0).map(p => p.name).join(', ')}
           </div>
         )}
       </>
@@ -752,26 +783,29 @@ export default function InlayWizard({ onClose, onGenerate, selectedEntityIds = [
   }
 
   function renderStep5() {
+    const plugNames = created?.plugNames || [];
     return (
       <div style={{ textAlign:'center', padding:'32px 16px' }}>
         <div style={{ fontSize:52, marginBottom:12 }}>✓</div>
         <div style={{ fontSize:18, fontWeight:700, color:'#44cc88', marginBottom:8 }}>Operations Created</div>
         <div style={{ fontSize:12, color:'#8888aa', marginBottom:18 }}>
-          Two operations have been added to the Operations panel:
+          {1 + plugNames.length} operations added — each with its own workspace tab:
         </div>
-        <div style={{ marginBottom:6 }}>
+        <div style={{ marginBottom:8 }}>
           <span style={{ display:'inline-block', background:'#1a2a1a', border:'1px solid #2a5a2a', borderRadius:4, padding:'5px 16px', fontSize:12, color:'#66cc66' }}>
             {created?.pocketName}
           </span>
         </div>
-        <div style={{ marginBottom:22 }}>
-          <span style={{ display:'inline-block', background:'#1a1a2a', border:'1px solid #2a2a5a', borderRadius:4, padding:'5px 16px', fontSize:12, color:'#6688cc' }}>
-            {created?.plugName}
-          </span>
-        </div>
-        <div style={{ fontSize:11, color:'#555577', lineHeight:1.8 }}>
+        {plugNames.map((name, i) => (
+          <div key={i} style={{ marginBottom:8 }}>
+            <span style={{ display:'inline-block', background:'#1a1a2a', border:'1px solid #2a2a5a', borderRadius:4, padding:'5px 16px', fontSize:12, color:'#6688cc' }}>
+              {name}
+            </span>
+          </div>
+        ))}
+        <div style={{ fontSize:11, color:'#555577', lineHeight:1.8, marginTop:14 }}>
           Select each operation and click Calculate to generate toolpaths,<br />
-          then use Export G-code for inlay two-file output.
+          then export — each workspace produces its own G-code file.
         </div>
       </div>
     );
@@ -781,21 +815,28 @@ export default function InlayWizard({ onClose, onGenerate, selectedEntityIds = [
 
   // Picking mode: wizard shrinks to a bottom strip so the user can click entities on the canvas.
   if (picking) {
+    const pickingLabel = pickingFor === 'pocket'
+      ? 'Selecting pocket geometry'
+      : `Selecting geometry for: ${wiz.plugs.find(p => p.id === pickingFor)?.name ?? 'Plug'}`;
     return (
       <div style={{ position:'fixed', bottom:0, left:0, right:0, zIndex:1000,
         background:'#1a1a38', borderTop:'2px solid #5555cc',
         padding:'10px 20px', display:'flex', alignItems:'center', justifyContent:'space-between' }}>
         <div style={{ fontSize:12, color:'#aaaaff' }}>
-          Click entities on the canvas to select them.
+          {pickingLabel} — click to toggle entities.
           <span style={{ color:'#6666aa', marginLeft:10 }}>
             {selectedEntityIds.length} selected
           </span>
         </div>
         <div style={{ display:'flex', gap:8 }}>
-          <button style={{ ...S.btn, ...S.btnSec }} onClick={() => setPicking(false)}>Cancel</button>
+          <button style={{ ...S.btn, ...S.btnSec }} onClick={() => setPickingFor(null)}>Cancel</button>
           <button style={{ ...S.btn, ...S.btnGrn }} onClick={() => {
-            set('entityIds', [...selectedEntityIds]);
-            setPicking(false);
+            if (pickingFor === 'pocket') {
+              set('entityIds', [...selectedEntityIds]);
+            } else {
+              updatePlug(pickingFor, 'entityIds', [...selectedEntityIds]);
+            }
+            setPickingFor(null);
           }}>
             Done — use {selectedEntityIds.length} {selectedEntityIds.length === 1 ? 'entity' : 'entities'}
           </button>
