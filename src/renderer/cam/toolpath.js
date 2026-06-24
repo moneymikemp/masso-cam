@@ -1519,16 +1519,7 @@ function buildTaperTrace(entities, topZ, depth, safeZ, feedRate, plungeRate, tcR
   const isOutside = cutSide === 'outside';
   const profiles = prebuiltProfiles ?? buildPocketProfiles(entities);
 
-  // Identify the outermost profile so inner profiles (holes in a boss, islands in a pocket)
-  // can be traced from the correct side.
-  const outerProfileRef = [...profiles].sort((a, b) => Math.abs(polygonArea(b)) - Math.abs(polygonArea(a)))[0];
-
   for (const rawProfile of profiles) {
-    // Inner profiles of a plug must be traced from INSIDE the hole (not from outside into the
-    // boss ring).  Flip traceOffset sign for non-outer profiles when isOutside is true.
-    const isInnerProfile = rawProfile !== outerProfileRef;
-    const profileTraceOffset = (isInnerProfile && isOutside) ? -traceOffset : traceOffset;
-
     // Normalise winding to CCW before offsetting.  mirrorEntitiesX Y-flips the
     // polygon, reversing its winding to CW.  Clipper's ClipperOffset treats CW
     // paths as holes and applies the delta in the opposite direction, so a CW
@@ -1539,8 +1530,8 @@ function buildTaperTrace(entities, topZ, depth, safeZ, feedRate, plungeRate, tcR
     if (rawStripped.length < 3) continue;
     const rawCCW = isClockwise(rawStripped) ? [...rawStripped].reverse() : rawStripped;
 
-    const traceRaw = profileTraceOffset !== 0
-      ? (offsetPolyline(rawCCW, profileTraceOffset, true)[0] ?? rawCCW)
+    const traceRaw = traceOffset !== 0
+      ? (offsetPolyline(rawCCW, traceOffset, true)[0] ?? rawCCW)
       : rawCCW;
     if (!traceRaw || traceRaw.length < 2) continue;
     const ptsRaw = stripClose([...traceRaw]);
@@ -1780,16 +1771,14 @@ function buildPlugClearing(entities, topZ, depth, safeZ, toolR, depthPerPass, wa
   }
   moves.push({ type: 'rapid', x: outerProfile[0].x, y: outerProfile[0].y, z: safeZ });
 
-  // Inner profiles = holes in the boss ring (e.g. the bowl of a letter "P").
-  // Each hole needs pocket-style clearing (inward from the hole boundary),
-  // not boss-style clearing (outward). Treat each inner profile as an independent pocket.
-  const innerProfiles = profiles.slice(1);
-  for (const innerProfRaw of innerProfiles) {
-    const innerProfile = isClockwise(innerProfRaw) ? [...innerProfRaw].reverse() : innerProfRaw;
-    const innerMoves = buildPocketClearing(
+  // Additional profiles = separate independent bosses (e.g. two strokes of a cursive letter).
+  // Each gets its own outward boss clearing rather than pocket clearing, because
+  // the area between two separate bosses must be cleared, not preserved.
+  for (const innerProfRaw of profiles.slice(1)) {
+    const innerMoves = buildPlugClearing(
       [], topZ, depth, safeZ, toolR, depthPerPass, wallStock,
       feedRate, plungeRate, taperRad, passLabel, warnings, prevToolR,
-      null, leadInStyle, leadInArcRadius, [innerProfile]
+      stockBound, leadInStyle, leadInArcRadius, [innerProfRaw]
     );
     moves.push(...innerMoves);
   }
