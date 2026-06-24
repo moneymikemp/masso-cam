@@ -1771,16 +1771,16 @@ function buildPlugClearing(entities, topZ, depth, safeZ, toolR, depthPerPass, wa
   }
   moves.push({ type: 'rapid', x: outerProfile[0].x, y: outerProfile[0].y, z: safeZ });
 
-  // Additional profiles = separate independent bosses (e.g. two strokes of a cursive letter).
-  // Each gets its own outward boss clearing rather than pocket clearing, because
-  // the area between two separate bosses must be cleared, not preserved.
-  for (const innerProfRaw of profiles.slice(1)) {
-    const innerMoves = buildPlugClearing(
+  // If there are inner profiles (separate bosses nested within the outer boss area),
+  // pocket-clear the gap between them.  The outer profile is the gap's outer boundary;
+  // inner profiles are island exclusions so neither boss is cut.
+  if (profiles.length > 1) {
+    const gapMoves = buildPocketClearing(
       [], topZ, depth, safeZ, toolR, depthPerPass, wallStock,
       feedRate, plungeRate, taperRad, passLabel, warnings, prevToolR,
-      stockBound, leadInStyle, leadInArcRadius, [innerProfRaw]
+      null, leadInStyle, leadInArcRadius, profiles
     );
-    moves.push(...innerMoves);
+    moves.push(...gapMoves);
   }
 
   return moves;
