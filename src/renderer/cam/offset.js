@@ -106,61 +106,110 @@ export function offsetPolyline(points, distance, closed = true) {
 // Uses Clipper for each offset step so concave corners are handled correctly.
 // When a concave shape splits into sub-polygons, each sub-polygon continues
 // shrinking independently — all sub-regions get clearing passes.
+//
+// When islands are present, uses a contour-following "donut-offset" approach:
+// the initial cuttable area (outer MINUS islands) is shrunk by one stepover per
+// iteration. Because island boundaries are stored as CW holes in Clipper, the
+// negative offset simultaneously shrinks the CCW outer boundary inward AND expands
+// the CW island holes outward. Each iteration produces:
+//   CCW paths → outer-wall-following passes (same as no-island case)
+//   CW paths  → island-wall-following passes (reversed to CCW for the toolpath)
+// This matches Fusion 360-style concentric offsets that hug both the outer wall
+// and island walls simultaneously.
 export function generatePocketOffsets(outerPoints, toolRadius, stepover, islands = []) {
   const passes = [];
   const step = toolRadius * 2 * stepover;
 
-  let start = stripClose([...outerPoints]);
-  if (isClockwise(start)) start = [...start].reverse();
+  let outer = stripClose([...outerPoints]);
+  if (isClockwise(outer)) outer = [...outer].reverse();
+  if (polygonArea(outer) < step * step) return passes;
 
-  if (polygonArea(start) < step * step) return passes;
-
-  // Queue of active sub-polygons at the current shrink level.
-  let queue = [start];
-  const MAX_PASSES = 200;
-
-  for (let i = 0; i < MAX_PASSES && queue.length > 0; i++) {
-    const nextQueue = [];
-
-    for (const poly of queue) {
-      const shrunkList = clipperClosedOffset(poly, step);
-
-      for (const sp of shrunkList) {
-        if (polygonArea(sp) < step * step * 0.5) continue;
-        nextQueue.push(sp);
-
-        if (islands.length > 0) {
-          // Boolean-difference each ring against island exclusion zones.
-          // We call Clipper directly instead of differencePolygons() so we can
-          // discard CW hole polygons. When a ring fully encircles an island,
-          // Clipper emits the island boundary as a CW "hole" path. differencePolygons()
-          // reverses it to CCW, causing the full island perimeter to be added as a
-          // pass once per encircling ring — producing many duplicate traces.
-          const dc = new ClipperLib.Clipper();
-          dc.AddPath(toClipper(stripClose([...sp])), ClipperLib.PolyType.ptSubject, true);
-          for (const isl of islands) {
-            const clip = stripClose([...isl]);
-            if (clip.length >= 3) dc.AddPath(toClipper(clip), ClipperLib.PolyType.ptClip, true);
-          }
-          const dcSol = new ClipperLib.Paths();
-          // Use pftNonZero for the clip so overlapping island exclusion zones are
-          // treated as a single filled union. The default pftEvenOdd would count
-          // points inside two overlapping islands as "outside" (even winding) and
-          // fail to subtract the intersection region from the ring pass.
-          dc.Execute(ClipperLib.ClipType.ctDifference, dcSol,
-            ClipperLib.PolyFillType.pftNonZero, ClipperLib.PolyFillType.pftNonZero);
-          for (const path of dcSol) {
-            const pts = fromClipper(path);
-            if (pts.length < 3 || isClockwise(pts)) continue; // CW = hole boundary, skip
-            if (polygonArea(pts) >= step * step * 0.5) passes.push([...pts, pts[0]]);
-          }
-        } else {
+  if (islands.length === 0) {
+    // Simple case: no islands — pure inward spiral.
+    let queue = [outer];
+    for (let i = 0; i < 200 && queue.length > 0; i++) {
+      const nextQueue = [];
+      for (const poly of queue) {
+        for (const sp of clipperClosedOffset(poly, step)) {
+          if (polygonArea(sp) < step * step * 0.5) continue;
+          nextQueue.push(sp);
           passes.push([...sp, sp[0]]);
         }
       }
+      queue = nextQueue;
+    }
+    return passes;
+  }
+
+  // Islands present: contour-following donut-offset approach.
+  // Step 1: compute the cuttable region as outer MINUS island exclusion zones.
+  //   Clipper Paths output: CCW paths = outer boundaries, CW paths = island holes.
+  const ic = new ClipperLib.Clipper();
+  ic.AddPath(toClipper(outer), ClipperLib.PolyType.ptSubject, true);
+  for (const isl of islands) {
+    const clip = stripClose([...isl]);
+    if (clip.length >= 3) ic.AddPath(toClipper(clip), ClipperLib.PolyType.ptClip, true);
+  }
+  const icPaths = new ClipperLib.Paths();
+  ic.Execute(ClipperLib.ClipType.ctDifference, icPaths,
+    ClipperLib.PolyFillType.pftNonZero, ClipperLib.PolyFillType.pftNonZero);
+
+  let currentOuters = [];
+  let currentHoles = [];
+  for (const path of icPaths) {
+    const pts = fromClipper(path);
+    if (pts.length < 3) continue;
+    if (isClockwise(pts)) {
+      currentHoles.push(pts);               // CW = island hole
+    } else if (polygonArea(pts) >= step * step * 0.5) {
+      currentOuters.push(pts);              // CCW = outer boundary
+    }
+  }
+  if (currentOuters.length === 0) return passes;
+
+  // Step 2: repeatedly shrink the outer CCW boundary and expand the CW island holes
+  //   by one stepover. ClipperOffset with a negative delta on a set of CCW+CW paths
+  //   shrinks CCW (outer) and grows CW (holes) simultaneously, producing passes that
+  //   follow both the outer wall and the island walls at each erosion level.
+  for (let iter = 0; iter < 200; iter++) {
+    if (currentOuters.length === 0) break;
+
+    const co = new ClipperLib.ClipperOffset();
+    for (const o of currentOuters) {
+      co.AddPath(toClipper(o), ClipperLib.JoinType.jtMiter, ClipperLib.EndType.etClosedPolygon);
+    }
+    for (const h of currentHoles) {
+      if (h.length >= 3) {
+        co.AddPath(toClipper(h), ClipperLib.JoinType.jtMiter, ClipperLib.EndType.etClosedPolygon);
+      }
     }
 
-    queue = nextQueue;
+    const solution = new ClipperLib.Paths();
+    co.Execute(solution, -step * SCALE);
+
+    const nextOuters = [];
+    const nextHoles = [];
+
+    for (const path of solution) {
+      const pts = fromClipper(path);
+      if (pts.length < 3) continue;
+      const area = polygonArea(pts);
+      if (area < step * step * 0.5) continue;
+
+      if (isClockwise(pts)) {
+        // CW = expanded island hole — save for next iteration AND add as island pass
+        nextHoles.push(pts);
+        const ccw = [...pts].reverse();
+        passes.push([...ccw, ccw[0]]);
+      } else {
+        // CCW = shrunken outer boundary — save for next iteration AND add as outer pass
+        nextOuters.push(pts);
+        passes.push([...pts, pts[0]]);
+      }
+    }
+
+    currentOuters = nextOuters;
+    currentHoles = nextHoles;
   }
 
   return passes;
