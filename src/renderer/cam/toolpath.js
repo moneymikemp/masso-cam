@@ -391,6 +391,11 @@ function generatePocket(op, entities, context = {}) {
     return expanded && expanded.length >= 3 ? expanded : ccw;
   });
   const hasIslands = islandExclusions.length > 0;
+  if (hasIslands && p.cutSide !== 'outside') {
+    const chkOffset = toolR + (p.finishPass ? (p.finishAllowance || 0.2) : 0);
+    const chkBound = offsetPolyline(outerProfile, chkOffset, true)[0] ?? null;
+    warnNarrowGaps(islandExclusions, chkBound, toolR, warnings);
+  }
 
   const zPasses = buildZPasses(topZ, p.totalDepth || 10, p.depthPerPass || 3);
 
@@ -518,6 +523,7 @@ function generateAdaptive(op, entities, context = {}) {
   // Pre-shrink the outer boundary by toolR so the tool center stays inside the profile.
   // Without this, trochoidal arcs (radius trochR) reach outside the raw profile boundary.
   const innerBoundary = offsetPolyline(profile, toolR, true)[0];
+  if (islandExclusions.length > 0) warnNarrowGaps(islandExclusions, innerBoundary ?? null, toolR, warnings);
 
   const passes = buildZPasses(p.topZ ?? 0, p.totalDepth || 15, p.depthPerPass || 5);
 
@@ -1686,6 +1692,7 @@ function buildPocketClearing(entities, topZ, depth, safeZ, toolR, depthPerPass, 
     return (expanded && expanded.length >= 3) ? expanded : ccw;
   });
 
+  if (islandExclusions.length > 0) warnNarrowGaps(islandExclusions, boundary, toolR, warnings);
   const clearPasses = prevToolR > 0
     ? generateRestMachiningPasses(outerProfile, toolR, prevToolR, 0.45, islandExclusions)
     : generatePocketOffsets(boundary, toolR, 0.45, islandExclusions);
@@ -1818,6 +1825,7 @@ function buildPlugClearing(entities, topZ, depth, safeZ, toolR, depthPerPass, wa
     return moves;
   }
 
+  if (allBossExclusions.length > 1) warnNarrowGaps(allBossExclusions, null, toolR, warnings);
   const multiClearPasses = prevToolR > 0
     ? generateRestMachiningPasses(clipBoundaryCCW, toolR, prevToolR, 0.45, allBossExclusions)
     : generatePocketOffsets(stockBoundaryInset, toolR, 0.45, allBossExclusions);
@@ -1858,6 +1866,36 @@ function buildPlugClearing(entities, topZ, depth, safeZ, toolR, depthPerPass, wa
 }
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
+
+// Warn when pre-expanded island exclusion zones overlap each other (gap between the raw
+// island boundaries is less than twice the expansion amount — i.e. less than tool diameter
+// plus any wall-leave) or when an exclusion zone overflows the pocket/stock boundary
+// (island too close to the outer wall).  One warning is emitted and the function returns
+// so the array stays concise.  Uses pointInPolygon for quick vertex-in-polygon tests which
+// catches all practical cases (convex or mildly concave island shapes).
+function warnNarrowGaps(exclusionZones, boundary, toolR, warnings) {
+  if (!exclusionZones.length) return;
+  const dia = (toolR * 2).toFixed(2);
+  // Island-to-island overlap check
+  for (let i = 0; i < exclusionZones.length - 1; i++) {
+    for (let j = i + 1; j < exclusionZones.length; j++) {
+      const a = exclusionZones[i], b = exclusionZones[j];
+      if (a.some(pt => pointInPolygon(pt, b)) || b.some(pt => pointInPolygon(pt, a))) {
+        warnings.push(`Gap between islands too small for ø${dia} mm tool — some areas will not be machined. Use a smaller tool or increase spacing.`);
+        return;
+      }
+    }
+  }
+  // Island-to-boundary overflow check
+  if (boundary) {
+    for (const excl of exclusionZones) {
+      if (excl.some(pt => !pointInPolygon(pt, boundary))) {
+        warnings.push(`Island too close to pocket wall for ø${dia} mm tool — some areas will not be machined. Use a smaller tool or increase spacing.`);
+        return;
+      }
+    }
+  }
+}
 
 function buildZPasses(topZ, totalDepth, depthPerPass) {
   const passes = [];
