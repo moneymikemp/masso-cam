@@ -115,15 +115,9 @@ export function generatePocketOffsets(outerPoints, toolRadius, stepover, islands
 
   if (polygonArea(start) < step * step) return passes;
 
-  console.log(`[DBG genPocketOffsets] entry islands=${islands.length} startPts=${start.length} startArea=${polygonArea(start).toFixed(1)} step=${step.toFixed(3)}`);
-  if (islands.length > 0) {
-    islands.forEach((isl, i) => console.log(`  island[${i}] pts=${isl.length} cw=${isClockwise(isl)} area=${polygonArea(isl).toFixed(1)}`));
-  }
-
   // Queue of active sub-polygons at the current shrink level.
   let queue = [start];
   const MAX_PASSES = 200;
-  let dbgLoggedIters = 0;
 
   for (let i = 0; i < MAX_PASSES && queue.length > 0; i++) {
     const nextQueue = [];
@@ -150,15 +144,10 @@ export function generatePocketOffsets(outerPoints, toolRadius, stepover, islands
           }
           const dcSol = new ClipperLib.Paths();
           dc.Execute(ClipperLib.ClipType.ctDifference, dcSol);
-          const beforeCount = passes.length;
           for (const path of dcSol) {
             const pts = fromClipper(path);
             if (pts.length < 3 || isClockwise(pts)) continue; // CW = hole boundary, skip
             if (polygonArea(pts) >= step * step * 0.5) passes.push([...pts, pts[0]]);
-          }
-          if (dbgLoggedIters < 6) {
-            console.log(`  iter=${i} sp.area=${polygonArea(sp).toFixed(1)} sp.cw=${isClockwise(sp)} dcSol.paths=${dcSol.length} dcSol.kept=${passes.length - beforeCount} dcSol.cwFiltered=${dcSol.filter(p => { const pp=fromClipper(p); return pp.length>=3 && isClockwise(pp); }).length}`);
-            dbgLoggedIters++;
           }
         } else {
           passes.push([...sp, sp[0]]);
@@ -169,7 +158,6 @@ export function generatePocketOffsets(outerPoints, toolRadius, stepover, islands
     queue = nextQueue;
   }
 
-  console.log(`[DBG genPocketOffsets] done passes=${passes.length}`);
   return passes;
 }
 

@@ -385,14 +385,11 @@ function generatePocket(op, entities, context = {}) {
   // Expand each island outward by toolR to get the exclusion zone the tool
   // centre must stay outside of.  For a CCW polygon positive offset = inward,
   // so expand outward with -toolR (after normalising to CCW).
-  const islandExclusions = islandProfiles.map((island, idx) => {
+  const islandExclusions = islandProfiles.map((island) => {
     const ccw = isClockwise(island) ? [...island].reverse() : island;
     const expanded = offsetPolyline(ccw, -toolR, true)[0];
-    const result = expanded && expanded.length >= 3 ? expanded : ccw;
-    console.log(`[DBG pocket] island[${idx}] pts=${island.length} cw=${isClockwise(island)} expanded=${expanded?.length ?? 'FAIL'} exclusion_pts=${result.length}`);
-    return result;
+    return (expanded && expanded.length >= 3) ? expanded : ccw;
   });
-  console.log(`[DBG pocket] profiles=${profiles.length} outerArea=${polygonArea(outerProfile).toFixed(1)} islands=${islandExclusions.length} cutSide=${p.cutSide}`);
   const hasIslands = islandExclusions.length > 0;
   if (hasIslands && p.cutSide !== 'outside') {
     const chkOffset = toolR + (p.finishPass ? (p.finishAllowance || 0.2) : 0);
@@ -450,6 +447,7 @@ function generatePocket(op, entities, context = {}) {
       const pocketCutSide = p.cutSide === 'outside' ? 'outside' : 'inside';
       moves.push(...buildLeadIn(orderedPasses[0], topZ, z, safeZ, leadInStyle, p.rampAngle || 3, leadInArcR, feedRate, plungeRate, pocketCutSide));
 
+      let lastPassX = null, lastPassY = null;
       for (let pi = 0; pi < orderedPasses.length; pi++) {
         // For 'both': alternate climb/conventional on each successive ring pass
         const pass = (p.climb === 'both' && pi % 2 === 1) ? [...orderedPasses[pi]].reverse() : orderedPasses[pi];
@@ -457,16 +455,22 @@ function generatePocket(op, entities, context = {}) {
         if (pi === 0) {
           // buildLeadIn left us near pass start inside the already-cut area — short hop is safe
           moves.push({ type: 'rapid', x: pass[0].x, y: pass[0].y, z: z + 0.5 });
+        } else if (hasIslands && !p.keepDown) {
+          // Two-step retract: lift Z straight up at current XY first, then traverse at
+          // safeZ. A single diagonal rapid (simultaneous XYZ) would have the tool below
+          // topZ while crossing island walls, risking a gouge.
+          if (lastPassX !== null) moves.push({ type: 'rapid', x: lastPassX, y: lastPassY, z: safeZ });
+          moves.push({ type: 'rapid', x: pass[0].x, y: pass[0].y, z: safeZ });
         } else {
-          // Islands: must clear island walls (topZ) unless keepDown is explicitly set.
           // No islands: concentric rings share the floor, z+0.5 is always safe.
-          const retractZ = (hasIslands && !p.keepDown) ? topZ : z + 0.5;
-          moves.push({ type: 'rapid', x: pass[0].x, y: pass[0].y, z: retractZ });
+          moves.push({ type: 'rapid', x: pass[0].x, y: pass[0].y, z: z + 0.5 });
         }
         moves.push({ type: 'feed', x: pass[0].x, y: pass[0].y, z, f: plungeRate });
         for (let i = 1; i < pass.length; i++) {
           moves.push({ type: 'feed', x: pass[i].x, y: pass[i].y, z, f: feedRate });
         }
+        lastPassX = pass[pass.length - 1].x;
+        lastPassY = pass[pass.length - 1].y;
       }
     }
 
@@ -1709,14 +1713,23 @@ function buildPocketClearing(entities, topZ, depth, safeZ, toolR, depthPerPass, 
   const helixR = leadInArcRadius || toolR * 0.5;
   moves.push(...buildLeadIn(clearPasses[0], topZ, zPasses[0], safeZ, leadInStyle, 3, helixR, feedRate, plungeRate, 'inside'));
 
+  const hasIslands = islandExclusions.length > 0;
+  let lastClearX = null, lastClearY = null;
   for (const z of zPasses) {
     for (const pass of clearPasses) {
       if (!pass || pass.length < 2) continue;
-      moves.push({ type: 'rapid', x: pass[0].x, y: pass[0].y, z: z + 0.5 });
+      if (hasIslands && lastClearX !== null) {
+        // Two-step retract: lift Z straight up at current XY first, then traverse at
+        // safeZ so the tool doesn't contact island walls during a diagonal rapid.
+        moves.push({ type: 'rapid', x: lastClearX, y: lastClearY, z: safeZ });
+      }
+      moves.push({ type: 'rapid', x: pass[0].x, y: pass[0].y, z: hasIslands ? safeZ : z + 0.5 });
       moves.push({ type: 'feed',  x: pass[0].x, y: pass[0].y, z, f: plungeRate });
       for (let i = 1; i < pass.length; i++) {
         moves.push({ type: 'feed', x: pass[i].x, y: pass[i].y, z, f: feedRate });
       }
+      lastClearX = pass[pass.length - 1].x;
+      lastClearY = pass[pass.length - 1].y;
     }
   }
   moves.push({ type: 'rapid', x: outerProfile[0].x, y: outerProfile[0].y, z: safeZ });
