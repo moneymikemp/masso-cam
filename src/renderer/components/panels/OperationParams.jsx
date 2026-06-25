@@ -237,7 +237,14 @@ export default function OperationParams({ op, tools, operations = [], onChange }
     <>
       <div style={S.section}>Tool</div>
       <Field label="Tool" tip="Select from your Tool Library to auto-fill diameter and type, or choose 'Manual diameter' to enter it directly below.">
-        <select style={S.select} value={op.toolId || ''} onChange={e => onChange({ toolId: e.target.value || null })}>
+        <select style={S.select} value={op.toolId || ''} onChange={e => {
+          const toolId = e.target.value || null;
+          const tool = toolId ? tools.find(t => t.id === toolId) : null;
+          const feed = tool?.feeds?.[0];
+          const updates = { toolId };
+          if (feed?.stepover != null) updates.params = { ...p, stepover: feed.stepover };
+          onChange(updates);
+        }}>
           <option value="">Manual diameter...</option>
           {tools.map(t => (
             <option key={t.id} value={t.id}>
@@ -356,7 +363,7 @@ export default function OperationParams({ op, tools, operations = [], onChange }
           <Sel value={p.cutSide || 'inside'} onChange={v => set('cutSide', v)} options={[['inside','Inside (pocket)'],['outside','Outside (boss)']]} />
         </Field>
         {boundarySection}
-        <Field label="Stepover %" tip="Percentage of tool diameter between adjacent clearing passes. Lower = smoother floor, more passes.\nRoughing: 30–50%. Finishing: 10–20%.">
+        <Field label="Max Stepover %" tip="Maximum radial step between passes as a % of tool diameter. Caps the tool library's stepover — whichever is lower wins. Lower = smoother floor, more passes.\nRoughing: 30–50%. Finishing: 10–20%.">
           <NumInput value={Math.round((p.stepover || 0.45) * 100)} onChange={v => set('stepover', v / 100)} step={5} min={5} max={95} />
         </Field>
         <CheckField label="Start from Center" value={p.startFromCenter} onChange={v => set('startFromCenter', v)} tip="Begin the spiral toolpath at the center and expand outward. Gives a cleaner first engagement and avoids rubbing on the initial pass." />
@@ -398,7 +405,7 @@ export default function OperationParams({ op, tools, operations = [], onChange }
           <Sel value={p.cutSide || 'inside'} onChange={v => set('cutSide', v)} options={[['inside','Inside (pocket)'],['outside','Outside (boss)']]} />
         </Field>
         {boundarySection}
-        <Field label="Stepover %" tip="Maximum radial step between passes as a % of tool diameter. Adaptive paths maintain a more constant chip load — lower values give a lighter, faster cut.\nTypical: 20–40%.">
+        <Field label="Max Stepover %" tip="Maximum radial step between passes as a % of tool diameter. Caps the tool library's stepover — whichever is lower wins. Adaptive paths maintain a more constant chip load — lower values give a lighter, faster cut.\nTypical: 20–40%.">
           <NumInput value={Math.round((p.stepover || 0.35) * 100)} onChange={v => set('stepover', v / 100)} step={5} min={5} max={60} />
         </Field>
         <Field label="Optimal Load %" tip="Target chip load as a fraction of tool diameter. Lower = lighter constant-engagement cut, allowing a higher feed rate. Typical: 20–35%.">
@@ -432,7 +439,7 @@ export default function OperationParams({ op, tools, operations = [], onChange }
       {op.type === 'face' && <>
         {toolSelect}
         <div style={S.section}>Pass</div>
-        <Field label="Stepover %" tip="Overlap between adjacent facing passes. Higher % = fewer passes but may leave witness lines. Typical: 60–80%. Use a surfacing bit for best results.">
+        <Field label="Max Stepover %" tip="Maximum overlap between adjacent facing passes as a % of tool diameter. Caps the tool library's stepover — whichever is lower wins. Typical: 60–80%. Use a surfacing bit for best results.">
           <NumInput value={Math.round((p.stepover || 0.75) * 100)} onChange={v => set('stepover', v / 100)} step={5} min={10} max={95} />
         </Field>
         <Field label="Angle" unit="°" tip="Direction of facing passes in degrees from the X axis. 0 = along X, 90 = along Y. A 45° angle can reduce visible parallel-line patterns on the surface.">
@@ -520,7 +527,7 @@ export default function OperationParams({ op, tools, operations = [], onChange }
       {/* ── Circular ── */}
       {op.type === 'circular' && <>
         {toolSelect}
-        <Field label="Stepover %" tip="Radial step between concentric circular passes as a % of tool diameter. Lower = smoother pocket floor. Typical: 30–50%.">
+        <Field label="Max Stepover %" tip="Maximum radial step between concentric circular passes as a % of tool diameter. Caps the tool library's stepover — whichever is lower wins. Lower = smoother pocket floor. Typical: 30–50%.">
           <NumInput value={Math.round((p.stepover || 0.4) * 100)} onChange={v => set('stepover', v / 100)} step={5} />
         </Field>
         <Field label="Lead-in" tip="Plunge: straight down at entry.\nHelical: spiral descent into the circular pocket — gentler on the tool.">

@@ -102,11 +102,23 @@ export default function OperationsPanel() {
     if (!op) return;
     const tool = tools.find(t => t.id === op.toolId);
     const toolDiameter = tool?.diameter || op.params.toolDiameter || 6.35;
+    // Effective stepover: operation's "Max Stepover" is an upper bound;
+    // tool DB's stepover is also an upper bound — whichever is lower wins.
+    const toolDbStepover = tool?.feeds?.[0]?.stepover;
+    const opStepover = op.params.stepover;
+    let resolvedStepover;
+    if (opStepover != null && toolDbStepover != null) {
+      resolvedStepover = Math.min(opStepover, toolDbStepover);
+    } else {
+      resolvedStepover = opStepover ?? toolDbStepover;
+    }
     const entitiesToUse = op.selectedIds?.length > 0
       ? entities.filter(e => op.selectedIds.includes(e.id))
       : entities;
+    const injectedParams = { ...op.params, toolDiameter };
+    if (resolvedStepover != null) injectedParams.stepover = resolvedStepover;
     const toolpath = generateToolpath(
-      { ...op, params: { ...op.params, toolDiameter } },
+      { ...op, params: injectedParams },
       entitiesToUse,
       { stockConfig: state.stockConfig, allEntities: entities }
     );
