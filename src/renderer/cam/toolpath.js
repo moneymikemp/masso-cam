@@ -1088,10 +1088,14 @@ function generateVCarve(op, entities, context = {}) {
     }
 
     let anyMoves = false;
+    let firstRing = true;   // first ring of this shape uses a full safeZ approach
+    let lastPtX = 0, lastPtY = 0; // end position of the previous ring
 
     // Single full-depth sweep: each ring is cut to its exact geometric depth
     // in one pass. The V-bit depth at any XY position is determined solely by
     // the distance from the profile edge — there is no stepping down.
+    // Between consecutive rings the tool only lifts to topZ+0.5 (not safeZ),
+    // eliminating the tall retract spikes visible between every ring pass.
     for (let i = 1; i <= 5000; i++) {
       const d      = i * XY_STEP;
       const rawH   = d <= tipRadius ? 0 : (d - tipRadius) / tanAngle;
@@ -1120,12 +1124,25 @@ function generateVCarve(op, entities, context = {}) {
 
         gotAny = true;
         anyMoves = true;
-        moves.push({ type: 'rapid', x: pts[0].x, y: pts[0].y, z: safeZ });
-        moves.push({ type: 'feed',  x: pts[0].x, y: pts[0].y, z, f: plungeRate });
+
+        if (firstRing) {
+          // Initial approach: full safeZ clearance.
+          moves.push({ type: 'rapid', x: pts[0].x, y: pts[0].y, z: safeZ });
+          firstRing = false;
+        } else {
+          // Between rings: two-step retract to just above stock surface, then
+          // traverse. topZ+0.5 is enough to clear the cut — no need to go to
+          // safeZ for every ring.
+          moves.push({ type: 'rapid', x: lastPtX, y: lastPtY, z: topZ + 0.5 });
+          moves.push({ type: 'rapid', x: pts[0].x, y: pts[0].y, z: topZ + 0.5 });
+        }
+        moves.push({ type: 'feed', x: pts[0].x, y: pts[0].y, z, f: plungeRate });
         for (let j = 1; j < pts.length; j++) {
           moves.push({ type: 'feed', x: pts[j].x, y: pts[j].y, z, f: feedRate });
         }
         moves.push({ type: 'feed', x: pts[0].x, y: pts[0].y, z, f: feedRate });
+        lastPtX = pts[0].x;
+        lastPtY = pts[0].y;
       }
 
       if (!gotAny) break;
