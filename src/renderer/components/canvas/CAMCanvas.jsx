@@ -1023,12 +1023,21 @@ export default function CAMCanvas() {
     }
   }, [drawPhase]);
 
-  // Focus the first input field when the dim input overlay mounts.
-  // autoFocus alone is unreliable after a canvas click because the canvas
-  // retains browser focus; programmatic focus after a tick is more robust.
+  // Focus the first input field when the dim input overlay FIRST APPEARS.
+  // We track which tool triggered the current session so the effect only fires
+  // on mount, not on every keystroke (updateVal creates a new dimInput object
+  // on each key, which would otherwise steal focus from the second field).
+  const dimInputToolRef = useRef(null);
   useEffect(() => {
-    if (!dimInput) return;
-    const t = setTimeout(() => dimFirstInputRef.current?.focus(), 0);
+    if (!dimInput) { dimInputToolRef.current = null; return; }
+    if (dimInput.tool === dimInputToolRef.current) return; // same session — don't re-focus
+    dimInputToolRef.current = dimInput.tool;
+    const t = setTimeout(() => {
+      const active = document.activeElement;
+      if (!active || active.tagName !== 'INPUT') {
+        dimFirstInputRef.current?.focus();
+      }
+    }, 0);
     return () => clearTimeout(t);
   }, [dimInput]);
 
