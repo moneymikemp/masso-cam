@@ -1046,7 +1046,6 @@ function generateVCarve(op, entities, context = {}) {
   const topZ         = p.topZ ?? 0;
   const feedRate     = p.feedRate ?? 1500;
   const plungeRate   = p.plungeRate ?? 300;
-  const depthPerPass = Math.max(0.01, p.depthPerPass ?? maxDepth); // default = single pass
 
   // Require explicit entity assignment — the fallback to all entities in
   // getSelectedEntities would pick up reference geometry (bounding boxes, etc.)
@@ -1078,10 +1077,9 @@ function generateVCarve(op, entities, context = {}) {
     if (!placed) shapeGroups.push({ outer: profile, holes: [] });
   }
 
-  // XY spacing between successive offset rings.  0.2 mm gives smooth depth
+  // XY spacing between successive offset rings. 0.2 mm gives smooth depth
   // transitions; the loop always terminates once the valid region collapses.
   const XY_STEP = 0.2;
-  const numPasses = Math.max(1, Math.ceil(maxDepth / depthPerPass));
 
   for (const { outer, holes } of shapeGroups) {
     if (Math.abs(polygonArea(outer)) < XY_STEP * XY_STEP * 4) {
@@ -1091,65 +1089,46 @@ function generateVCarve(op, entities, context = {}) {
 
     let anyMoves = false;
 
-    for (let pass = 1; pass <= numPasses; pass++) {
-      const passMaxH = Math.min(depthPerPass * pass, maxDepth);
-      const prevMaxH = depthPerPass * (pass - 1);
+    // Single full-depth sweep: each ring is cut to its exact geometric depth
+    // in one pass. The V-bit depth at any XY position is determined solely by
+    // the distance from the profile edge — there is no stepping down.
+    for (let i = 1; i <= 5000; i++) {
+      const d      = i * XY_STEP;
+      const rawH   = d <= tipRadius ? 0 : (d - tipRadius) / tanAngle;
+      const hFinal = Math.max(flatDepth, Math.min(maxDepth, rawH));
+      const z      = topZ - hFinal;
 
-      // Jump directly to the first ring where this pass needs to cut.
-      const minD   = Math.max(XY_STEP, prevMaxH * tanAngle + tipRadius);
-      const startI = Math.max(1, Math.ceil(minD / XY_STEP));
+      // Shrink outer boundary inward by d — ring of points at distance d from edge.
+      const shrunkOuter = offsetPolyline(outer, d, true);
+      if (!shrunkOuter || shrunkOuter.length === 0) break; // shape fully collapsed
 
-      let prevHThis = -Infinity;
+      // Grow each hole outward by d — exclusion zone around each hole boundary.
+      // differencePolygons subtracts these from each shrunk ring; Clipper also
+      // returns the hole inner boundary as a CW path (reversed → CCW by
+      // differencePolygons), so both sides of the groove are traced automatically.
+      const expandedHoles = holes.flatMap(hole => offsetPolyline(hole, -d, true));
+      const validRings = expandedHoles.length > 0
+        ? shrunkOuter.flatMap(r => differencePolygons(r, expandedHoles))
+        : shrunkOuter;
+      if (!validRings || validRings.length === 0) break;
 
-      for (let i = startI; i <= 5000; i++) {
-        const d      = i * XY_STEP;
-        const rawH   = d <= tipRadius ? 0 : (d - tipRadius) / tanAngle;
-        const hFinal = Math.max(flatDepth, Math.min(maxDepth, rawH));
+      let gotAny = false;
+      for (const ring of validRings) {
+        if (!ring || ring.length < 3) continue;
+        const pts = stripClose([...ring]);
+        if (pts.length < 3) continue;
 
-        // Skip rings already cut at full final depth by a previous pass.
-        if (hFinal <= prevMaxH) continue;
-
-        const hThis = Math.min(passMaxH, hFinal);
-
-        // Shrink outer boundary inward by d — points at distance ≥ d from outer.
-        const shrunkOuter = offsetPolyline(outer, d, true);
-        if (!shrunkOuter || shrunkOuter.length === 0) break; // shape fully collapsed
-
-        // Grow each hole outward by d — exclusion zone around each hole boundary.
-        // differencePolygons subtracts these from each shrunk ring; Clipper also
-        // returns the hole inner boundary as a CW path (reversed → CCW by
-        // differencePolygons), so both sides of the groove are traced automatically.
-        const expandedHoles = holes.flatMap(hole => offsetPolyline(hole, -d, true));
-
-        const validRings = expandedHoles.length > 0
-          ? shrunkOuter.flatMap(r => differencePolygons(r, expandedHoles))
-          : shrunkOuter;
-
-        if (!validRings || validRings.length === 0) break; // valid region collapsed
-
-        const atCap = hThis >= passMaxH && prevHThis >= passMaxH;
-        let gotAny = false;
-
-        for (const ring of validRings) {
-          if (!ring || ring.length < 3) continue;
-          const pts = stripClose([...ring]);
-          if (pts.length < 3) continue;
-
-          gotAny = true;
-          anyMoves = true;
-          const z = topZ - hThis;
-
-          moves.push({ type: 'rapid', x: pts[0].x, y: pts[0].y, z: safeZ });
-          moves.push({ type: 'feed',  x: pts[0].x, y: pts[0].y, z, f: plungeRate });
-          for (let j = 1; j < pts.length; j++) {
-            moves.push({ type: 'feed', x: pts[j].x, y: pts[j].y, z, f: feedRate });
-          }
-          moves.push({ type: 'feed', x: pts[0].x, y: pts[0].y, z, f: feedRate });
+        gotAny = true;
+        anyMoves = true;
+        moves.push({ type: 'rapid', x: pts[0].x, y: pts[0].y, z: safeZ });
+        moves.push({ type: 'feed',  x: pts[0].x, y: pts[0].y, z, f: plungeRate });
+        for (let j = 1; j < pts.length; j++) {
+          moves.push({ type: 'feed', x: pts[j].x, y: pts[j].y, z, f: feedRate });
         }
-
-        if (!gotAny || atCap) break;
-        prevHThis = hThis;
+        moves.push({ type: 'feed', x: pts[0].x, y: pts[0].y, z, f: feedRate });
       }
+
+      if (!gotAny) break;
     }
 
     if (!anyMoves) {

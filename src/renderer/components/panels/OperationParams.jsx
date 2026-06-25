@@ -971,14 +971,8 @@ export default function OperationParams({ op, tools, operations = [], onChange }
           Set tip ⌀ to 0 for a pointed V-bit. Non-zero = flat-bottom V-bit.
         </div>
         <div style={S.section}>Depth</div>
-        <Field label="Max Depth" unit={distUnit} tip="Maximum V-carve depth. Wide features that would need a deeper cut are pocket-cleared to this depth instead of plunging past it.">
+        <Field label="Max Depth" unit={distUnit} tip="Maximum V-carve depth. Wide features that would need a deeper cut are flat-cleared to this depth instead of plunging past it.">
           <NumInput value={toDisp(p.maxDepth ?? 15)} onChange={v => set('maxDepth', toMM(v))} min={isInch ? 0.004 : 0.1} step={dStep} />
-        </Field>
-        <Field label="Depth/Pass" unit={distUnit} tip="Maximum cut depth per pass. For shallow V-carving, often set equal to Max Depth (one pass). Deeper work may need multiple passes.">
-          <NumInput value={toDisp(p.depthPerPass ?? (p.maxDepth ?? 15))} onChange={v => set('depthPerPass', toMM(v))} min={isInch ? 0.001 : 0.01} step={dStep} />
-        </Field>
-        <Field label="Num Passes" tip="Calculated as Max Depth ÷ Depth/Pass. Edit to adjust depth per pass proportionally.">
-          <NumInput value={Math.max(1, Math.ceil((p.maxDepth ?? 15) / (p.depthPerPass ?? (p.maxDepth ?? 15))))} onChange={v => { const n = Math.max(1, Math.round(v)); set('depthPerPass', (p.maxDepth ?? 15) / n); }} min={1} step={1} />
         </Field>
         <Field label="Flat Depth" unit={distUnit} tip="Minimum depth cut at all shape edges. 0 = exact V intersection at the boundary. A non-zero value raises the floor at the edges slightly, creating a small flat at the shape outline.">
           <NumInput value={toDisp(p.flatDepth ?? 0)} onChange={v => set('flatDepth', toMM(v))} min={0} step={dStep} />
