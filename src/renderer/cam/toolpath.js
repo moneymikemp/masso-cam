@@ -385,11 +385,14 @@ function generatePocket(op, entities, context = {}) {
   // Expand each island outward by toolR to get the exclusion zone the tool
   // centre must stay outside of.  For a CCW polygon positive offset = inward,
   // so expand outward with -toolR (after normalising to CCW).
-  const islandExclusions = islandProfiles.map(island => {
+  const islandExclusions = islandProfiles.map((island, idx) => {
     const ccw = isClockwise(island) ? [...island].reverse() : island;
     const expanded = offsetPolyline(ccw, -toolR, true)[0];
-    return expanded && expanded.length >= 3 ? expanded : ccw;
+    const result = expanded && expanded.length >= 3 ? expanded : ccw;
+    console.log(`[DBG pocket] island[${idx}] pts=${island.length} cw=${isClockwise(island)} expanded=${expanded?.length ?? 'FAIL'} exclusion_pts=${result.length}`);
+    return result;
   });
+  console.log(`[DBG pocket] profiles=${profiles.length} outerArea=${polygonArea(outerProfile).toFixed(1)} islands=${islandExclusions.length} cutSide=${p.cutSide}`);
   const hasIslands = islandExclusions.length > 0;
   if (hasIslands && p.cutSide !== 'outside') {
     const chkOffset = toolR + (p.finishPass ? (p.finishAllowance || 0.2) : 0);
