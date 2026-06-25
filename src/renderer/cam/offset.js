@@ -143,7 +143,12 @@ export function generatePocketOffsets(outerPoints, toolRadius, stepover, islands
             if (clip.length >= 3) dc.AddPath(toClipper(clip), ClipperLib.PolyType.ptClip, true);
           }
           const dcSol = new ClipperLib.Paths();
-          dc.Execute(ClipperLib.ClipType.ctDifference, dcSol);
+          // Use pftNonZero for the clip so overlapping island exclusion zones are
+          // treated as a single filled union. The default pftEvenOdd would count
+          // points inside two overlapping islands as "outside" (even winding) and
+          // fail to subtract the intersection region from the ring pass.
+          dc.Execute(ClipperLib.ClipType.ctDifference, dcSol,
+            ClipperLib.PolyFillType.pftNonZero, ClipperLib.PolyFillType.pftNonZero);
           for (const path of dcSol) {
             const pts = fromClipper(path);
             if (pts.length < 3 || isClockwise(pts)) continue; // CW = hole boundary, skip
@@ -199,7 +204,8 @@ export function generateRestMachiningPasses(profile, currentToolRadius, previous
             if (clip.length >= 3) dc2.AddPath(toClipper(clip), ClipperLib.PolyType.ptClip, true);
           }
           const dcSol2 = new ClipperLib.Paths();
-          dc2.Execute(ClipperLib.ClipType.ctDifference, dcSol2);
+          dc2.Execute(ClipperLib.ClipType.ctDifference, dcSol2,
+            ClipperLib.PolyFillType.pftNonZero, ClipperLib.PolyFillType.pftNonZero);
           for (const path of dcSol2) {
             const pts = fromClipper(path);
             if (pts.length < 3 || isClockwise(pts)) continue;
