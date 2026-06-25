@@ -85,6 +85,7 @@ const initialState = {
     wcs: 'G54',
     stockOriginX: 0,  // world-space X of the datum point
     stockOriginY: 0,  // world-space Y of the datum point
+    stockOffset: 0,   // uniform per-side margin applied around part bounds (mm)
   },
 
   // Machine / post config

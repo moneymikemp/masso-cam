@@ -168,6 +168,25 @@ export default function StockPanel() {
   function toDisp(v) { return isInch ? +(v / MM_PER_INCH).toFixed(4) : v; }
   function toMM(v)   { return isInch ? v * MM_PER_INCH : v; }
 
+  // Apply a uniform per-side offset around the current part bounds.
+  // Updates width, length, and the stock origin so the geometry stays centred.
+  // If no geometry is loaded, only the stored offset value is updated.
+  function applyStockOffset(dispVal) {
+    const offMM = toMM(dispVal);
+    const updates = { stockOffset: offMM };
+    if (hasGeometry) {
+      const { minX: gMinX, minY: gMinY, maxX: gMaxX, maxY: gMaxY } = bounds;
+      const gW = gMaxX - gMinX, gH = gMaxY - gMinY;
+      const newW = gW + 2 * offMM;
+      const newL = gH + 2 * offMM;
+      updates.width  = newW;
+      updates.length = newL;
+      updates.stockOriginX = gMinX - offMM + datumXFrac(stockConfig.datum) * newW;
+      updates.stockOriginY = gMinY - offMM + datumYFrac(stockConfig.datum) * newL;
+    }
+    dispatch({ type: 'SET_STOCK_CONFIG', payload: updates });
+  }
+
   const distUnit = isInch ? 'in' : 'mm';
   const dStep    = isInch ? 0.01 : 1;
 
@@ -217,6 +236,11 @@ export default function StockPanel() {
         <div style={S.row}>
           <span style={S.label}>Length (Y)</span>
           <NumInput value={toDisp(stockConfig.length)} onChange={v => set('length', toMM(v))} min={0} step={dStep} />
+          <span style={S.unit}>{distUnit}</span>
+        </div>
+        <div style={S.row}>
+          <span style={S.label} title="Uniform margin added to each side of the part bounds. Updates Width and Length automatically. Edit Width / Length directly to override.">Stock Offset</span>
+          <NumInput value={toDisp(stockConfig.stockOffset ?? 0)} onChange={applyStockOffset} min={0} step={dStep} />
           <span style={S.unit}>{distUnit}</span>
         </div>
         <div style={S.row}>
