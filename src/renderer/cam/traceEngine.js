@@ -61,12 +61,12 @@ function unwrapAngles(angles) {
 // Convert an array of {x,y} vertices (world mm) into a mix of line and arc segments.
 // arcTolerance: max RMS deviation (mm) from a fitted circle to consider the segment an arc.
 // minArcDeg: minimum arc span in degrees to emit an arc entity (avoids trivial arcs).
-export function fitArcsToChain(vertices, arcTolerance = 1.0, minArcDeg = 15) {
+export function fitArcsToChain(vertices, arcTolerance = 1.0, minArcDeg = 15, { maxWindow = 14, maxSpanDeg = 150 } = {}) {
   const n = vertices.length;
   if (n < 2) return [];
   const result = [];
-  const MAX_WINDOW  = 14;  // max vertices in one arc window (prevents spanning concave features)
-  const MAX_SPAN_DEG = 150; // cap arc span — wider arcs are almost always fitting artifacts
+  const MAX_WINDOW  = maxWindow;
+  const MAX_SPAN_DEG = maxSpanDeg;
   let i = 0;
 
   while (i < n - 1) {
