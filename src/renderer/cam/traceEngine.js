@@ -233,7 +233,7 @@ function rdp(pts, tol) {
   return [s, e];
 }
 
-export function traceImage(imgEl, refImage, threshold = 0.5, simplifyTolerance = 1.5) {
+export function traceImage(imgEl, refImage, threshold = 0.5, simplifyTolerance = 1.5, smoothPasses = 2) {
   const MAX_DIM = 600;
   const sd = Math.min(1, MAX_DIM / Math.max(imgEl.naturalWidth || 1, imgEl.naturalHeight || 1));
   const pw = Math.max(2, Math.round(imgEl.naturalWidth * sd));
@@ -312,7 +312,7 @@ export function traceImage(imgEl, refImage, threshold = 0.5, simplifyTolerance =
   const oy = refImage.y || 0;
   const result = [];
   for (const chain of chains) {
-    const simplified = rdp(smoothChain(chain, 2), simplifyTolerance);
+    const simplified = rdp(smoothPasses > 0 ? smoothChain(chain, smoothPasses) : chain, simplifyTolerance);
     if (simplified.length < 2) continue;
     result.push(simplified.map(pt => ({
       x: ox + pt.x * mmPP,

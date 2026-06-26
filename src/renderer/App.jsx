@@ -182,9 +182,10 @@ export default function App() {
     if (!refImage || !refImageElRef.current) { setTracePreview(null); return; }
     const timer = setTimeout(() => {
       try {
-        const threshold = traceThreshold / 100;
-        const simplify  = 0.1 + (traceSmooth / 80) * 4.9;
-        const chains = traceImage(refImageElRef.current, refImage, threshold, simplify);
+        const threshold   = traceThreshold / 100;
+        const simplify    = 0.05 + (traceSmooth / 80) * 2.95; // 0.05mm tight → 3.0mm loose
+        const smoothPasses = Math.round((traceSmooth / 80) * 3); // 0 passes at low Smooth, 3 at high
+        const chains = traceImage(refImageElRef.current, refImage, threshold, simplify, smoothPasses);
         if (!chains.length) { setTracePreview(null); return; }
         if (traceArcFit > 0) {
           // arcTolerance: 0.03mm at slider=1 (tight), 0.5mm at slider=100 (loose).
@@ -660,7 +661,7 @@ export default function App() {
                 <span style={{ color:'#00ccff' }}>Smooth</span>
                 <input type="range" min={1} max={80} value={traceSmooth} style={{ width:80, accentColor:'#00aacc' }}
                   onChange={e => setTraceSmooth(+e.target.value)}
-                  title="Smoothness — low = follow every pixel, high = simplify curves" />
+                  title="Smooth — left = tight pixel-hugging outline (may staircase), right = smoother curves with more simplification" />
                 <span style={{ color:'#00ccff' }}>Arc Fit</span>
                 <input type="range" min={0} max={100} value={traceArcFit} style={{ width:90, accentColor:'#00aacc' }}
                   onChange={e => setTraceArcFit(+e.target.value)}
