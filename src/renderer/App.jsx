@@ -14,7 +14,7 @@ import { parseDxf, getBounds } from './dxf/parser';
 import { exportDxf as generateDxf } from './dxf/exporter';
 import { generateGcode, generateGcodeByTool } from './gcode/postprocessor';
 import { offsetEntity } from './cam/offsetEngine';
-import { traceImage } from './cam/traceEngine';
+import { traceImage, fitArcsToChain } from './cam/traceEngine';
 import InlayWizard from './components/panels/InlayWizard';
 import ToolLibraryModal from './components/panels/ToolLibraryModal';
 import MachineProfilesModal from './components/panels/MachineProfilesModal';
@@ -166,8 +166,9 @@ export default function App() {
   const [wcsPopover, setWcsPopover] = useState(null); // workspace id whose settings are open
   const refImageElRef = useRef(null); // cached HTMLImageElement for tracing
   const [traceThreshold, setTraceThreshold] = useState(50);  // 10-90 → 0.10-0.90
-  const [traceSmooth, setTraceSmooth] = useState(20);        // 1-100 → 0.1-5.0 RDP tolerance
-  const [tracePreview, setTracePreview] = useState(null);    // live preview chains (world mm)
+  const [traceSmooth, setTraceSmooth] = useState(20);        // 1-80 → RDP tolerance
+  const [traceArcFit, setTraceArcFit] = useState(50);        // 0 = lines only; 1-100 → arc tolerance
+  const [tracePreview, setTracePreview] = useState(null);    // live preview: Array<Array<{type,...}>>
 
   useEffect(() => {
     if (window.electron) {
@@ -175,19 +176,30 @@ export default function App() {
     }
   }, []);
 
-  // Live trace preview — re-runs whenever threshold, smooth, or the reference image changes.
+  // Live trace preview — re-runs whenever threshold, smooth, arcFit, or the reference image changes.
+  // tracePreview shape: Array<Array<{type:'line',start,end} | {type:'arc',center,radius,startAngle,endAngle}>>
   useEffect(() => {
     if (!refImage || !refImageElRef.current) { setTracePreview(null); return; }
     const timer = setTimeout(() => {
       try {
         const threshold = traceThreshold / 100;
-        const simplify  = 0.1 + (traceSmooth / 100) * 4.9;
+        const simplify  = 0.1 + (traceSmooth / 80) * 4.9;
         const chains = traceImage(refImageElRef.current, refImage, threshold, simplify);
-        setTracePreview(chains.length ? chains : null);
+        if (!chains.length) { setTracePreview(null); return; }
+        if (traceArcFit > 0) {
+          // arcTolerance: 0.2mm at slider=1, 3.0mm at slider=100
+          const arcTol = 0.2 + (traceArcFit / 100) * 2.8;
+          setTracePreview(chains.map(verts => fitArcsToChain(verts, arcTol, 12)));
+        } else {
+          // Pure lines: convert each consecutive pair of chain points to a line segment
+          setTracePreview(chains.map(chain =>
+            chain.slice(0, -1).map((pt, i) => ({ type: 'line', start: pt, end: chain[i + 1] }))
+          ));
+        }
       } catch { setTracePreview(null); }
     }, 60);
     return () => clearTimeout(timer);
-  }, [refImage, traceThreshold, traceSmooth]);
+  }, [refImage, traceThreshold, traceSmooth, traceArcFit]);
 
   // Load a project file passed as CLI argument (file association double-click at launch)
   useEffect(() => {
@@ -473,16 +485,22 @@ export default function App() {
       dispatch({ type: 'SET_STATUS', payload: 'No trace preview — load an image and adjust sliders first' });
       return;
     }
-    // Commit the live preview chains directly as polylines so entities match exactly what was shown.
-    const newEntities = tracePreview.map(verts => ({
-      id: uuid(),
-      type: 'polyline',
-      layer: '0',
-      vertices: verts.map(pt => ({ x: pt.x, y: pt.y, bulge: 0 })),
-      closed: false,
-    }));
+    // Commit exactly what the preview shows: line/arc segments from each chain.
+    let lineCount = 0, arcCount = 0;
+    const newEntities = [];
+    for (const chain of tracePreview) {
+      for (const seg of chain) {
+        if (seg.type === 'line') {
+          newEntities.push({ id: uuid(), type: 'line', layer: '0', start: seg.start, end: seg.end });
+          lineCount++;
+        } else if (seg.type === 'arc') {
+          newEntities.push({ id: uuid(), type: 'arc', layer: '0', center: seg.center, radius: seg.radius, startAngle: seg.startAngle, endAngle: seg.endAngle });
+          arcCount++;
+        }
+      }
+    }
     dispatch({ type: 'ADD_ENTITIES', payload: newEntities });
-    dispatch({ type: 'SET_STATUS', payload: `Traced ${newEntities.length} outline${newEntities.length !== 1 ? 's' : ''}` });
+    dispatch({ type: 'SET_STATUS', payload: `Traced ${tracePreview.length} outline${tracePreview.length !== 1 ? 's' : ''}: ${lineCount} lines, ${arcCount} arcs` });
   }, [tracePreview, dispatch]);
 
   function runOffset(distance, direction) {
@@ -628,20 +646,25 @@ export default function App() {
               <button title="Clear reference image" style={{ ...S.tbBtn, borderColor:'#5a3a3a', color:'#cc8888' }} onClick={() => { dispatch({ type:'SET_REF_IMAGE', payload:null }); refImageElRef.current = null; setTracePreview(null); }}>✕ Img</button>
               <span style={{ fontSize:10, color:'#556688', display:'flex', alignItems:'center', gap:4 }}>
                 <span>Opacity</span>
-                <input type="range" min={5} max={80} value={Math.round((refImage.opacity??0.35)*100)} style={{ width:55, accentColor:'#5566aa' }}
+                <input type="range" min={5} max={80} value={Math.round((refImage.opacity??0.35)*100)} style={{ width:80, accentColor:'#5566aa' }}
                   onChange={e => dispatch({ type:'UPDATE_REF_IMAGE', payload:{ opacity: +e.target.value/100 } })} />
                 <span>Scale</span>
-                <input type="range" min={1} max={200} value={Math.round((refImage.mmPerPixel||0.1)*100)} style={{ width:55, accentColor:'#5566aa' }}
+                <input type="range" min={1} max={200} value={Math.round((refImage.mmPerPixel||0.1)*100)} style={{ width:80, accentColor:'#5566aa' }}
                   onChange={e => dispatch({ type:'UPDATE_REF_IMAGE', payload:{ mmPerPixel: +e.target.value/100 } })} />
                 <span style={{ color:'#00ccff' }}>Threshold</span>
-                <input type="range" min={10} max={90} value={traceThreshold} style={{ width:65, accentColor:'#00aacc' }}
+                <input type="range" min={10} max={90} value={traceThreshold} style={{ width:90, accentColor:'#00aacc' }}
                   onChange={e => setTraceThreshold(+e.target.value)}
                   title={`Pixel threshold: ${traceThreshold}% — lower = tighter (dark pixels only), higher = looser (includes lighter pixels)`} />
-                <span style={{ color:'#00ccff', minWidth:22 }}>{traceThreshold}%</span>
+                <span style={{ color:'#00ccff', minWidth:24 }}>{traceThreshold}%</span>
                 <span style={{ color:'#00ccff' }}>Smooth</span>
-                <input type="range" min={1} max={80} value={traceSmooth} style={{ width:55, accentColor:'#00aacc' }}
+                <input type="range" min={1} max={80} value={traceSmooth} style={{ width:80, accentColor:'#00aacc' }}
                   onChange={e => setTraceSmooth(+e.target.value)}
                   title="Smoothness — low = follow every pixel, high = simplify curves" />
+                <span style={{ color:'#00ccff' }}>Arc Fit</span>
+                <input type="range" min={0} max={100} value={traceArcFit} style={{ width:90, accentColor:'#00aacc' }}
+                  onChange={e => setTraceArcFit(+e.target.value)}
+                  title={traceArcFit === 0 ? 'Arc Fit: off — committing straight lines only' : `Arc Fit: ${traceArcFit}% — fitting arcs to curves (tolerance ${(0.2 + traceArcFit/100*2.8).toFixed(1)} mm)`} />
+                <span style={{ color:'#00ccff', minWidth:20 }}>{traceArcFit === 0 ? 'off' : traceArcFit}</span>
               </span>
             </>}
           </>}

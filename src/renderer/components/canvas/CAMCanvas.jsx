@@ -1648,15 +1648,26 @@ export default function CAMCanvas({ tracePreview = null }) {
     ctx.lineWidth = 1.5;
     ctx.setLineDash([]);
     for (const chain of tracePreview) {
-      if (chain.length < 2) continue;
-      ctx.beginPath();
-      const s = w2c(chain[0].x, chain[0].y);
-      ctx.moveTo(s.x, s.y);
-      for (let k = 1; k < chain.length; k++) {
-        const p = w2c(chain[k].x, chain[k].y);
-        ctx.lineTo(p.x, p.y);
+      if (!chain.length) continue;
+      for (const seg of chain) {
+        ctx.beginPath();
+        if (seg.type === 'line') {
+          const s = w2c(seg.start.x, seg.start.y);
+          const e = w2c(seg.end.x, seg.end.y);
+          ctx.moveTo(s.x, s.y);
+          ctx.lineTo(e.x, e.y);
+        } else if (seg.type === 'arc') {
+          const pts = arcToPoints(seg.center, seg.radius, seg.startAngle, seg.endAngle, 32);
+          if (pts.length < 2) continue;
+          const first = w2c(pts[0].x, pts[0].y);
+          ctx.moveTo(first.x, first.y);
+          for (let k = 1; k < pts.length; k++) {
+            const p = w2c(pts[k].x, pts[k].y);
+            ctx.lineTo(p.x, p.y);
+          }
+        }
+        ctx.stroke();
       }
-      ctx.stroke();
     }
     ctx.restore();
   }
