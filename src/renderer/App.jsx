@@ -187,10 +187,10 @@ export default function App() {
         const chains = traceImage(refImageElRef.current, refImage, threshold, simplify);
         if (!chains.length) { setTracePreview(null); return; }
         if (traceArcFit > 0) {
-          // arcTolerance: 0.03mm at slider=1 (tight), 0.5mm at slider=100 (loose).
-          // Keep maxSpanDeg=90 and maxWindow=8 to prevent large swooping arcs on image traces.
-          const arcTol = 0.03 + (traceArcFit / 100) * 0.47;
-          setTracePreview(chains.map(verts => fitArcsToChain(verts, arcTol, 10, { maxWindow: 8, maxSpanDeg: 90 })));
+          // arcTolerance: 0.15mm at slider=1 (tight — only clear circles), 1.5mm at slider=100 (loose).
+          // 0.15mm floor matches typical smoothing-induced vertex noise; 90° span cap prevents sweeping arcs.
+          const arcTol = 0.15 + (traceArcFit / 100) * 1.35;
+          setTracePreview(chains.map(verts => fitArcsToChain(verts, arcTol, 10, { maxWindow: 10, maxSpanDeg: 90 })));
         } else {
           // Pure lines: convert each consecutive pair of chain points to a line segment
           setTracePreview(chains.map(chain =>
@@ -664,7 +664,7 @@ export default function App() {
                 <span style={{ color:'#00ccff' }}>Arc Fit</span>
                 <input type="range" min={0} max={100} value={traceArcFit} style={{ width:90, accentColor:'#00aacc' }}
                   onChange={e => setTraceArcFit(+e.target.value)}
-                  title={traceArcFit === 0 ? 'Arc Fit: off — straight lines only' : `Arc Fit: ${traceArcFit}% — arc tolerance ${(0.03 + traceArcFit/100*0.47).toFixed(2)} mm`} />
+                  title={traceArcFit === 0 ? 'Arc Fit: off — straight lines only' : `Arc Fit: ${traceArcFit}% — arc tolerance ${(0.15 + traceArcFit/100*1.35).toFixed(2)} mm`} />
                 <span style={{ color:'#00ccff', minWidth:20 }}>{traceArcFit === 0 ? 'off' : traceArcFit}</span>
               </span>
             </>}
