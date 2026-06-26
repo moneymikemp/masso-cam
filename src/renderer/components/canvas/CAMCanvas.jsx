@@ -820,7 +820,7 @@ function CtxItem({ label, onClick }) {
 
 // ─────────────────────────────────────────────────────────────────────────────
 
-export default function CAMCanvas() {
+export default function CAMCanvas({ tracePreview = null }) {
   const canvasRef = useRef(null);
   const { state, dispatch } = useApp();
   const [isPanning, setIsPanning] = useState(false);
@@ -1127,6 +1127,7 @@ export default function CAMCanvas() {
     drawStock(ctx);
     if (showToolpaths && showOnionSkin) drawOnionSkin(ctx);
     drawOrigin(ctx);
+    drawTracePreview(ctx);
     drawEntities(ctx);
     drawPreviewEntities(ctx);
     if (showToolpaths) {
@@ -1638,6 +1639,26 @@ export default function CAMCanvas() {
         ctx.setLineDash([]);
       }
     }
+  }
+
+  function drawTracePreview(ctx) {
+    if (!tracePreview?.length) return;
+    ctx.save();
+    ctx.strokeStyle = 'rgba(0, 220, 255, 0.75)';
+    ctx.lineWidth = 1.5;
+    ctx.setLineDash([]);
+    for (const chain of tracePreview) {
+      if (chain.length < 2) continue;
+      ctx.beginPath();
+      const s = w2c(chain[0].x, chain[0].y);
+      ctx.moveTo(s.x, s.y);
+      for (let k = 1; k < chain.length; k++) {
+        const p = w2c(chain[k].x, chain[k].y);
+        ctx.lineTo(p.x, p.y);
+      }
+      ctx.stroke();
+    }
+    ctx.restore();
   }
 
   function drawMedialAxis(ctx) {

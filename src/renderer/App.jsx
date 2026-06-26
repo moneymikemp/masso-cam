@@ -165,12 +165,29 @@ export default function App() {
   const [offsetModal, setOffsetModal] = useState(null); // null | { distance: '', direction: 'both' }
   const [wcsPopover, setWcsPopover] = useState(null); // workspace id whose settings are open
   const refImageElRef = useRef(null); // cached HTMLImageElement for tracing
+  const [traceThreshold, setTraceThreshold] = useState(50);  // 10-90 → 0.10-0.90
+  const [traceSmooth, setTraceSmooth] = useState(20);        // 1-100 → 0.1-5.0 RDP tolerance
+  const [tracePreview, setTracePreview] = useState(null);    // live preview chains (world mm)
 
   useEffect(() => {
     if (window.electron) {
       window.electron.getTools().then(tools => dispatch({ type: 'SET_TOOLS', payload: tools }));
     }
   }, []);
+
+  // Live trace preview — re-runs whenever threshold, smooth, or the reference image changes.
+  useEffect(() => {
+    if (!refImage || !refImageElRef.current) { setTracePreview(null); return; }
+    const timer = setTimeout(() => {
+      try {
+        const threshold = traceThreshold / 100;
+        const simplify  = 0.1 + (traceSmooth / 100) * 4.9;
+        const chains = traceImage(refImageElRef.current, refImage, threshold, simplify);
+        setTracePreview(chains.length ? chains : null);
+      } catch { setTracePreview(null); }
+    }, 60);
+    return () => clearTimeout(timer);
+  }, [refImage, traceThreshold, traceSmooth]);
 
   // Load a project file passed as CLI argument (file association double-click at launch)
   useEffect(() => {
@@ -458,7 +475,9 @@ export default function App() {
     }
     dispatch({ type: 'SET_STATUS', payload: 'Tracing…' });
     try {
-      const chains = traceImage(refImageElRef.current, refImage, 0.5, 0.5);
+      const threshold = traceThreshold / 100;
+      const simplify  = 0.1 + (traceSmooth / 100) * 4.9;
+      const chains = traceImage(refImageElRef.current, refImage, threshold, simplify);
       if (!chains.length) { dispatch({ type: 'SET_STATUS', payload: 'Trace found no outlines (try adjusting threshold)' }); return; }
       const newEntities = [];
       let lineCount = 0, arcCount = 0;
@@ -479,7 +498,7 @@ export default function App() {
     } catch (err) {
       dispatch({ type: 'SET_STATUS', payload: 'Trace failed: ' + err.message });
     }
-  }, [refImage, dispatch]);
+  }, [refImage, traceThreshold, traceSmooth, dispatch]);
 
   function runOffset(distance, direction) {
     const sel = entities.filter(e => selectedEntityIds.includes(e.id));
@@ -616,15 +635,28 @@ export default function App() {
             <div style={{ width:1, background:'#2a2a50', margin:'0 2px' }} />
             <button title="Import reference image (JPG/PNG)" style={S.tbBtn} onClick={importRefImage}>🖼 Ref Img</button>
             {refImage && <>
-              <button title="Auto-trace reference image to polylines" style={{ ...S.tbBtn, borderColor:'#3a5a3a', color:'#88cc88' }} onClick={runAutoTrace}>⟳ Trace</button>
-              <button title="Clear reference image" style={{ ...S.tbBtn, borderColor:'#5a3a3a', color:'#cc8888' }} onClick={() => { dispatch({ type:'SET_REF_IMAGE', payload:null }); refImageElRef.current = null; }}>✕ Img</button>
+              <button
+                title="Apply trace to drawing — adds the cyan preview outlines as entities"
+                style={{ ...S.tbBtn, borderColor:'#3a5a3a', color:'#88cc88' }}
+                onClick={runAutoTrace}
+              >⟳ Apply Trace</button>
+              <button title="Clear reference image" style={{ ...S.tbBtn, borderColor:'#5a3a3a', color:'#cc8888' }} onClick={() => { dispatch({ type:'SET_REF_IMAGE', payload:null }); refImageElRef.current = null; setTracePreview(null); }}>✕ Img</button>
               <span style={{ fontSize:10, color:'#556688', display:'flex', alignItems:'center', gap:4 }}>
                 <span>Opacity</span>
-                <input type="range" min={5} max={80} value={Math.round((refImage.opacity??0.35)*100)} style={{ width:60, accentColor:'#5566aa' }}
+                <input type="range" min={5} max={80} value={Math.round((refImage.opacity??0.35)*100)} style={{ width:55, accentColor:'#5566aa' }}
                   onChange={e => dispatch({ type:'UPDATE_REF_IMAGE', payload:{ opacity: +e.target.value/100 } })} />
                 <span>Scale</span>
-                <input type="range" min={1} max={200} value={Math.round((refImage.mmPerPixel||0.1)*100)} style={{ width:60, accentColor:'#5566aa' }}
+                <input type="range" min={1} max={200} value={Math.round((refImage.mmPerPixel||0.1)*100)} style={{ width:55, accentColor:'#5566aa' }}
                   onChange={e => dispatch({ type:'UPDATE_REF_IMAGE', payload:{ mmPerPixel: +e.target.value/100 } })} />
+                <span style={{ color:'#00ccff' }}>Threshold</span>
+                <input type="range" min={10} max={90} value={traceThreshold} style={{ width:65, accentColor:'#00aacc' }}
+                  onChange={e => setTraceThreshold(+e.target.value)}
+                  title={`Pixel threshold: ${traceThreshold}% — lower = tighter (dark pixels only), higher = looser (includes lighter pixels)`} />
+                <span style={{ color:'#00ccff', minWidth:22 }}>{traceThreshold}%</span>
+                <span style={{ color:'#00ccff' }}>Smooth</span>
+                <input type="range" min={1} max={80} value={traceSmooth} style={{ width:55, accentColor:'#00aacc' }}
+                  onChange={e => setTraceSmooth(+e.target.value)}
+                  title="Smoothness — low = follow every pixel, high = simplify curves" />
               </span>
             </>}
           </>}
@@ -790,7 +822,7 @@ export default function App() {
           </div>
           <CADToolsPanel />
         </div>
-        <div style={S.canvas}>{view3d ? <ThreeCanvas /> : <CAMCanvas />}</div>
+        <div style={S.canvas}>{view3d ? <ThreeCanvas /> : <CAMCanvas tracePreview={tracePreview} />}</div>
         <div style={S.rightPanel}>
           <div style={S.tabBar}>
             {cadMode && <div style={S.tab(activePanelTab === 'props')} onClick={() => dispatch({ type: 'SET_PANEL_TAB', payload: 'props' })}>Props</div>}
