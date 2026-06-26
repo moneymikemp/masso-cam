@@ -14,7 +14,7 @@ import { parseDxf, getBounds } from './dxf/parser';
 import { exportDxf as generateDxf } from './dxf/exporter';
 import { generateGcode, generateGcodeByTool } from './gcode/postprocessor';
 import { offsetEntity } from './cam/offsetEngine';
-import { traceImage, fitArcsToChain } from './cam/traceEngine';
+import { traceImage } from './cam/traceEngine';
 import InlayWizard from './components/panels/InlayWizard';
 import ToolLibraryModal from './components/panels/ToolLibraryModal';
 import MachineProfilesModal from './components/panels/MachineProfilesModal';
@@ -468,37 +468,22 @@ export default function App() {
     img.src = dataUrl;
   }, [dispatch]);
 
-  const runAutoTrace = useCallback(async () => {
-    if (!refImage || !refImageElRef.current) {
-      dispatch({ type: 'SET_STATUS', payload: 'Load a reference image first' });
+  const runAutoTrace = useCallback(() => {
+    if (!tracePreview?.length) {
+      dispatch({ type: 'SET_STATUS', payload: 'No trace preview — load an image and adjust sliders first' });
       return;
     }
-    dispatch({ type: 'SET_STATUS', payload: 'Tracing…' });
-    try {
-      const threshold = traceThreshold / 100;
-      const simplify  = 0.1 + (traceSmooth / 100) * 4.9;
-      const chains = traceImage(refImageElRef.current, refImage, threshold, simplify);
-      if (!chains.length) { dispatch({ type: 'SET_STATUS', payload: 'Trace found no outlines (try adjusting threshold)' }); return; }
-      const newEntities = [];
-      let lineCount = 0, arcCount = 0;
-      for (const verts of chains) {
-        const segs = fitArcsToChain(verts, 0.35, 15);
-        for (const seg of segs) {
-          if (seg.type === 'line') {
-            newEntities.push({ id: uuid(), type: 'line', layer: '0', start: seg.start, end: seg.end });
-            lineCount++;
-          } else if (seg.type === 'arc') {
-            newEntities.push({ id: uuid(), type: 'arc', layer: '0', center: seg.center, radius: seg.radius, startAngle: seg.startAngle, endAngle: seg.endAngle });
-            arcCount++;
-          }
-        }
-      }
-      dispatch({ type: 'ADD_ENTITIES', payload: newEntities });
-      dispatch({ type: 'SET_STATUS', payload: `Traced ${chains.length} outline${chains.length > 1 ? 's' : ''}: ${lineCount} lines, ${arcCount} arcs` });
-    } catch (err) {
-      dispatch({ type: 'SET_STATUS', payload: 'Trace failed: ' + err.message });
-    }
-  }, [refImage, traceThreshold, traceSmooth, dispatch]);
+    // Commit the live preview chains directly as polylines so entities match exactly what was shown.
+    const newEntities = tracePreview.map(verts => ({
+      id: uuid(),
+      type: 'polyline',
+      layer: '0',
+      vertices: verts.map(pt => ({ x: pt.x, y: pt.y, bulge: 0 })),
+      closed: false,
+    }));
+    dispatch({ type: 'ADD_ENTITIES', payload: newEntities });
+    dispatch({ type: 'SET_STATUS', payload: `Traced ${newEntities.length} outline${newEntities.length !== 1 ? 's' : ''}` });
+  }, [tracePreview, dispatch]);
 
   function runOffset(distance, direction) {
     const sel = entities.filter(e => selectedEntityIds.includes(e.id));
