@@ -1047,8 +1047,6 @@ function generateVCarve(op, entities, context = {}) {
   const feedRate     = p.feedRate ?? 1500;
   const plungeRate   = p.plungeRate ?? 300;
 
-  // Require explicit entity assignment — the fallback to all entities in
-  // getSelectedEntities would pick up reference geometry (bounding boxes, etc.)
   if (!op.selectedIds?.length) return { moves: [], warnings: ['Select letter/shape entities for this operation (use Assign button)'] };
 
   const selected = getSelectedEntities(entities, op.selectedIds);
@@ -1057,12 +1055,8 @@ function generateVCarve(op, entities, context = {}) {
   const allProfiles = buildPocketProfiles(selected);
   if (!allProfiles.length) return { moves: [], warnings: ['No closed profiles found — select a closed shape'] };
 
-  // Sort by area descending: largest polygon = outer boundary; smaller ones inside
-  // it are holes (counter-spaces in letters like 'a', 'd', 'e', 'o').
   allProfiles.sort((a, b) => Math.abs(polygonArea(b)) - Math.abs(polygonArea(a)));
 
-  // Group into shape groups: each outer profile collects any profiles whose
-  // points lie inside it as holes.  Unplaced profiles start new groups.
   const shapeGroups = [];
   for (const rawProfile of allProfiles) {
     const profile = isClockwise(rawProfile) ? [...rawProfile].reverse() : rawProfile;
@@ -1077,8 +1071,6 @@ function generateVCarve(op, entities, context = {}) {
     if (!placed) shapeGroups.push({ outer: profile, holes: [] });
   }
 
-  // XY spacing between successive offset rings. 0.2 mm gives smooth depth
-  // transitions; the loop always terminates once the valid region collapses.
   const XY_STEP = 0.2;
 
   for (const { outer, holes } of shapeGroups) {
@@ -1087,76 +1079,129 @@ function generateVCarve(op, entities, context = {}) {
       continue;
     }
 
-    let anyMoves = false;
-    let firstRing = true;   // first ring of this shape uses a full safeZ approach
-    let lastPtX = 0, lastPtY = 0; // end position of the previous ring
-
-    // Single full-depth sweep: each ring is cut to its exact geometric depth
-    // in one pass. The V-bit depth at any XY position is determined solely by
-    // the distance from the profile edge — there is no stepping down.
-    // Between consecutive rings the tool only lifts to topZ+0.5 (not safeZ),
-    // eliminating the tall retract spikes visible between every ring pass.
+    // ── Phase 1: Build all erosion levels up front ────────────────────────
+    // levels[k] = { d, z, frags: [{ pts, cx, cy, children: [] }] }
+    // Each frag is one connected polygon at erosion distance d.
+    const levels = [];
     for (let i = 1; i <= 5000; i++) {
-      const d      = i * XY_STEP;
-      const rawH   = d <= tipRadius ? 0 : (d - tipRadius) / tanAngle;
-      const hFinal = Math.max(flatDepth, Math.min(maxDepth, rawH));
-      const z      = topZ - hFinal;
-
-      // Shrink outer boundary inward by d — ring of points at distance d from edge.
+      const d = i * XY_STEP;
       const shrunkOuter = offsetPolyline(outer, d, true);
-      if (!shrunkOuter || shrunkOuter.length === 0) break; // shape fully collapsed
+      if (!shrunkOuter?.length) break;
 
-      // Grow each hole outward by d — exclusion zone around each hole boundary.
-      // differencePolygons subtracts these from each shrunk ring; Clipper also
-      // returns the hole inner boundary as a CW path (reversed → CCW by
-      // differencePolygons), so both sides of the groove are traced automatically.
-      const expandedHoles = holes.flatMap(hole => offsetPolyline(hole, -d, true));
+      const expandedHoles = holes.flatMap(h => offsetPolyline(h, -d, true));
       const validRings = expandedHoles.length > 0
         ? shrunkOuter.flatMap(r => differencePolygons(r, expandedHoles))
         : shrunkOuter;
-      if (!validRings || validRings.length === 0) break;
+      if (!validRings?.length) break;
 
-      let gotAny = false;
-      for (const ring of validRings) {
-        if (!ring || ring.length < 3) continue;
-        const pts = stripClose([...ring]);
+      const rawH = d <= tipRadius ? 0 : (d - tipRadius) / tanAngle;
+      const hFinal = Math.max(flatDepth, Math.min(maxDepth, rawH));
+      const z = topZ - hFinal;
+
+      const frags = [];
+      for (const r of validRings) {
+        if (!r?.length) continue;
+        const pts = stripClose([...r]);
         if (pts.length < 3) continue;
+        let cx = 0, cy = 0;
+        for (const pt of pts) { cx += pt.x; cy += pt.y; }
+        frags.push({ pts, cx: cx / pts.length, cy: cy / pts.length, children: [] });
+      }
+      if (!frags.length) break;
+      levels.push({ d, z, frags });
+    }
 
-        gotAny = true;
-        anyMoves = true;
+    if (!levels.length) {
+      warnings.push('Profile produced no V-carve passes — check max depth and angle');
+      continue;
+    }
 
-        if (firstRing) {
-          // Initial approach: full safeZ clearance.
-          moves.push({ type: 'rapid', x: pts[0].x, y: pts[0].y, z: safeZ });
-          firstRing = false;
-        } else {
-          // Between rings: two-step retract to just above stock surface, then
-          // traverse. topZ+0.5 is enough to clear the cut — no need to go to
-          // safeZ for every ring.
-          moves.push({ type: 'rapid', x: lastPtX, y: lastPtY, z: topZ + 0.5 });
-          moves.push({ type: 'rapid', x: pts[0].x, y: pts[0].y, z: topZ + 0.5 });
+    // ── Phase 2: Link parent → child across consecutive levels ────────────
+    // Each frag at level k+1 is assigned to the centroid-nearest frag at level k.
+    // Split events (one parent, two children) are handled naturally — both children
+    // appear in parent.children and the DFS visits them with a retract between them.
+    for (let k = 1; k < levels.length; k++) {
+      const prev = levels[k - 1].frags;
+      for (let j = 0; j < levels[k].frags.length; j++) {
+        const cf = levels[k].frags[j];
+        let bestIdx = 0, bestDist = Infinity;
+        for (let pi = 0; pi < prev.length; pi++) {
+          const dx = cf.cx - prev[pi].cx;
+          const dy = cf.cy - prev[pi].cy;
+          const d2 = dx * dx + dy * dy;
+          if (d2 < bestDist) { bestDist = d2; bestIdx = pi; }
         }
+        prev[bestIdx].children.push({ levelIdx: k, fragIdx: j });
+      }
+    }
+
+    // ── Phase 3: DFS tree traversal → one continuous cut per branch ───────
+    // connected=true  → tool is already at cutting depth; ramp into next ring
+    //                   by feeding directly to the nearest point at the new Z.
+    // connected=false → approach this ring from safeZ.
+    //
+    // Single-child chains (the common case) stay connected all the way to the
+    // deepest ring with no retracts. Splits cause a retract only at the branch.
+    const cutFrag = (levelIdx, fragIdx, connected) => {
+      const lvl  = levels[levelIdx];
+      const frag = lvl.frags[fragIdx];
+      const z    = lvl.z;
+      const pts  = frag.pts;
+
+      let startIdx = 0;
+      if (connected) {
+        // Find nearest point on this ring to the tool's current XY position.
+        const last = moves[moves.length - 1];
+        let nearDist = Infinity;
+        for (let j = 0; j < pts.length; j++) {
+          const d2 = (pts[j].x - last.x) ** 2 + (pts[j].y - last.y) ** 2;
+          if (d2 < nearDist) { nearDist = d2; startIdx = j; }
+        }
+        // Single feed move that simultaneously traverses XY and ramps to the new Z.
+        moves.push({ type: 'feed', x: pts[startIdx].x, y: pts[startIdx].y, z, f: plungeRate });
+      } else {
+        // Approach from safe height.
+        if (moves.length) {
+          const last = moves[moves.length - 1];
+          moves.push({ type: 'rapid', x: last.x, y: last.y, z: safeZ });
+        }
+        moves.push({ type: 'rapid', x: pts[0].x, y: pts[0].y, z: safeZ });
         moves.push({ type: 'feed', x: pts[0].x, y: pts[0].y, z, f: plungeRate });
-        for (let j = 1; j < pts.length; j++) {
-          moves.push({ type: 'feed', x: pts[j].x, y: pts[j].y, z, f: feedRate });
-        }
-        moves.push({ type: 'feed', x: pts[0].x, y: pts[0].y, z, f: feedRate });
-        lastPtX = pts[0].x;
-        lastPtY = pts[0].y;
       }
 
-      if (!gotAny) break;
+      // Trace the ring from startIdx around and back to close it.
+      const reordered = startIdx === 0 ? pts : [...pts.slice(startIdx), ...pts.slice(0, startIdx)];
+      for (let j = 1; j < reordered.length; j++) {
+        moves.push({ type: 'feed', x: reordered[j].x, y: reordered[j].y, z, f: feedRate });
+      }
+      moves.push({ type: 'feed', x: reordered[0].x, y: reordered[0].y, z, f: feedRate });
+
+      const children = frag.children;
+      if (children.length === 1) {
+        // Single child: stay connected — no retract, just ramp into the next ring.
+        cutFrag(children[0].levelIdx, children[0].fragIdx, true);
+      } else if (children.length > 1) {
+        // Split: first child stays connected; subsequent siblings need a retract.
+        cutFrag(children[0].levelIdx, children[0].fragIdx, true);
+        for (let i = 1; i < children.length; i++) {
+          const last = moves[moves.length - 1];
+          moves.push({ type: 'rapid', x: last.x, y: last.y, z: safeZ });
+          cutFrag(children[i].levelIdx, children[i].fragIdx, false);
+        }
+      }
+      // No children → leaf; branch is done.
+    };
+
+    // Cut every root fragment (there is usually only one at level 0).
+    for (let j = 0; j < levels[0].frags.length; j++) {
+      cutFrag(0, j, false);
     }
 
-    if (!anyMoves) {
-      warnings.push('Profile produced no V-carve passes — check max depth and angle');
+    // Lift after finishing this shape.
+    if (moves.length) {
+      const last = moves[moves.length - 1];
+      moves.push({ type: 'rapid', x: last.x, y: last.y, z: safeZ });
     }
-  }
-
-  // Final lift to safe Z.
-  if (moves.length) {
-    const last = moves[moves.length - 1];
-    moves.push({ type: 'rapid', x: last.x, y: last.y, z: safeZ });
   }
 
   return { moves, warnings };
