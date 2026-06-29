@@ -1047,7 +1047,7 @@ function generateVCarve(op, entities, context = {}) {
   const feedRate     = p.feedRate ?? 1500;
   const plungeRate   = p.plungeRate ?? 300;
 
-  if (!op.selectedIds?.length) return { moves: [], warnings: ['Select letter/shape entities for this operation (use Assign button)'] };
+  if (!op.selectedIds?.length) return { moves: [], warnings: ['Select letter/shape entities for this operation'] };
 
   const selected = getSelectedEntities(entities, op.selectedIds);
   if (!selected.length) return { moves: [], warnings: ['No entities selected'] };
@@ -1079,9 +1079,7 @@ function generateVCarve(op, entities, context = {}) {
       continue;
     }
 
-    // ── Phase 1: Build all erosion levels up front ────────────────────────
-    // levels[k] = { d, z, frags: [{ pts, cx, cy, children: [] }] }
-    // Each frag is one connected polygon at erosion distance d.
+    // ── Phase 1: Build all erosion levels ────────────────────────
     const levels = [];
     for (let i = 1; i <= 5000; i++) {
       const d = i * XY_STEP;
@@ -1112,14 +1110,11 @@ function generateVCarve(op, entities, context = {}) {
     }
 
     if (!levels.length) {
-      warnings.push('Profile produced no V-carve passes — check max depth and angle');
+      warnings.push('Profile produced no V-carve passes');
       continue;
     }
 
-    // ── Phase 2: Link parent → child across consecutive levels ────────────
-    // Each frag at level k+1 is assigned to the centroid-nearest frag at level k.
-    // Split events (one parent, two children) are handled naturally — both children
-    // appear in parent.children and the DFS visits them with a retract between them.
+    // ── Phase 2: Link parent → child ────────────────────────────
     for (let k = 1; k < levels.length; k++) {
       const prev = levels[k - 1].frags;
       for (let j = 0; j < levels[k].frags.length; j++) {
@@ -1135,45 +1130,62 @@ function generateVCarve(op, entities, context = {}) {
       }
     }
 
-    // ── Phase 3: Build skeleton paths via centroid traces ────────────────
-    // Walk the lineage tree and collect the centroid of each erosion ring at
-    // every level along each branch (root → leaf).  For asymmetric shapes
-    // (triangles, wedges, tapered strokes) the centroid moves progressively
-    // toward the narrow end as erosion depth increases — that trace IS the
-    // medial-axis path.  For symmetric shapes (rectangle, circle) the centroid
-    // stays fixed, which degenerates to a plunge at the centre at full depth —
-    // still correct because the V-bit cone clears to the boundary.
-    //
-    // We collect into skeletonPaths using a push/pop DFS so the path buffer
-    // is O(depth) not O(depth²).  Each complete root→leaf path is saved as
-    // a snapshot when a leaf node is reached.
+    // ── Phase 3: Extract Clean Centerline Skeleton Paths ──────────
+    // Instead of collecting every single step down, we collapse stationary
+    // centroids. We only emit the point when it represents a true change in
+    // position, or when it reaches its deepest terminal ridge point (leaf node).
     const skeletonPaths = [];
+
     const buildSkeletonPath = (levelIdx, fragIdx, pathBuf) => {
       const frag = levels[levelIdx].frags[fragIdx];
-      pathBuf.push({ x: frag.cx, y: frag.cy, z: levels[levelIdx].z });
+      const currentPoint = { x: frag.cx, y: frag.cy, z: levels[levelIdx].z };
+
+      // Push only if the tool has moved horizontally, or if it is the final leaf node.
+      let shouldPush = true;
+      if (pathBuf.length > 0) {
+        const last = pathBuf[pathBuf.length - 1];
+        const distXY = Math.hypot(currentPoint.x - last.x, currentPoint.y - last.y);
+
+        // If the tool is stationary in XY (just plunging), do NOT record intermediate
+        // depths — we will directly plunge to the deep leaf level instead.
+        if (distXY < 0.1 && frag.children.length > 0) {
+          shouldPush = false;
+        }
+      }
+
+      if (shouldPush) {
+        pathBuf.push(currentPoint);
+      }
 
       if (frag.children.length === 0) {
+        // Reached the deepest ridge of the groove. Ensure the final deep point is saved.
+        if (!shouldPush) {
+          pathBuf.push(currentPoint);
+        }
         skeletonPaths.push([...pathBuf]);
-      } else if (frag.children.length === 1) {
-        buildSkeletonPath(frag.children[0].levelIdx, frag.children[0].fragIdx, pathBuf);
+        if (!shouldPush) {
+          pathBuf.pop();
+        }
       } else {
-        // Split: each child branch continues from the current centroid.
         for (const child of frag.children) {
           buildSkeletonPath(child.levelIdx, child.fragIdx, pathBuf);
         }
       }
 
-      pathBuf.pop();
+      if (shouldPush) {
+        pathBuf.pop();
+      }
     };
+
     const pathBuf = [];
     for (let j = 0; j < levels[0].frags.length; j++) {
       buildSkeletonPath(0, j, pathBuf);
     }
 
-    // ── Phase 4: Generate toolpath along skeleton paths ───────────────────
+    // ── Phase 4: Clean G-code Generation ──────────────────────────
     let anyMoves = false;
     for (const path of skeletonPaths) {
-      if (path.length < 1) continue;
+      if (path.length < 2) continue;
       anyMoves = true;
 
       const first = path[0];
@@ -1194,7 +1206,7 @@ function generateVCarve(op, entities, context = {}) {
       warnings.push('Profile produced no V-carve passes — check max depth and angle');
     }
 
-    // Lift after finishing this shape.
+    // Safe retract after this shape.
     if (moves.length) {
       const last = moves[moves.length - 1];
       moves.push({ type: 'rapid', x: last.x, y: last.y, z: safeZ });
