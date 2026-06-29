@@ -1135,66 +1135,52 @@ function generateVCarve(op, entities, context = {}) {
       }
     }
 
-    // ── Phase 3: DFS tree traversal → one continuous cut per branch ───────
-    // connected=true  → tool is already at cutting depth; ramp into next ring
-    //                   by feeding directly to the nearest point at the new Z.
-    // connected=false → approach this ring from safeZ.
+    // ── Phase 3: Collect skeleton rings (leaf fragments only) ────────────
+    // A leaf is the last non-empty ring in its lineage branch — the innermost
+    // eroded polygon just before that region fully collapses.  For a pointed
+    // V-bit, cutting this ring at the corresponding depth clears the full
+    // stroke width: the V-bit cone reaches the boundary on both sides.
+    // This gives ONE pass per branch (the medial-axis/skeleton pass) instead
+    // of the concentric-ring pattern that looks like a pocket operation.
     //
-    // Single-child chains (the common case) stay connected all the way to the
-    // deepest ring with no retracts. Splits cause a retract only at the branch.
-    const cutFrag = (levelIdx, fragIdx, connected) => {
-      const lvl  = levels[levelIdx];
-      const frag = lvl.frags[fragIdx];
-      const z    = lvl.z;
-      const pts  = frag.pts;
-
-      let startIdx = 0;
-      if (connected) {
-        // Find nearest point on this ring to the tool's current XY position.
-        const last = moves[moves.length - 1];
-        let nearDist = Infinity;
-        for (let j = 0; j < pts.length; j++) {
-          const d2 = (pts[j].x - last.x) ** 2 + (pts[j].y - last.y) ** 2;
-          if (d2 < nearDist) { nearDist = d2; startIdx = j; }
-        }
-        // Single feed move that simultaneously traverses XY and ramps to the new Z.
-        moves.push({ type: 'feed', x: pts[startIdx].x, y: pts[startIdx].y, z, f: plungeRate });
+    // When flatDepth > 0 an additional pocket-clearing pass at flatDepth would
+    // be needed to clear the flat-floor region (future feature; currently the
+    // depth floor is still honoured by the hFinal clamp in Phase 1).
+    const leaves = [];
+    const collectLeaves = (levelIdx, fragIdx) => {
+      const frag = levels[levelIdx].frags[fragIdx];
+      if (frag.children.length === 0) {
+        leaves.push({ pts: frag.pts, z: levels[levelIdx].z });
       } else {
-        // Approach from safe height.
-        if (moves.length) {
-          const last = moves[moves.length - 1];
-          moves.push({ type: 'rapid', x: last.x, y: last.y, z: safeZ });
-        }
-        moves.push({ type: 'rapid', x: pts[0].x, y: pts[0].y, z: safeZ });
-        moves.push({ type: 'feed', x: pts[0].x, y: pts[0].y, z, f: plungeRate });
-      }
-
-      // Trace the ring from startIdx around and back to close it.
-      const reordered = startIdx === 0 ? pts : [...pts.slice(startIdx), ...pts.slice(0, startIdx)];
-      for (let j = 1; j < reordered.length; j++) {
-        moves.push({ type: 'feed', x: reordered[j].x, y: reordered[j].y, z, f: feedRate });
-      }
-      moves.push({ type: 'feed', x: reordered[0].x, y: reordered[0].y, z, f: feedRate });
-
-      const children = frag.children;
-      if (children.length === 1) {
-        // Single child: stay connected — no retract, just ramp into the next ring.
-        cutFrag(children[0].levelIdx, children[0].fragIdx, true);
-      } else if (children.length > 1) {
-        // Split: first child stays connected; subsequent siblings need a retract.
-        cutFrag(children[0].levelIdx, children[0].fragIdx, true);
-        for (let i = 1; i < children.length; i++) {
-          const last = moves[moves.length - 1];
-          moves.push({ type: 'rapid', x: last.x, y: last.y, z: safeZ });
-          cutFrag(children[i].levelIdx, children[i].fragIdx, false);
+        for (const child of frag.children) {
+          collectLeaves(child.levelIdx, child.fragIdx);
         }
       }
-      // No children → leaf; branch is done.
     };
-
-    // Cut every root fragment (there is usually only one at level 0).
     for (let j = 0; j < levels[0].frags.length; j++) {
-      cutFrag(0, j, false);
+      collectLeaves(0, j);
+    }
+
+    // ── Phase 4: Generate toolpath along skeleton rings ───────────────────
+    let anyMoves = false;
+    for (const { pts, z } of leaves) {
+      if (!pts.length) continue;
+      anyMoves = true;
+
+      if (moves.length) {
+        const last = moves[moves.length - 1];
+        moves.push({ type: 'rapid', x: last.x, y: last.y, z: safeZ });
+      }
+      moves.push({ type: 'rapid', x: pts[0].x, y: pts[0].y, z: safeZ });
+      moves.push({ type: 'feed', x: pts[0].x, y: pts[0].y, z, f: plungeRate });
+      for (let j = 1; j < pts.length; j++) {
+        moves.push({ type: 'feed', x: pts[j].x, y: pts[j].y, z, f: feedRate });
+      }
+      moves.push({ type: 'feed', x: pts[0].x, y: pts[0].y, z, f: feedRate });
+    }
+
+    if (!anyMoves) {
+      warnings.push('Profile produced no V-carve passes — check max depth and angle');
     }
 
     // Lift after finishing this shape.
