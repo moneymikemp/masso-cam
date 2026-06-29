@@ -1135,48 +1135,59 @@ function generateVCarve(op, entities, context = {}) {
       }
     }
 
-    // ── Phase 3: Collect skeleton rings (leaf fragments only) ────────────
-    // A leaf is the last non-empty ring in its lineage branch — the innermost
-    // eroded polygon just before that region fully collapses.  For a pointed
-    // V-bit, cutting this ring at the corresponding depth clears the full
-    // stroke width: the V-bit cone reaches the boundary on both sides.
-    // This gives ONE pass per branch (the medial-axis/skeleton pass) instead
-    // of the concentric-ring pattern that looks like a pocket operation.
+    // ── Phase 3: Build skeleton paths via centroid traces ────────────────
+    // Walk the lineage tree and collect the centroid of each erosion ring at
+    // every level along each branch (root → leaf).  For asymmetric shapes
+    // (triangles, wedges, tapered strokes) the centroid moves progressively
+    // toward the narrow end as erosion depth increases — that trace IS the
+    // medial-axis path.  For symmetric shapes (rectangle, circle) the centroid
+    // stays fixed, which degenerates to a plunge at the centre at full depth —
+    // still correct because the V-bit cone clears to the boundary.
     //
-    // When flatDepth > 0 an additional pocket-clearing pass at flatDepth would
-    // be needed to clear the flat-floor region (future feature; currently the
-    // depth floor is still honoured by the hFinal clamp in Phase 1).
-    const leaves = [];
-    const collectLeaves = (levelIdx, fragIdx) => {
+    // We collect into skeletonPaths using a push/pop DFS so the path buffer
+    // is O(depth) not O(depth²).  Each complete root→leaf path is saved as
+    // a snapshot when a leaf node is reached.
+    const skeletonPaths = [];
+    const buildSkeletonPath = (levelIdx, fragIdx, pathBuf) => {
       const frag = levels[levelIdx].frags[fragIdx];
+      pathBuf.push({ x: frag.cx, y: frag.cy, z: levels[levelIdx].z });
+
       if (frag.children.length === 0) {
-        leaves.push({ pts: frag.pts, z: levels[levelIdx].z });
+        skeletonPaths.push([...pathBuf]);
+      } else if (frag.children.length === 1) {
+        buildSkeletonPath(frag.children[0].levelIdx, frag.children[0].fragIdx, pathBuf);
       } else {
+        // Split: each child branch continues from the current centroid.
         for (const child of frag.children) {
-          collectLeaves(child.levelIdx, child.fragIdx);
+          buildSkeletonPath(child.levelIdx, child.fragIdx, pathBuf);
         }
       }
+
+      pathBuf.pop();
     };
+    const pathBuf = [];
     for (let j = 0; j < levels[0].frags.length; j++) {
-      collectLeaves(0, j);
+      buildSkeletonPath(0, j, pathBuf);
     }
 
-    // ── Phase 4: Generate toolpath along skeleton rings ───────────────────
+    // ── Phase 4: Generate toolpath along skeleton paths ───────────────────
     let anyMoves = false;
-    for (const { pts, z } of leaves) {
-      if (!pts.length) continue;
+    for (const path of skeletonPaths) {
+      if (path.length < 1) continue;
       anyMoves = true;
 
+      const first = path[0];
       if (moves.length) {
         const last = moves[moves.length - 1];
         moves.push({ type: 'rapid', x: last.x, y: last.y, z: safeZ });
       }
-      moves.push({ type: 'rapid', x: pts[0].x, y: pts[0].y, z: safeZ });
-      moves.push({ type: 'feed', x: pts[0].x, y: pts[0].y, z, f: plungeRate });
-      for (let j = 1; j < pts.length; j++) {
-        moves.push({ type: 'feed', x: pts[j].x, y: pts[j].y, z, f: feedRate });
+      moves.push({ type: 'rapid', x: first.x, y: first.y, z: safeZ });
+      moves.push({ type: 'feed', x: first.x, y: first.y, z: first.z, f: plungeRate });
+
+      for (let i = 1; i < path.length; i++) {
+        const pt = path[i];
+        moves.push({ type: 'feed', x: pt.x, y: pt.y, z: pt.z, f: feedRate });
       }
-      moves.push({ type: 'feed', x: pts[0].x, y: pts[0].y, z, f: feedRate });
     }
 
     if (!anyMoves) {
