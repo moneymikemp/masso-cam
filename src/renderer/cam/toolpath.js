@@ -1020,18 +1020,25 @@ function applyMirror(selected, p) {
 
 // ── V-Carve ───────────────────────────────────────────────────────────────────
 //
-// Generates inward-offset concentric passes, each at the depth dictated by the
-// V-bit geometry.  For a V-bit with half-angle α and tip radius r, a pass at
-// offset distance d from the nearest boundary cuts at:
-//
-//   h = clamp( (d - r) / tan(α) ,  flatDepth, maxDepth )
-//
-// This is identical to the Tapered Pocket per-vertex depth formula, applied to
-// every ring instead of every contour vertex.  Rings are generated with the
-// same Clipper offsetPolyline used by 2D Pocket.
-//
-// Move count is bounded by (tipRadius + maxDepth·tan(α)) / XY_STEP rings, so
-// even large shapes with deep settings stay within a few hundred passes.
+// Returns the shortest distance from point pt to any edge of outer or any hole.
+// Used to compute true V-bit contact depth at each skeleton centroid.
+function distToNearestWall(pt, outer, holes) {
+  let min = Infinity;
+  const checkEdges = poly => {
+    for (let i = 0, n = poly.length; i < n; i++) {
+      const a = poly[i], b = poly[(i + 1) % n];
+      const dx = b.x - a.x, dy = b.y - a.y;
+      const len2 = dx * dx + dy * dy;
+      if (len2 < 1e-12) { min = Math.min(min, Math.hypot(pt.x - a.x, pt.y - a.y)); continue; }
+      const t = Math.max(0, Math.min(1, ((pt.x - a.x) * dx + (pt.y - a.y) * dy) / len2));
+      min = Math.min(min, Math.hypot(pt.x - (a.x + t * dx), pt.y - (a.y + t * dy)));
+    }
+  };
+  checkEdges(outer);
+  holes.forEach(checkEdges);
+  return min;
+}
+
 function generateVCarve(op, entities, context = {}) {
   const moves = [], warnings = [];
   const p = op.params;
@@ -1092,10 +1099,6 @@ function generateVCarve(op, entities, context = {}) {
         : shrunkOuter;
       if (!validRings?.length) break;
 
-      const rawH = d <= tipRadius ? 0 : (d - tipRadius) / tanAngle;
-      const hFinal = Math.max(flatDepth, Math.min(maxDepth, rawH));
-      const z = topZ - hFinal;
-
       const frags = [];
       for (const r of validRings) {
         if (!r?.length) continue;
@@ -1106,7 +1109,7 @@ function generateVCarve(op, entities, context = {}) {
         frags.push({ pts, cx: cx / pts.length, cy: cy / pts.length, children: [] });
       }
       if (!frags.length) break;
-      levels.push({ d, z, frags });
+      levels.push({ d, frags });
     }
 
     if (!levels.length) {
@@ -1138,7 +1141,7 @@ function generateVCarve(op, entities, context = {}) {
 
     const buildSkeletonPath = (levelIdx, fragIdx, pathBuf) => {
       const frag = levels[levelIdx].frags[fragIdx];
-      const currentPoint = { x: frag.cx, y: frag.cy, z: levels[levelIdx].z };
+      const currentPoint = { x: frag.cx, y: frag.cy, z: 0 };
 
       // Push only if the tool has moved horizontally, or if it is the final leaf node.
       let shouldPush = true;
@@ -1182,10 +1185,22 @@ function generateVCarve(op, entities, context = {}) {
       buildSkeletonPath(0, j, pathBuf);
     }
 
+    // ── Phase 3.5: Assign Z from true nearest-wall distance ────────
+    // Replace the erosion-ring-index proxy with the actual distance from each
+    // skeleton centroid to the nearest original boundary edge (outer or hole).
+    // depth = min(maxDepth, (nearestWallDist - tipRadius) / tan(halfAngle))
+    for (const path of skeletonPaths) {
+      for (const pt of path) {
+        const r = distToNearestWall(pt, outer, holes);
+        const rawH = r <= tipRadius ? 0 : (r - tipRadius) / tanAngle;
+        pt.z = topZ - Math.max(flatDepth, Math.min(maxDepth, rawH));
+      }
+    }
+
     // ── Phase 4: Clean G-code Generation ──────────────────────────
     let anyMoves = false;
     for (const path of skeletonPaths) {
-      if (path.length < 2) continue;
+      if (path.length < 1) continue;
       anyMoves = true;
 
       const first = path[0];
