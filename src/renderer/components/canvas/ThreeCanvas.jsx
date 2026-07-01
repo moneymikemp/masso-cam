@@ -1,6 +1,7 @@
 import React, { useEffect, useRef, useCallback, useState } from 'react';
 import * as THREE from 'three';
 import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls';
+import { STLLoader } from 'three/examples/jsm/loaders/STLLoader';
 import { useApp } from '../../store/AppContext';
 import { createHeightMapWorker } from './createHeightMapWorker';
 
@@ -262,6 +263,8 @@ export default function ThreeCanvas() {
   const workerRef        = useRef(null);
   const heightMeshRef    = useRef(null);
   const renderingRef     = useRef(false);
+  const stlMeshRef       = useRef(null);
+  const stlInputRef      = useRef(null);
 
   // React state only for UI re-renders
   const [simPlaying,  setSimPlaying]  = useState(false);
@@ -531,6 +534,57 @@ export default function ThreeCanvas() {
     isDraggingRef.current = false;
   }, []);
 
+  const handleLoadSTL = () => stlInputRef.current?.click();
+
+  const handleSTLFile = useCallback((e) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    e.target.value = '';
+
+    const reader = new FileReader();
+    reader.onload = (ev) => {
+      const geometry = new STLLoader().parse(ev.target.result);
+      geometry.computeBoundingBox();
+      const box = geometry.boundingBox;
+
+      // Center geometry in Fusion XY and set its Z-min to 0 so the model
+      // bottom lands at stock topZ when positioned.
+      const cx = (box.min.x + box.max.x) / 2;
+      const cy = (box.min.y + box.max.y) / 2;
+      geometry.translate(-cx, -cy, -box.min.z);
+
+      // Rotate from Fusion/STL Z-up into Three.js Y-up:
+      //   Three.js X = Fusion X,  Three.js Y = Fusion Z,  Three.js Z = -Fusion Y
+      const mesh = new THREE.Mesh(
+        geometry,
+        new THREE.MeshPhongMaterial({ color: 0x4488cc, opacity: 0.55, transparent: true, side: THREE.DoubleSide }),
+      );
+      mesh.rotation.x = -Math.PI / 2;
+      mesh.userData.stlModel = true;
+
+      // Position centred on stock, bottom of model at stock topZ
+      const sc = stockConfig;
+      const xFrac = sc.datum?.[1] === 'l' ? 0 : sc.datum?.[1] === 'c' ? 0.5 : 1;
+      const yFrac = sc.datum?.[0] === 'b' ? 0 : sc.datum?.[0] === 'm' ? 0.5 : 1;
+      const minX = (sc.stockOriginX ?? 0) - xFrac * (sc.width ?? 0);
+      const minY = (sc.stockOriginY ?? 0) - yFrac * (sc.length ?? 0);
+      const stockCX = minX + (sc.width ?? 0) / 2;
+      const stockCY = minY + (sc.length ?? 0) / 2;
+      mesh.position.set(wx(stockCX), wy(sc.topZ ?? 0), wz(stockCY));
+
+      const scene = sceneRef.current;
+      if (!scene) return;
+      if (stlMeshRef.current) {
+        scene.remove(stlMeshRef.current);
+        stlMeshRef.current.geometry.dispose();
+        stlMeshRef.current.material.dispose();
+      }
+      scene.add(mesh);
+      stlMeshRef.current = mesh;
+    };
+    reader.readAsArrayBuffer(file);
+  }, [stockConfig]);
+
   const handleFit = () => {
     fittedRef.current = false;
     const r = buildStockMesh(stockConfig);
@@ -575,9 +629,13 @@ export default function ThreeCanvas() {
     <div style={{ position: 'relative', width: '100%', height: '100%' }}>
       <div ref={mountRef} style={{ width: '100%', height: '100%' }} />
 
+      {/* Hidden STL file input */}
+      <input ref={stlInputRef} type="file" accept=".stl" style={{ display: 'none' }} onChange={handleSTLFile} />
+
       {/* HUD — top right */}
       <div style={{ position: 'absolute', top: 8, right: 8, display: 'flex', flexDirection: 'column', gap: 4, alignItems: 'flex-end' }}>
         <button onClick={handleFit} style={BTN} title="Fit view to stock">⊡ Fit</button>
+        <button onClick={handleLoadSTL} style={BTN} title="Load STL model (centered on stock)">⬆ Load STL</button>
         <button
           onClick={computeHeightMap}
           style={rendering ? BTN_ACTIVE : BTN}
