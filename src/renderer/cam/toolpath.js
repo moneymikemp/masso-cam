@@ -1043,193 +1043,100 @@ function generateVCarve(op, entities, context = {}) {
   const moves = [], warnings = [];
   const p = op.params;
 
-  const halfAngleDeg = Math.max(1, Math.min(89, p.halfAngle ?? 15));
-  const halfAngleRad = halfAngleDeg * Math.PI / 180;
-  const tanAngle     = Math.tan(halfAngleRad);
-  const tipRadius    = (p.tipDiameter ?? 0) / 2;
-  const maxDepth     = Math.abs(p.maxDepth ?? 15);
-  const flatDepth    = Math.max(0, Math.min(maxDepth, p.flatDepth ?? 0));
-  const safeZ        = p.safeZ ?? 25;
-  const topZ         = p.topZ ?? 0;
-  const feedRate     = p.feedRate ?? 1500;
-  const plungeRate   = p.plungeRate ?? 300;
+  const safeZ      = p.safeZ ?? 25;
+  const topZ       = p.topZ ?? 0;
+  const maxDepth   = Math.abs(p.maxDepth ?? 15);
+  const halfAngle  = Math.max(1, Math.min(89, p.halfAngle ?? 15));
+  const tipRadius  = (p.tipDiameter ?? 0) / 2;
+  const flatDepth  = p.flatDepth ?? 0;
+  const feedRate   = p.feedRate ?? 1500;
+  const plungeRate = p.plungeRate ?? 500;
 
-  if (!op.selectedIds?.length) return { moves: [], warnings: ['Select letter/shape entities for this operation'] };
+  const tanHalfAngle = Math.tan(halfAngle * Math.PI / 180);
+  const maxWallDist  = maxDepth * tanHalfAngle + tipRadius;
+  const XY_STEP      = 0.2; // mm between subdivision points along each branch
 
+  if (!op.selectedIds?.length) return { moves, warnings: ['Select entities for V-Carve'] };
   const selected = getSelectedEntities(entities, op.selectedIds);
-  if (!selected.length) return { moves: [], warnings: ['No entities selected'] };
-
+  if (!selected.length) return { moves, warnings: ['No entities selected'] };
   const allProfiles = buildPocketProfiles(selected);
-  if (!allProfiles.length) return { moves: [], warnings: ['No closed profiles found — select a closed shape'] };
+  if (!allProfiles.length) return { moves, warnings: ['No closed profiles found'] };
 
-  allProfiles.sort((a, b) => Math.abs(polygonArea(b)) - Math.abs(polygonArea(a)));
+  for (const profile of allProfiles) {
+    const outer = stripClose([...profile]);
+    if (outer.length < 3) continue;
 
-  const shapeGroups = [];
-  for (const rawProfile of allProfiles) {
-    const profile = isClockwise(rawProfile) ? [...rawProfile].reverse() : rawProfile;
-    let placed = false;
-    for (const group of shapeGroups) {
-      if (profile.some(pt => pointInPolygon(pt, group.outer))) {
-        group.holes.push(profile);
-        placed = true;
-        break;
-      }
+    // Find the deepest medial axis point via progressive erosion.
+    // For a triangle, this converges to the incenter (equidistant from all three edges).
+    let deepestPt = null;
+    for (let d = XY_STEP; d <= maxWallDist + XY_STEP; d += XY_STEP) {
+      const results = offsetPolyline(outer, d, true);
+      const alive = results.filter(r => r.length >= 3);
+      if (alive.length === 0) break;
+      const poly = stripClose([...alive[0]]); // largest result (sorted by area desc)
+      const cx = poly.reduce((s, q) => s + q.x, 0) / poly.length;
+      const cy = poly.reduce((s, q) => s + q.y, 0) / poly.length;
+      deepestPt = { x: cx, y: cy };
     }
-    if (!placed) shapeGroups.push({ outer: profile, holes: [] });
-  }
+    if (!deepestPt) continue;
 
-  const XY_STEP = 0.2;
-
-  for (const { outer, holes } of shapeGroups) {
-    if (Math.abs(polygonArea(outer)) < XY_STEP * XY_STEP * 4) {
-      warnings.push('Profile too small to V-carve');
-      continue;
-    }
-
-    // ── Phase 1: Build all erosion levels ────────────────────────
-    const levels = [];
-    for (let i = 1; i <= 5000; i++) {
-      const d = i * XY_STEP;
-      const shrunkOuter = offsetPolyline(outer, d, true);
-      if (!shrunkOuter?.length) break;
-
-      const expandedHoles = holes.flatMap(h => offsetPolyline(h, -d, true));
-      const validRings = expandedHoles.length > 0
-        ? shrunkOuter.flatMap(r => differencePolygons(r, expandedHoles))
-        : shrunkOuter;
-      if (!validRings?.length) break;
-
-      const frags = [];
-      for (const r of validRings) {
-        if (!r?.length) continue;
-        const pts = stripClose([...r]);
-        if (pts.length < 3) continue;
-        let cx = 0, cy = 0;
-        for (const pt of pts) { cx += pt.x; cy += pt.y; }
-        frags.push({ pts, cx: cx / pts.length, cy: cy / pts.length, children: [] });
+    // Subdivide a line segment from `from` to `to`, computing Z via distToNearestWall
+    // at each sample point. For a triangle, from=vertex and to=incenter, so the
+    // segment is exactly the angle bisector (medial axis branch) of that corner.
+    const buildBranch = (from, to) => {
+      const dx = to.x - from.x, dy = to.y - from.y;
+      const len = Math.hypot(dx, dy);
+      if (len < 1e-6) {
+        const wallDist = distToNearestWall(from, outer, []);
+        const depth = Math.min(maxDepth, Math.max(flatDepth, (wallDist - tipRadius) / tanHalfAngle));
+        return [{ x: from.x, y: from.y, z: topZ - depth }];
       }
-      if (!frags.length) break;
-      levels.push({ d, frags });
-    }
-
-    if (!levels.length) {
-      warnings.push('Profile produced no V-carve passes');
-      continue;
-    }
-
-    // ── Phase 2: Link parent → child ────────────────────────────
-    for (let k = 1; k < levels.length; k++) {
-      const prev = levels[k - 1].frags;
-      for (let j = 0; j < levels[k].frags.length; j++) {
-        const cf = levels[k].frags[j];
-        let bestIdx = 0, bestDist = Infinity;
-        for (let pi = 0; pi < prev.length; pi++) {
-          const dx = cf.cx - prev[pi].cx;
-          const dy = cf.cy - prev[pi].cy;
-          const d2 = dx * dx + dy * dy;
-          if (d2 < bestDist) { bestDist = d2; bestIdx = pi; }
-        }
-        prev[bestIdx].children.push({ levelIdx: k, fragIdx: j });
+      const steps = Math.max(1, Math.ceil(len / XY_STEP));
+      const pts = [];
+      for (let i = 0; i <= steps; i++) {
+        const t = i / steps;
+        const x = from.x + dx * t;
+        const y = from.y + dy * t;
+        const wallDist = distToNearestWall({ x, y }, outer, []);
+        const rawDepth = (wallDist - tipRadius) / tanHalfAngle;
+        const depth = Math.min(maxDepth, Math.max(flatDepth, rawDepth));
+        pts.push({ x, y, z: topZ - depth });
       }
-    }
-
-    // ── Phase 3: Extract Clean Centerline Skeleton Paths ──────────
-    // Instead of collecting every single step down, we collapse stationary
-    // centroids. We only emit the point when it represents a true change in
-    // position, or when it reaches its deepest terminal ridge point (leaf node).
-    const skeletonPaths = [];
-
-    const buildSkeletonPath = (levelIdx, fragIdx, pathBuf) => {
-      const frag = levels[levelIdx].frags[fragIdx];
-      const currentPoint = { x: frag.cx, y: frag.cy, z: 0 };
-
-      // Push only if the tool has moved horizontally, or if it is the final leaf node.
-      let shouldPush = true;
-      if (pathBuf.length > 0) {
-        const last = pathBuf[pathBuf.length - 1];
-        const distXY = Math.hypot(currentPoint.x - last.x, currentPoint.y - last.y);
-
-        // If the tool is stationary in XY (just plunging), do NOT record intermediate
-        // depths — we will directly plunge to the deep leaf level instead.
-        if (distXY < 0.1 && frag.children.length > 0) {
-          shouldPush = false;
-        }
-      }
-
-      if (shouldPush) {
-        pathBuf.push(currentPoint);
-      }
-
-      if (frag.children.length === 0) {
-        // Reached the deepest ridge of the groove. Ensure the final deep point is saved.
-        if (!shouldPush) {
-          pathBuf.push(currentPoint);
-        }
-        skeletonPaths.push([...pathBuf]);
-        if (!shouldPush) {
-          pathBuf.pop();
-        }
-      } else {
-        for (const child of frag.children) {
-          buildSkeletonPath(child.levelIdx, child.fragIdx, pathBuf);
-        }
-      }
-
-      if (shouldPush) {
-        pathBuf.pop();
-      }
+      return pts;
     };
 
-    const pathBuf = [];
-    for (let j = 0; j < levels[0].frags.length; j++) {
-      buildSkeletonPath(0, j, pathBuf);
-    }
-
-    // ── Phase 3.5: Assign Z from true nearest-wall distance ────────
-    // Replace the erosion-ring-index proxy with the actual distance from each
-    // skeleton centroid to the nearest original boundary edge (outer or hole).
-    // depth = min(maxDepth, (nearestWallDist - tipRadius) / tan(halfAngle))
-    for (const path of skeletonPaths) {
-      for (const pt of path) {
-        const r = distToNearestWall(pt, outer, holes);
-        const rawH = r <= tipRadius ? 0 : (r - tipRadius) / tanAngle;
-        pt.z = topZ - Math.max(flatDepth, Math.min(maxDepth, rawH));
+    // Build path visiting every vertex through the deepest point:
+    //   v[0] → deep → v[1] → deep → v[2] → … → v[n-1]
+    // This traces all n medial-axis branches in a single continuous pass.
+    const pathPts = [];
+    for (let i = 0; i < outer.length; i++) {
+      const branch = buildBranch(outer[i], deepestPt); // v[i] → deep
+      if (i === 0) {
+        pathPts.push(...branch);
+      } else {
+        // Arrive at v[i]: reverse branch (deep → v[i]), skip first point (already at deep)
+        pathPts.push(...[...branch].reverse().slice(1));
+        // Leave v[i] toward deep for the next branch (skip if this is the last vertex)
+        if (i < outer.length - 1) {
+          pathPts.push(...branch.slice(1));
+        }
       }
     }
 
-    // ── Phase 4: Clean G-code Generation ──────────────────────────
-    let anyMoves = false;
-    for (const path of skeletonPaths) {
-      if (path.length < 1) continue;
-      anyMoves = true;
+    if (pathPts.length === 0) continue;
 
-      const first = path[0];
-      if (moves.length) {
-        const last = moves[moves.length - 1];
-        moves.push({ type: 'rapid', x: last.x, y: last.y, z: safeZ });
-      }
-      moves.push({ type: 'rapid', x: first.x, y: first.y, z: safeZ });
-      moves.push({ type: 'feed', x: first.x, y: first.y, z: first.z, f: plungeRate });
-
-      for (let i = 1; i < path.length; i++) {
-        const pt = path[i];
-        moves.push({ type: 'feed', x: pt.x, y: pt.y, z: pt.z, f: feedRate });
-      }
+    // Approach, trace, and clear
+    moves.push({ type: 'rapid', x: pathPts[0].x, y: pathPts[0].y, z: safeZ });
+    moves.push({ type: 'feed',  x: pathPts[0].x, y: pathPts[0].y, z: pathPts[0].z, f: plungeRate });
+    for (let i = 1; i < pathPts.length; i++) {
+      moves.push({ type: 'feed', x: pathPts[i].x, y: pathPts[i].y, z: pathPts[i].z, f: feedRate });
     }
-
-    if (!anyMoves) {
-      warnings.push('Profile produced no V-carve passes — check max depth and angle');
-    }
-
-    // Safe retract after this shape.
-    if (moves.length) {
-      const last = moves[moves.length - 1];
-      moves.push({ type: 'rapid', x: last.x, y: last.y, z: safeZ });
-    }
+    moves.push({ type: 'rapid', x: pathPts.at(-1).x, y: pathPts.at(-1).y, z: safeZ });
   }
 
   return { moves, warnings };
 }
+
 
 function generateTaperedPocket(op, entities, context = {}) {
   const p = op.params;
@@ -1586,7 +1493,11 @@ function buildTaperTrace(entities, topZ, depth, safeZ, feedRate, plungeRate, tcR
   const tanAlpha  = Math.tan(tcRad);
   const floorZ    = topZ - depth;
   const bitRadius = tipRadius + depth * tanAlpha;
-  const traceOffset = cutSide === 'outside' ? -(depth * tanAlpha) : 0;
+  // offsetPolyline negates delta before Clipper, so positive = contract inward, negative = expand outward.
+  // Pocket: inset tool centre by bitRadius (positive = Clipper shrinks CCW polygon inward)
+  //   so the cutting flank at the surface follows the polygon, not the tool centre.
+  // Plug:   negative (Clipper expands outward) so the tool is outside the polygon.
+  const traceOffset = cutSide === 'outside' ? -(depth * tanAlpha) : bitRadius;
 
   // Convert the user-facing interior-angle threshold to a minimum exterior turn.
   // e.g. sharpCornerAngle=170° → only turns >10° trigger a ramp.

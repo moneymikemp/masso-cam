@@ -275,8 +275,9 @@ export function generateRestMachiningPasses(profile, currentToolRadius, previous
 export function isClockwise(points) {
   let sum = 0;
   const n = points.length;
-  for (let i = 0; i < n - 1; i++) {
-    sum += (points[i + 1].x - points[i].x) * (points[i + 1].y + points[i].y);
+  for (let i = 0; i < n; i++) {
+    const j = (i + 1) % n;
+    sum += (points[j].x - points[i].x) * (points[j].y + points[i].y);
   }
   return sum > 0;
 }
