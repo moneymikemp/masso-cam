@@ -100,6 +100,11 @@ export function generateToolpath(operation, entities, context = {}) {
     case 'vcarve':        return generateVCarve(operation, entities, context);
     case 'dogbone':       return generateDogbone(operation, entities);
     case 'text':          return generateText(operation, entities);
+    case 'stlraster': {
+      const hm = context.stlHeightmap;
+      if (!hm) return { moves: [], warnings: ['STL heightmap not available — re-generate from the 3D view'] };
+      return generateSTLRaster(hm, operation.params);
+    }
     default:             return { moves: [], warnings: ['Unknown operation: ' + type] };
   }
 }
@@ -2411,4 +2416,167 @@ function generateText(op) {
   }
 
   return { moves, warnings, contours: allContours };
+}
+
+// ── 3D Raster (STL surface — ball-nose drop cutter) ──────────────────────────
+
+// For a ball-nose cutter of radius R at (cx, cy), every heightmap cell
+// (px, py, h) within lateral distance d < R forces the ball centre up to at
+// least h + sqrt(R²-d²).  The max over all such cells, minus R, gives the
+// gouge-free tool-tip Z.  When R=0 this degenerates to a nearest-cell lookup.
+function dropCutterZ(cx, cy, toolRadius, heights, gridW, gridH, minX, maxX, minY, maxY) {
+  const dxCell = (maxX - minX) / (gridW - 1);
+  const dyCell = (maxY - minY) / (gridH - 1);
+  const R  = toolRadius;
+  const R2 = R * R;
+
+  const colC = (cx - minX) / dxCell;
+  const rowC = (cy - minY) / dyCell;
+
+  if (R === 0) {
+    const col = Math.max(0, Math.min(gridW - 1, Math.round(colC)));
+    const row = Math.max(0, Math.min(gridH - 1, Math.round(rowC)));
+    return heights[row * gridW + col];
+  }
+
+  const colSpan = Math.ceil(R / dxCell);
+  const rowSpan = Math.ceil(R / dyCell);
+  const colLo = Math.max(0,        Math.floor(colC - colSpan));
+  const colHi = Math.min(gridW - 1, Math.ceil(colC + colSpan));
+  const rowLo = Math.max(0,        Math.floor(rowC - rowSpan));
+  const rowHi = Math.min(gridH - 1, Math.ceil(rowC + rowSpan));
+
+  let ballCentreZ = -Infinity;
+
+  for (let row = rowLo; row <= rowHi; row++) {
+    const wy = minY + row * dyCell;
+    const dy = wy - cy;
+    const dy2 = dy * dy;
+    if (dy2 >= R2) continue;                       // entire row outside circle
+
+    for (let col = colLo; col <= colHi; col++) {
+      const wx = minX + col * dxCell;
+      const dx = wx - cx;
+      const d2 = dx * dx + dy2;
+      if (d2 >= R2) continue;                      // outside circle
+
+      const required = heights[row * gridW + col] + Math.sqrt(R2 - d2);
+      if (required > ballCentreZ) ballCentreZ = required;
+    }
+  }
+
+  if (ballCentreZ === -Infinity) {
+    // Fallback: no cells inside circle
+    const col = Math.max(0, Math.min(gridW - 1, Math.round(colC)));
+    const row = Math.max(0, Math.min(gridH - 1, Math.round(rowC)));
+    return heights[row * gridW + col] - R;
+  }
+
+  return ballCentreZ - R;   // tip = centre - R
+}
+
+// Boustrophedon raster in one axis.
+// axis='x' → lines run along X, stepping in Y; axis='y' → lines along Y, stepping in X.
+function rasterLines(heightmap, rParams, axis) {
+  const { heights, gridW, gridH, minX, maxX, minY, maxY } = heightmap;
+  const toolRadius = (rParams.toolDiameter ?? 6.35) / 2;
+  const stepover   = rParams.stepover   ?? 2;
+  const safeZ      = rParams.safeZ      ?? 5;
+  const feedRate   = rParams.feedRate   ?? 1500;
+  const plungeRate = rParams.plungeRate ?? 500;
+  const zOffset    = rParams.zOffset    ?? 0;
+
+  function tipZ(x, y) {
+    return dropCutterZ(x, y, toolRadius, heights, gridW, gridH, minX, maxX, minY, maxY) + zOffset;
+  }
+
+  const moves = [];
+  let lineIdx = 0;
+
+  if (axis === 'y') {
+    // Lines run along Y, stepping in X
+    const yStep = (maxY - minY) / (gridH - 1);
+    for (let x = minX; x <= maxX + 1e-6; x += stepover) {
+      const px  = Math.min(x, maxX);
+      const rev = lineIdx % 2 === 1;
+      const yStart = rev ? maxY : minY;
+      const yEnd   = rev ? minY : maxY;
+      const yDir   = rev ? -1   : 1;
+      const ys = [yStart];
+      for (let y = yStart + yDir * yStep; rev ? y >= yEnd - 1e-6 : y <= yEnd + 1e-6; y += yDir * yStep)
+        ys.push(Math.max(minY, Math.min(maxY, y)));
+      if (Math.abs(ys[ys.length - 1] - yEnd) > 1e-6) ys.push(yEnd);
+      moves.push({ type: 'rapid', x: px, y: ys[0],             z: safeZ });
+      moves.push({ type: 'feed',  x: px, y: ys[0],             z: tipZ(px, ys[0]), f: plungeRate });
+      for (let i = 1; i < ys.length; i++)
+        moves.push({ type: 'feed', x: px, y: ys[i],            z: tipZ(px, ys[i]), f: feedRate });
+      moves.push({ type: 'rapid', x: px, y: ys[ys.length - 1], z: safeZ });
+      lineIdx++;
+      if (px >= maxX) break;
+    }
+  } else {
+    // Lines run along X (default), stepping in Y
+    const xStep = (maxX - minX) / (gridW - 1);
+    for (let y = minY; y <= maxY + 1e-6; y += stepover) {
+      const py  = Math.min(y, maxY);
+      const rev = lineIdx % 2 === 1;
+      const xStart = rev ? maxX : minX;
+      const xEnd   = rev ? minX : maxX;
+      const xDir   = rev ? -1   : 1;
+      const xs = [xStart];
+      for (let x = xStart + xDir * xStep; rev ? x >= xEnd - 1e-6 : x <= xEnd + 1e-6; x += xDir * xStep)
+        xs.push(Math.max(minX, Math.min(maxX, x)));
+      if (Math.abs(xs[xs.length - 1] - xEnd) > 1e-6) xs.push(xEnd);
+      moves.push({ type: 'rapid', x: xs[0],             y: py, z: safeZ });
+      moves.push({ type: 'feed',  x: xs[0],             y: py, z: tipZ(xs[0], py), f: plungeRate });
+      for (let i = 1; i < xs.length; i++)
+        moves.push({ type: 'feed', x: xs[i],            y: py, z: tipZ(xs[i], py), f: feedRate });
+      moves.push({ type: 'rapid', x: xs[xs.length - 1], y: py, z: safeZ });
+      lineIdx++;
+      if (py >= maxY) break;
+    }
+  }
+
+  return moves;
+}
+
+// Generate a 3D raster toolpath over a pre-computed STL heightmap.
+// Supports optional rough pass (large stepover + Z allowance) followed by
+// finish pass (tight stepover following the actual surface).
+// direction: 'x' | 'y' | 'both' (crosshatch — runs both axes in sequence)
+export function generateSTLRaster(heightmap, params) {
+  const moves = [];
+
+  if (params.roughEnabled) {
+    const roughParams = {
+      ...params,
+      stepover:  params.roughStepover  ?? Math.max((params.stepover ?? 2) * 3, 6),
+      zOffset:   (params.zOffset ?? 0) + (params.roughAllowance ?? 1),
+      feedRate:  params.roughFeedRate  ?? params.feedRate,
+    };
+    const dir = params.direction ?? 'x';
+    if (dir === 'both') {
+      moves.push(...rasterLines(heightmap, roughParams, 'x'));
+      moves.push(...rasterLines(heightmap, roughParams, 'y'));
+    } else {
+      moves.push(...rasterLines(heightmap, roughParams, dir));
+    }
+  }
+
+  if (params.finishEnabled !== false) {
+    // Use a separate finish tool diameter if one was resolved (from finishToolId).
+    const finishDia = params.finishToolDiameter ?? params.toolDiameter;
+    const finishParams = finishDia !== params.toolDiameter
+      ? { ...params, toolDiameter: finishDia }
+      : params;
+    const dir = params.direction ?? 'x';
+    if (dir === 'both') {
+      moves.push(...rasterLines(heightmap, finishParams, 'x'));
+      moves.push(...rasterLines(heightmap, finishParams, 'y'));
+    } else {
+      moves.push(...rasterLines(heightmap, finishParams, dir));
+    }
+  }
+
+  return { moves };
 }

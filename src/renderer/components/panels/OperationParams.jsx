@@ -1118,6 +1118,78 @@ export default function OperationParams({ op, tools, operations = [], onChange }
         {commonDepth}
         {commonSpeeds}
       </>}
+
+      {/* ── 3D Raster (STL) ── */}
+      {op.type === 'stlraster' && <>
+        {toolSelect}
+
+        <div style={S.section}>Direction</div>
+        <Field label="Pass Direction" tip="X Lines: tool sweeps along X, stepping in Y — best for parts wider in X.\nY Lines: tool sweeps along Y, stepping in X.\nCrosshatch (Both): runs X then Y — best surface finish, doubles cutting time.">
+          <Sel value={p.direction ?? 'x'} onChange={v => set('direction', v)}
+               options={[['x','X Lines (↔)'],['y','Y Lines (↕)'],['both','Crosshatch (↔↕)']]} />
+        </Field>
+
+        <div style={S.section}>Rough Pass</div>
+        <CheckField label="Enabled" value={!!p.roughEnabled} onChange={v => set('roughEnabled', v)}
+          tip="Run a fast rough pass before the finish pass. Uses a larger stepover and stays above the surface by the allowance amount — removes bulk material quickly." />
+        {p.roughEnabled && <>
+          <Field label="Stepover" unit={distUnit} tip="Step between rough raster lines. 3–5× the finish stepover is typical — e.g. 6–10 mm for a 6 mm ball-nose.">
+            <NumInput value={toDisp(p.roughStepover ?? 6)} onChange={v => set('roughStepover', toMM(v))} min={isInch ? 0.01 : 0.5} step={dStep} />
+          </Field>
+          <Field label="Allowance" unit={distUnit} tip="How far above the surface the rough pass stays. The finish pass then removes this remaining material. Typical: 0.5–2 mm.">
+            <NumInput value={toDisp(p.roughAllowance ?? 1)} onChange={v => set('roughAllowance', toMM(v))} min={0} step={isInch ? 0.005 : 0.1} />
+          </Field>
+          <Field label="Feed Rate" unit={feedUnit} tip="Feed rate for the rough pass. Can be faster than finish since surface quality isn't critical.">
+            <NumInput value={toDisp(p.roughFeedRate ?? p.feedRate ?? 2000)} onChange={v => set('roughFeedRate', toMM(v))} step={isInch ? 2 : 50} min={isInch ? 0.04 : 1} />
+          </Field>
+        </>}
+
+        <div style={S.section}>Finish Pass</div>
+        <CheckField label="Enabled" value={p.finishEnabled !== false} onChange={v => set('finishEnabled', v)}
+          tip="Run a finish pass that follows the actual surface using the drop-cutter algorithm. This is the primary surface-quality pass." />
+        {p.finishEnabled !== false && <>
+          <Field label="Finish Tool" tip="Select a ball-nose end mill for the finish pass. Leave as 'Same as rough' to reuse the primary tool. A smaller ball-nose gives tighter scallops and smoother surfaces.">
+            <select style={S.select} value={p.finishToolId || ''} onChange={e => {
+              const toolId = e.target.value || null;
+              const tool = toolId ? tools.find(t => t.id === toolId) : null;
+              onChange({ params: { ...p, finishToolId: toolId, finishToolDiameter: tool ? tool.diameter : null } });
+            }}>
+              <option value="">Same as rough tool</option>
+              {tools.map(t => (
+                <option key={t.id} value={t.id}>
+                  {t.name} (⌀{isInch ? (t.diameter / MM_PER_INCH).toFixed(4) : t.diameter}{distUnit})
+                </option>
+              ))}
+            </select>
+          </Field>
+          {!p.finishToolId && (
+            <Field label="Finish Diameter" unit={distUnit} tip="Diameter of the ball-nose finish cutter. Controls the drop-cutter kernel radius — smaller diameter = more accurate surface following but slower.">
+              <NumInput value={toDisp(p.finishToolDiameter ?? p.toolDiameter ?? 6.35)} onChange={v => set('finishToolDiameter', toMM(v))} min={isInch ? 0.004 : 0.1} step={isInch ? 0.001 : 0.01} />
+            </Field>
+          )}
+          <Field label="Stepover" unit={distUnit} tip="Distance between adjacent finish raster lines. Smaller = smoother scallop but longer run time. Typical: 3–10% of tool diameter for finishing.">
+            <NumInput value={toDisp(p.stepover ?? 2)} onChange={v => set('stepover', toMM(v))} min={isInch ? 0.001 : 0.1} step={dStep} />
+          </Field>
+          <Field label="Z Offset" unit={distUnit} tip="Shift the finish path up (+) or down (−). Use a small positive value (e.g. 0.1 mm) as a final spring-pass allowance, or 0 for full depth.">
+            <NumInput value={toDisp(p.zOffset ?? 0)} onChange={v => set('zOffset', toMM(v))} step={isInch ? 0.001 : 0.05} />
+          </Field>
+        </>}
+
+        <div style={S.section}>Clearance</div>
+        <Field label="Safe Z" unit={distUnit} tip="Rapid clearance height between raster lines. Must clear all raised features and clamps.">
+          <NumInput value={toDisp(p.safeZ ?? 5)} onChange={v => set('safeZ', toMM(v))} step={isInch ? 0.05 : 1} />
+        </Field>
+        {commonSpeeds}
+
+        <div style={S.section}>Heightmap</div>
+        <Field label="Status" tip="The heightmap is sampled from the STL in the 3D view. Use '⬇ Sample Heights' in the 3D HUD to refresh after moving the stock or reloading the STL.">
+          <span style={{ ...S.input, fontSize: 10, color: state.stlHeightmap ? '#88ff88' : '#ff8844' }}>
+            {state.stlHeightmap
+              ? `${state.stlHeightmap.gridW}×${state.stlHeightmap.gridH} — ready`
+              : 'Not sampled — use ⬇ Sample Heights in the 3D view'}
+          </span>
+        </Field>
+      </>}
     </div>
   );
 }

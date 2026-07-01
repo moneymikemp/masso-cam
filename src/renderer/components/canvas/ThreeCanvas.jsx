@@ -3,6 +3,7 @@ import * as THREE from 'three';
 import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls';
 import { STLLoader } from 'three/examples/jsm/loaders/STLLoader';
 import { useApp } from '../../store/AppContext';
+import { generateSTLRaster } from '../../cam/toolpath';
 import { createHeightMapWorker } from './createHeightMapWorker';
 
 // Coordinate mapping: world (X right, Y forward, Z up) → Three.js (X right, Y up, Z toward viewer)
@@ -240,7 +241,7 @@ const BTN = {
 const BTN_ACTIVE = { ...BTN, background: '#1a1a48', borderColor: '#5555cc', color: '#bbbbff' };
 
 export default function ThreeCanvas() {
-  const { state } = useApp();
+  const { state, dispatch } = useApp();
   const { operations, stockConfig, showToolpaths, showRapids, zSliderPos } = state;
 
   const mountRef    = useRef(null);
@@ -265,12 +266,14 @@ export default function ThreeCanvas() {
   const renderingRef     = useRef(false);
   const stlMeshRef       = useRef(null);
   const stlInputRef      = useRef(null);
+  const stlHeightmapRef  = useRef(null);
 
   // React state only for UI re-renders
   const [simPlaying,  setSimPlaying]  = useState(false);
   const [simSpeed,    setSimSpeed]    = useState(500); // mm/s
   const [rendering,   setRendering]   = useState(false);
   const [hasToolpath, setHasToolpath] = useState(false);
+  const [hasSTL,      setHasSTL]      = useState(false);
 
   // Keep simRef.speed in sync with slider
   useEffect(() => { simRef.current.speed = simSpeed; }, [simSpeed]);
@@ -553,6 +556,10 @@ export default function ThreeCanvas() {
       const cy = (box.min.y + box.max.y) / 2;
       geometry.translate(-cx, -cy, -box.min.z);
 
+      // Store the STL footprint so StockPanel can use "Fit Stock to Part" without DXF entities.
+      // Fusion X → world X, Fusion Y → world Y (after -PI/2 rotation on X).
+      dispatch({ type: 'SET_STL_BOUNDS', payload: { partW: box.max.x - box.min.x, partH: box.max.y - box.min.y } });
+
       // Rotate from Fusion/STL Z-up into Three.js Y-up:
       //   Three.js X = Fusion X,  Three.js Y = Fusion Z,  Three.js Z = -Fusion Y
       const mesh = new THREE.Mesh(
@@ -581,9 +588,180 @@ export default function ThreeCanvas() {
       }
       scene.add(mesh);
       stlMeshRef.current = mesh;
+      setHasSTL(true);
     };
     reader.readAsArrayBuffer(file);
   }, [stockConfig]);
+
+  // Keep the STL mesh centred on the stock whenever stockConfig changes (e.g. after
+  // "Fit Stock to Part" or "Move to Origin").  The mesh is loaded once and positioned
+  // at the stock centre at load time; this effect keeps it in sync with later edits.
+  useEffect(() => {
+    const mesh = stlMeshRef.current;
+    if (!mesh) return;
+    const sc = stockConfig;
+    const xFrac = sc.datum?.[1] === 'l' ? 0 : sc.datum?.[1] === 'c' ? 0.5 : 1;
+    const yFrac = sc.datum?.[0] === 'b' ? 0 : sc.datum?.[0] === 'm' ? 0.5 : 1;
+    const minX   = (sc.stockOriginX ?? 0) - xFrac * (sc.width  ?? 0);
+    const minY   = (sc.stockOriginY ?? 0) - yFrac * (sc.length ?? 0);
+    const stockCX = minX + (sc.width  ?? 0) / 2;
+    const stockCY = minY + (sc.length ?? 0) / 2;
+    mesh.position.set(wx(stockCX), wy(sc.topZ ?? 0), wz(stockCY));
+    stlHeightmapRef.current = null;
+    dispatch({ type: 'SET_STL_HEIGHTMAP', payload: null });
+  }, [stockConfig, dispatch]);
+
+  // Render the loaded STL top-down with a height-encoding shader and read the
+  // depth back as a Float32Array of world-Z values over the stock area.
+  // heights[row * gridW + col] — row 0 = world minY, col 0 = world minX.
+  const computeSTLHeightmap = useCallback(() => {
+    const mesh = stlMeshRef.current;
+    const renderer = rendererRef.current;
+    if (!mesh || !renderer) return;
+
+    const sc = stockConfig;
+    const xFrac = sc.datum?.[1] === 'l' ? 0 : sc.datum?.[1] === 'c' ? 0.5 : 1;
+    const yFrac = sc.datum?.[0] === 'b' ? 0 : sc.datum?.[0] === 'm' ? 0.5 : 1;
+    const minX   = (sc.stockOriginX ?? 0) - xFrac * (sc.width  ?? 0);
+    const maxX   = minX + (sc.width  ?? 0);
+    const minY   = (sc.stockOriginY ?? 0) - yFrac * (sc.length ?? 0);
+    const maxY   = minY + (sc.length ?? 0);
+    const topZ   = sc.topZ     ?? 0;
+    const thick  = sc.thickness ?? 50;
+    const w2     = (maxX - minX) / 2;
+    const h2     = (maxY - minY) / 2;
+    const stockCX = minX + w2;
+    const stockCY = minY + h2;
+
+    // World-space bounding box (Three.js Y = world Z = height)
+    const bbox = new THREE.Box3().setFromObject(mesh);
+    const minH   = Math.min(topZ - thick, bbox.min.y);
+    const maxH   = Math.max(topZ + 1,    bbox.max.y);
+    const rangeH = maxH - minH || 1;
+
+    const GRID = 512;
+
+    // Shader: encode world-space Y (height) as packed 24-bit RGB
+    const mat = new THREE.ShaderMaterial({
+      uniforms: { uMinH: { value: minH }, uRangeH: { value: rangeH } },
+      vertexShader: `
+        varying float vH;
+        void main() {
+          vec4 wp = modelMatrix * vec4(position, 1.0);
+          vH = wp.y;
+          gl_Position = projectionMatrix * viewMatrix * wp;
+        }
+      `,
+      fragmentShader: `
+        varying float vH;
+        uniform float uMinH;
+        uniform float uRangeH;
+        void main() {
+          float t   = clamp((vH - uMinH) / uRangeH, 0.0, 1.0);
+          float val = floor(t * 16777215.0 + 0.5);
+          gl_FragColor = vec4(
+            floor(val / 65536.0)              / 255.0,
+            floor(mod(val, 65536.0) / 256.0)  / 255.0,
+            mod(val, 256.0)                   / 255.0,
+            1.0
+          );
+        }
+      `,
+    });
+
+    // Temporary mesh sharing the same geometry + transform but using the shader
+    const tmpMesh = new THREE.Mesh(mesh.geometry, mat);
+    tmpMesh.position.copy(mesh.position);
+    tmpMesh.rotation.copy(mesh.rotation);
+    tmpMesh.scale.copy(mesh.scale);
+    const tmpScene = new THREE.Scene();
+    tmpScene.add(tmpMesh);
+
+    // Orthographic camera looking straight down (Three.js -Y = world -Z downward).
+    // up=(0,0,-1) → camera local Y = Three.js -Z = world +Y, so ortho top/bottom
+    // map directly to world Y [stockCY-h2 .. stockCY+h2].
+    const cam = new THREE.OrthographicCamera(-w2, w2, h2, -h2, 0.1, rangeH + 200);
+    cam.position.set(wx(stockCX), maxH + 100, wz(stockCY));
+    cam.up.set(0, 0, -1);
+    cam.lookAt(new THREE.Vector3(wx(stockCX), minH - 1, wz(stockCY)));
+
+    const rt = new THREE.WebGLRenderTarget(GRID, GRID, {
+      minFilter: THREE.NearestFilter,
+      magFilter: THREE.NearestFilter,
+      format:    THREE.RGBAFormat,
+      type:      THREE.UnsignedByteType,
+    });
+
+    // Background = encoded topZ (areas with no STL coverage = stock surface)
+    const bgT = Math.max(0, Math.min(1, (topZ - minH) / rangeH));
+    const bgV = Math.round(bgT * 16777215);
+
+    const prevRT = renderer.getRenderTarget();
+    renderer.setRenderTarget(rt);
+    renderer.setClearColor(
+      new THREE.Color(
+        Math.floor(bgV / 65536)         / 255,
+        Math.floor((bgV % 65536) / 256) / 255,
+        (bgV % 256)                     / 255,
+      ),
+      1,
+    );
+    renderer.clear();
+    renderer.render(tmpScene, cam);
+
+    const pixels = new Uint8Array(GRID * GRID * 4);
+    renderer.readRenderTargetPixels(rt, 0, 0, GRID, GRID, pixels);
+
+    renderer.setRenderTarget(prevRT);
+    rt.dispose();
+    mat.dispose();
+
+    // Decode: WebGL readPixels is bottom-to-top, so row 0 = world minY ✓
+    const heights = new Float32Array(GRID * GRID);
+    for (let i = 0; i < GRID * GRID; i++) {
+      const r = pixels[i * 4], g = pixels[i * 4 + 1], b = pixels[i * 4 + 2];
+      heights[i] = minH + ((r * 65536 + g * 256 + b) / 16777215) * rangeH;
+    }
+
+    const hm = { heights, gridW: GRID, gridH: GRID, minX, maxX, minY, maxY, minH, maxH };
+    stlHeightmapRef.current = hm;
+    dispatch({ type: 'SET_STL_HEIGHTMAP', payload: hm });
+    console.log('[stl-heightmap] sampled', GRID, 'x', GRID,
+      '| Z range', minH.toFixed(2), '..', maxH.toFixed(2),
+      '| stock', minX.toFixed(1), maxX.toFixed(1), minY.toFixed(1), maxY.toFixed(1));
+  }, [stockConfig, dispatch]);
+
+  const generateRasterToolpath = useCallback(() => {
+    // Auto-sample heightmap if not yet computed
+    if (!stlHeightmapRef.current && stlMeshRef.current) computeSTLHeightmap();
+    const hm = stlHeightmapRef.current;
+    if (!hm) return;
+
+    const sc = stockConfig;
+    const params = {
+      toolDiameter: 6.35,
+      safeZ:        sc.topZ != null ? sc.topZ + 5 : 5,
+      feedRate:     1500,
+      plungeRate:   500,
+      spindleRpm:   18000,
+      stepover:     2,
+      zOffset:      0,
+    };
+
+    const toolpath = generateSTLRaster(hm, params);
+
+    // ADD_OPERATION spreads ...payload last so toolpath here overrides toolpath:null in the reducer.
+    dispatch({ type: 'ADD_OPERATION', payload: {
+      name: '3D Raster (STL)',
+      type: 'stlraster',
+      enabled: true,
+      selectedIds: [],
+      params,
+      toolpath,
+    }});
+
+    console.log('[stl-raster] generated', toolpath.moves.length, 'moves');
+  }, [stockConfig, dispatch, computeSTLHeightmap]);
 
   const handleFit = () => {
     fittedRef.current = false;
@@ -636,6 +814,18 @@ export default function ThreeCanvas() {
       <div style={{ position: 'absolute', top: 8, right: 8, display: 'flex', flexDirection: 'column', gap: 4, alignItems: 'flex-end' }}>
         <button onClick={handleFit} style={BTN} title="Fit view to stock">⊡ Fit</button>
         <button onClick={handleLoadSTL} style={BTN} title="Load STL model (centered on stock)">⬆ Load STL</button>
+        <button
+          onClick={computeSTLHeightmap}
+          style={BTN}
+          disabled={!hasSTL}
+          title="Sample STL Z-heights into a grid array (512×512)"
+        >⬇ Sample Heights</button>
+        <button
+          onClick={generateRasterToolpath}
+          style={BTN}
+          disabled={!hasSTL}
+          title="Generate 3D raster toolpath from STL heightmap"
+        >▦ Raster TP</button>
         <button
           onClick={computeHeightMap}
           style={rendering ? BTN_ACTIVE : BTN}

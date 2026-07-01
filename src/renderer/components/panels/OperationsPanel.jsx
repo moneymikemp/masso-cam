@@ -21,6 +21,7 @@ const OP_TYPES = [
   { type: 'vcarve',        label: 'V-Carve',        icon: '◆', desc: 'Variable-depth V-bit carving for closed shapes' },
   { type: 'dogbone',       label: 'Dogbone Fillets', icon: '⊕', desc: 'Drill internal corners for square-fit pockets' },
   { type: 'text',          label: 'Text Engraving',  icon: 'T',  desc: 'Engrave, outline, or pocket lettering' },
+  { type: 'stlraster',     label: '3D Raster (STL)', icon: '▦',  desc: 'Ball-nose raster over loaded STL model' },
 ];
 
 const S = {
@@ -117,10 +118,15 @@ export default function OperationsPanel() {
       : entities;
     const injectedParams = { ...op.params, toolDiameter };
     if (resolvedStepover != null) injectedParams.stepover = resolvedStepover;
+    // For stlraster: resolve the separate finish-pass tool diameter if one is selected.
+    if (op.type === 'stlraster' && injectedParams.finishToolId) {
+      const finishTool = tools.find(t => t.id === injectedParams.finishToolId);
+      if (finishTool) injectedParams.finishToolDiameter = finishTool.diameter;
+    }
     const toolpath = generateToolpath(
       { ...op, params: injectedParams },
       entitiesToUse,
-      { stockConfig: state.stockConfig, allEntities: entities }
+      { stockConfig: state.stockConfig, allEntities: entities, stlHeightmap: state.stlHeightmap }
     );
     dispatch({ type: 'SET_OPERATION_TOOLPATH', payload: { id: op.id, toolpath } });
     dispatch({ type: 'SET_STATUS', payload: `Calculated: ${toolpath.moves.length} moves` });

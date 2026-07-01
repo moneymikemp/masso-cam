@@ -112,12 +112,14 @@ function NumInput({ value, onChange, min, step = 0.1 }) {
 
 export default function StockPanel() {
   const { state, dispatch } = useApp();
-  const { stockConfig, entities, layers } = state;
+  const { stockConfig, entities, layers, operations, stlBounds } = state;
   const isInch = state.postConfig?.units === 'inch';
 
-  // Compute bounds from all current entities (DXF-imported or drawn in-app).
+  // Compute bounds from DXF entities (for moveToOrigin and DXF-based fitStockToPart).
   const bounds = useMemo(() => entities.length > 0 ? getBounds(entities) : null, [entities]);
-  const hasGeometry = bounds != null;
+  const hasDXF = bounds != null;
+  // "Fit Stock to Part" also works when an STL is loaded (uses stored footprint dimensions).
+  const hasGeometry = hasDXF || stlBounds != null;
 
   const set = (key, val) => dispatch({ type: 'SET_STOCK_CONFIG', payload: { [key]: val } });
 
@@ -126,42 +128,95 @@ export default function StockPanel() {
 
   function fitStockToPart() {
     if (!hasGeometry) return;
-    const { minX: gMinX, minY: gMinY, maxX: gMaxX, maxY: gMaxY } = bounds;
+
+    let gMinX, gMinY, gMaxX, gMaxY;
+
+    if (hasDXF) {
+      // DXF entities: fit stock tightly around their world-space bounds.
+      ({ minX: gMinX, minY: gMinY, maxX: gMaxX, maxY: gMaxY } = bounds);
+    } else {
+      // STL only: the model is centred on the current stock centre.
+      // Use the stored Fusion XY footprint, centred on the current stock centre.
+      const xFrac = datumXFrac(stockConfig.datum);
+      const yFrac = datumYFrac(stockConfig.datum);
+      const ox = stockConfig.stockOriginX ?? 0;
+      const oy = stockConfig.stockOriginY ?? 0;
+      const w  = stockConfig.width  ?? 0;
+      const l  = stockConfig.length ?? 0;
+      const stockCX = ox - xFrac * w + w / 2;
+      const stockCY = oy - yFrac * l + l / 2;
+      const halfW = stlBounds.partW / 2;
+      const halfH = stlBounds.partH / 2;
+      gMinX = stockCX - halfW;  gMaxX = stockCX + halfW;
+      gMinY = stockCY - halfH;  gMaxY = stockCY + halfH;
+    }
+
     const gW = gMaxX - gMinX, gH = gMaxY - gMinY;
     if (gW < 1e-6 || gH < 1e-6) return;
 
-    const newW = gW * 1.1, newL = gH * 1.1;
-    const mX   = gW * 0.05, mY = gH * 0.05;  // 5 % each side
+    const offset = toMM(stockConfig.stockOffset ?? 0) || gW * 0.05;
+    const newW = gW + 2 * offset;
+    const newL = gH + 2 * offset;
 
-    // The stock lower-left corner lands at (gMinX - mX, gMinY - mY).
-    // The datum point is offset from that corner by (xFrac*newW, yFrac*newL).
-    const stockOriginX = gMinX - mX + datumXFrac(stockConfig.datum) * newW;
-    const stockOriginY = gMinY - mY + datumYFrac(stockConfig.datum) * newL;
+    // Datum point is at stock lower-left + (xFrac * newW, yFrac * newL).
+    const stockOriginX = gMinX - offset + datumXFrac(stockConfig.datum) * newW;
+    const stockOriginY = gMinY - offset + datumYFrac(stockConfig.datum) * newL;
 
-    // Reposition and resize the stock — geometry is NOT moved.
     dispatch({ type: 'SET_STOCK_CONFIG', payload: { width: newW, length: newL, stockOriginX, stockOriginY } });
   }
 
   function moveToOrigin() {
     if (!hasGeometry) return;
+
+    if (!hasDXF) {
+      // STL-only: place the stock datum at machine (0, 0) by zeroing stockOriginX/Y.
+      // The STL mesh follows via the useEffect in ThreeCanvas.
+      dispatch({ type: 'SET_STOCK_CONFIG', payload: { stockOriginX: 0, stockOriginY: 0 } });
+      return;
+    }
+
     const { minX: gMinX, minY: gMinY, maxX: gMaxX, maxY: gMaxY } = bounds;
     const gCX = (gMinX + gMaxX) / 2, gCY = (gMinY + gMaxY) / 2;
 
-    // Compute which point in the geometry should land at world (0, 0)
+    // Which point on the geometry should land at machine (0, 0)?
     const refX = stockConfig.datum[1] === 'l' ? gMinX : stockConfig.datum[1] === 'c' ? gCX : gMaxX;
     const refY = stockConfig.datum[0] === 'b' ? gMinY : stockConfig.datum[0] === 'm' ? gCY : gMaxY;
 
-    // Shift entities so that datum reference is at (0, 0)
     const shifted   = applyShift(entities, -refX, -refY);
     const newBounds = getBounds(shifted);
+
+    // Entities have moved — toolpaths are now stale
+    const clearedOps = operations.map(op => ({ ...op, toolpath: null }));
     dispatch({ type: 'SET_DXF', payload: { entities: shifted, layers, bounds: newBounds } });
+    dispatch({ type: 'REORDER_OPERATIONS', payload: clearedOps });
 
     const nW = newBounds.maxX - newBounds.minX;
     const nH = newBounds.maxY - newBounds.minY;
-    // Reset datum origin to world (0, 0) and size stock to fit moved geometry
+    const offset = toMM(stockConfig.stockOffset ?? 0) || nW * 0.05; // stored offset or 5 % default
+    const padW = nW + 2 * offset;
+    const padH = nH + 2 * offset;
+
+    // Stock wraps the shifted geometry with `offset` margin on all sides.
+    // newBounds.minX is the geometry left after shifting (0 for 'bl', -nW for 'tr', etc.)
+    const stockOriginX = newBounds.minX - offset + datumXFrac(stockConfig.datum) * padW;
+    const stockOriginY = newBounds.minY - offset + datumYFrac(stockConfig.datum) * padH;
+
     dispatch({ type: 'SET_STOCK_CONFIG', payload: {
-      width: nW * 1.1, length: nH * 1.1,
-      stockOriginX: 0, stockOriginY: 0,
+      width: padW, length: padH, stockOriginX, stockOriginY,
+    }});
+  }
+
+  // Change the datum (reference corner/edge/centre) without moving the stock rectangle.
+  // Only stockOriginX/Y needs to change — it shifts to point to the new datum on the
+  // same stock box.
+  function changeDatum(newDatum) {
+    const { datum, stockOriginX: ox, stockOriginY: oy, width, length } = stockConfig;
+    const stockMinX = ox - datumXFrac(datum) * width;
+    const stockMinY = oy - datumYFrac(datum) * length;
+    dispatch({ type: 'SET_STOCK_CONFIG', payload: {
+      datum:        newDatum,
+      stockOriginX: stockMinX + datumXFrac(newDatum) * width,
+      stockOriginY: stockMinY + datumYFrac(newDatum) * length,
     }});
   }
 
@@ -174,7 +229,7 @@ export default function StockPanel() {
   function applyStockOffset(dispVal) {
     const offMM = toMM(dispVal);
     const updates = { stockOffset: offMM };
-    if (hasGeometry) {
+    if (hasDXF) {
       const { minX: gMinX, minY: gMinY, maxX: gMaxX, maxY: gMaxY } = bounds;
       const gW = gMaxX - gMinX, gH = gMaxY - gMinY;
       const newW = gW + 2 * offMM;
@@ -221,7 +276,9 @@ export default function StockPanel() {
           <button
             style={S.actionBtn(hasGeometry)}
             onClick={moveToOrigin}
-            title={`Shift geometry so the ${DATUM_LABELS[stockConfig.datum].toLowerCase()} lands at X0 Y0`}
+            title={hasDXF
+              ? `Shift geometry so the ${DATUM_LABELS[stockConfig.datum].toLowerCase()} lands at X0 Y0`
+              : `Place stock ${DATUM_LABELS[stockConfig.datum].toLowerCase()} at machine (0, 0)`}
           >
             Move to Origin
           </button>
@@ -284,7 +341,7 @@ export default function StockPanel() {
                 key={pos}
                 title={DATUM_LABELS[pos]}
                 style={S.datumBtn(stockConfig.datum === pos)}
-                onClick={() => set('datum', pos)}
+                onClick={() => changeDatum(pos)}
               >
                 {DATUM_ICONS[pos]}
               </button>
@@ -296,6 +353,7 @@ export default function StockPanel() {
         </div>
 
         <div style={S.infoBox}>
+          <div style={{ color: '#3b3b66', marginBottom: 2, fontSize: 9 }}>machine coords (from datum)</div>
           <div>X: <span style={S.infoVal}>{fmt(stockBounds.minX)}</span> → <span style={S.infoVal}>{fmt(stockBounds.maxX)}</span> {distUnit}</div>
           <div>Y: <span style={S.infoVal}>{fmt(stockBounds.minY)}</span> → <span style={S.infoVal}>{fmt(stockBounds.maxY)}</span> {distUnit}</div>
           <div>Z: <span style={S.infoVal}>{fmt(stockConfig.topZ - stockConfig.thickness)}</span> → <span style={S.infoVal}>{fmt(stockConfig.topZ)}</span> {distUnit}</div>

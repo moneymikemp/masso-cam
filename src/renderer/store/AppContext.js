@@ -88,6 +88,10 @@ const initialState = {
     stockOffset: 0,   // uniform per-side margin applied around part bounds (mm)
   },
 
+  // STL model footprint (set when STL is loaded in 3D view; null when no STL)
+  stlBounds: null,    // { partW, partH } in mm (Fusion XY footprint)
+  stlHeightmap: null, // { heights, gridW, gridH, minX, maxX, minY, maxY, minH, maxH } — set after sampling
+
   // Machine / post config
   machineConfig: {
     name: 'My Masso G3',
@@ -169,6 +173,12 @@ function reducer(state, action) {
       const { entities, layers, bounds } = action.payload;
       return { ...state, entities, layers, bounds, selectedEntityIds: [], entityHistory: [], entityFuture: [], dirty: true };
     }
+
+    case 'SET_STL_BOUNDS':
+      return { ...state, stlBounds: action.payload };
+
+    case 'SET_STL_HEIGHTMAP':
+      return { ...state, stlHeightmap: action.payload };
 
     case 'SET_LAYERS': return { ...state, layers: action.payload };
 
@@ -650,6 +660,7 @@ export function getDefaultParams(type) {
         bulkEndmill:   { enabled: true, toolId: null, diameter: 6.35,  rpm: 18000, feed: 1500, plunge: 500, wallStock: 0.254 },
       },
     };
+    case 'stlraster': return { safeZ: 5, feedRate: 1500, plungeRate: 500, spindleRpm: 18000, toolDiameter: 6.35, stepover: 2, zOffset: 0, direction: 'x', finishEnabled: true, finishToolId: null, finishToolDiameter: null, roughEnabled: false, roughStepover: 6, roughAllowance: 1, roughFeedRate: 2000 };
     case 'dogbone': return { safeZ: 25, topZ: 0, feedRate: 1500, plungeRate: 500, spindleRpm: 18000, totalDepth: 10, depthPerPass: 3, toolDiameter: 6.35, cornerMode: 'auto', selectedCorners: [] };
     case 'text':    return {
       safeZ: 25, topZ: 0, feedRate: 1500, plungeRate: 500, spindleRpm: 18000,
