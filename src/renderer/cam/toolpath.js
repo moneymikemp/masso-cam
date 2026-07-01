@@ -2,6 +2,9 @@
 
 import { offsetPolyline, generatePocketOffsets, generateRestMachiningPasses, generateRasterPasses, polygonArea, isClockwise, clipPolygonToRegion, stripClose, pointInPolygon, differencePolygons } from './offset.js';
 import { circleToPoints, arcToPoints, polylineToPoints } from '../dxf/parser.js';
+// jspoly loaded as a global via public/index.html <script> tag (webpack can't bundle it — it has internal requires).
+// In browser context the IIFE sets window.JSPoly (uppercase); module.exports.jspoly only exists in Node.
+const _jspoly = window.JSPoly;
 
 // ── Entry point ───────────────────────────────────────────────────────────────
 
@@ -1043,95 +1046,184 @@ function generateVCarve(op, entities, context = {}) {
   const moves = [], warnings = [];
   const p = op.params;
 
-  const safeZ      = p.safeZ ?? 25;
-  const topZ       = p.topZ ?? 0;
-  const maxDepth   = Math.abs(p.maxDepth ?? 15);
-  const halfAngle  = Math.max(1, Math.min(89, p.halfAngle ?? 15));
-  const tipRadius  = (p.tipDiameter ?? 0) / 2;
-  const flatDepth  = p.flatDepth ?? 0;
-  const feedRate   = p.feedRate ?? 1500;
-  const plungeRate = p.plungeRate ?? 500;
-
+  const safeZ        = p.safeZ ?? 25;
+  const topZ         = p.topZ ?? 0;
+  const maxDepth     = Math.abs(p.maxDepth ?? 15);
+  const halfAngle    = Math.max(1, Math.min(89, p.halfAngle ?? 15));
+  const tipRadius    = (p.tipDiameter ?? 0) / 2;
+  const flatDepth    = p.flatDepth ?? 0;
+  const feedRate     = p.feedRate ?? 1500;
+  const plungeRate   = p.plungeRate ?? 500;
   const tanHalfAngle = Math.tan(halfAngle * Math.PI / 180);
-  const maxWallDist  = maxDepth * tanHalfAngle + tipRadius;
-  const XY_STEP      = 0.2; // mm between subdivision points along each branch
 
   if (!op.selectedIds?.length) return { moves, warnings: ['Select entities for V-Carve'] };
   const selected = getSelectedEntities(entities, op.selectedIds);
   if (!selected.length) return { moves, warnings: ['No entities selected'] };
-  const allProfiles = buildPocketProfiles(selected);
-  if (!allProfiles.length) return { moves, warnings: ['No closed profiles found'] };
+  const rawProfiles = buildPocketProfiles(selected);
+  if (!rawProfiles.length) return { moves, warnings: ['No closed profiles found'] };
 
-  for (const profile of allProfiles) {
-    const outer = stripClose([...profile]);
+  // Group profiles into { outer, holes[] } by containment — same pattern as skeleton preview.
+  // Sort largest first so outers are processed before any holes they contain.
+  // pointInPolygon is winding-agnostic so we don't need to normalise before the check.
+  // We do NOT force CCW on the outer before passing to JSPoly — JSPoly handles both
+  // windings and the raw polygon produces the correct corner branches.
+  rawProfiles.sort((a, b) => polygonArea(b) - polygonArea(a));
+  const shapeGroups = [];
+  for (const raw of rawProfiles) {
+    let placed = false;
+    for (const group of shapeGroups) {
+      if (raw.some(pt => pointInPolygon(pt, group.outer))) {
+        group.holes.push(raw);
+        placed = true;
+        break;
+      }
+    }
+    if (!placed) shapeGroups.push({ outer: raw, holes: [] });
+  }
+
+  // zOf: convert JSPoly radius (distance to nearest wall) to Z height
+  const zOf = radius => {
+    const depth = Math.min(maxDepth, Math.max(flatDepth, (radius - tipRadius) / tanHalfAngle));
+    return topZ - depth;
+  };
+
+  for (const { outer: rawOuter, holes } of shapeGroups) {
+    const outer = stripClose([...rawOuter]);
     if (outer.length < 3) continue;
 
-    // Find the deepest medial axis point via progressive erosion.
-    // For a triangle, this converges to the incenter (equidistant from all three edges).
-    let deepestPt = null;
-    for (let d = XY_STEP; d <= maxWallDist + XY_STEP; d += XY_STEP) {
-      const results = offsetPolyline(outer, d, true);
-      const alive = results.filter(r => r.length >= 3);
-      if (alive.length === 0) break;
-      const poly = stripClose([...alive[0]]); // largest result (sorted by area desc)
-      const cx = poly.reduce((s, q) => s + q.x, 0) / poly.length;
-      const cy = poly.reduce((s, q) => s + q.y, 0) / poly.length;
-      deepestPt = { x: cx, y: cy };
+    // Compute exact medial axis via JSPoly (Boost Polygon Voronoi).
+    // Returns [{point0:{x,y,radius}, point1:{x,y,radius}}, …] where radius = dist to nearest wall.
+    // Holes (inner counters like the counter of 'e') are passed so the medial axis is
+    // computed in the annular region between outer and inner walls.
+    let segs;
+    try {
+      const jsHoles = holes.map(h => stripClose([...h]).map(v => ({ x: v.x, y: v.y })));
+      // filtering_angle=0 keeps all branches including corner-reach segments.
+      segs = _jspoly.construct_medial_axis(outer.map(v => ({ x: v.x, y: v.y })), jsHoles, 0.1, undefined, 0);
+    } catch (e) {
+      warnings.push(`V-Carve medial axis failed: ${e.message}`);
+      continue;
     }
-    if (!deepestPt) continue;
+    if (!segs || segs.length === 0) { warnings.push('No medial axis found'); continue; }
 
-    // Subdivide a line segment from `from` to `to`, computing Z via distToNearestWall
-    // at each sample point. For a triangle, from=vertex and to=incenter, so the
-    // segment is exactly the angle bisector (medial axis branch) of that corner.
-    const buildBranch = (from, to) => {
-      const dx = to.x - from.x, dy = to.y - from.y;
-      const len = Math.hypot(dx, dy);
-      if (len < 1e-6) {
-        const wallDist = distToNearestWall(from, outer, []);
-        const depth = Math.min(maxDepth, Math.max(flatDepth, (wallDist - tipRadius) / tanHalfAngle));
-        return [{ x: from.x, y: from.y, z: topZ - depth }];
-      }
-      const steps = Math.max(1, Math.ceil(len / XY_STEP));
-      const pts = [];
-      for (let i = 0; i <= steps; i++) {
-        const t = i / steps;
-        const x = from.x + dx * t;
-        const y = from.y + dy * t;
-        const wallDist = distToNearestWall({ x, y }, outer, []);
-        const rawDepth = (wallDist - tipRadius) / tanHalfAngle;
-        const depth = Math.min(maxDepth, Math.max(flatDepth, rawDepth));
-        pts.push({ x, y, z: topZ - depth });
-      }
-      return pts;
+    segs = segs.filter(s => s.point0.radius > 1e-6 || s.point1.radius > 1e-6);
+    if (segs.length === 0) continue;
+
+    // Build adjacency graph from the unordered segment list
+    const nodeMap = new Map();
+    const ptKey  = v => `${v.x.toFixed(4)},${v.y.toFixed(4)}`;
+    const getNode = v => {
+      const k = ptKey(v);
+      if (!nodeMap.has(k)) nodeMap.set(k, { x: v.x, y: v.y, radius: v.radius, adj: [] });
+      return nodeMap.get(k);
     };
 
-    // Build path visiting every vertex through the deepest point:
-    //   v[0] → deep → v[1] → deep → v[2] → … → v[n-1]
-    // This traces all n medial-axis branches in a single continuous pass.
-    const pathPts = [];
-    for (let i = 0; i < outer.length; i++) {
-      const branch = buildBranch(outer[i], deepestPt); // v[i] → deep
-      if (i === 0) {
-        pathPts.push(...branch);
-      } else {
-        // Arrive at v[i]: reverse branch (deep → v[i]), skip first point (already at deep)
-        pathPts.push(...[...branch].reverse().slice(1));
-        // Leave v[i] toward deep for the next branch (skip if this is the last vertex)
-        if (i < outer.length - 1) {
-          pathPts.push(...branch.slice(1));
+    for (const seg of segs) {
+      const n0 = getNode(seg.point0);
+      const n1 = getNode(seg.point1);
+      if (n0 !== n1 && !n0.adj.includes(n1)) { n0.adj.push(n1); n1.adj.push(n0); }
+    }
+
+    // Extend each leaf to the two endpoints of the wall edge it faces.
+    // JSPoly's medial axis terminates at the midpoint between the two edges that form a
+    // corner — the leaf stops short at radius r, never touching the corner vertices.
+    // We cast a ray from each leaf in its outward direction (junction→leaf), find the
+    // wall edge that ray hits, then connect the leaf to both endpoints of that edge.
+    // The DFS then traverses leaf→cornerA (backtrack) leaf→cornerB at depth=flatDepth,
+    // which physically carves the V-bit tip into both corner vertices.
+    {
+      const holePtsRay = holes.map(h => stripClose([...h]));
+      const allBoundaries = [outer, ...holePtsRay];
+      const maxR = segs.reduce((m, s) => Math.max(m, s.point0.radius, s.point1.radius), 0);
+
+      for (const leaf of [...nodeMap.values()].filter(n => n.adj.length === 1)) {
+        const junction = leaf.adj[0];
+        const dx = leaf.x - junction.x, dy = leaf.y - junction.y;
+        const outLen = Math.hypot(dx, dy);
+        if (outLen < 1e-9) continue;
+        const nx = dx / outLen, ny = dy / outLen;
+
+        // Ray-cast in outward direction; find nearest wall edge hit.
+        let minT = Infinity, hitP1 = null, hitP2 = null;
+        for (const poly of allBoundaries) {
+          const np = poly.length;
+          for (let i = 0; i < np; i++) {
+            const p1 = poly[i], p2 = poly[(i + 1) % np];
+            const ex = p2.x - p1.x, ey = p2.y - p1.y;
+            const denom = nx * ey - ny * ex;
+            if (Math.abs(denom) < 1e-12) continue;
+            const fx = p1.x - leaf.x, fy = p1.y - leaf.y;
+            const t = (fx * ey - fy * ex) / denom;
+            const u = (fx * ny - fy * nx) / denom;
+            if (t > 1e-4 && u >= -1e-4 && u <= 1 + 1e-4 && t < minT) {
+              minT = t; hitP1 = p1; hitP2 = p2;
+            }
+          }
+        }
+
+        if (!hitP1 || minT > maxR * 4) continue;
+
+        for (const corner of [hitP1, hitP2]) {
+          const ck = `CV_${corner.x.toFixed(4)},${corner.y.toFixed(4)}`;
+          if (!nodeMap.has(ck)) nodeMap.set(ck, { x: corner.x, y: corner.y, radius: 0, adj: [] });
+          const cn = nodeMap.get(ck);
+          if (!leaf.adj.includes(cn)) { leaf.adj.push(cn); cn.adj.push(leaf); }
         }
       }
     }
 
-    if (pathPts.length === 0) continue;
+    const nodeList = [...nodeMap.values()];
+    if (nodeList.length === 0) continue;
 
-    // Approach, trace, and clear
-    moves.push({ type: 'rapid', x: pathPts[0].x, y: pathPts[0].y, z: safeZ });
-    moves.push({ type: 'feed',  x: pathPts[0].x, y: pathPts[0].y, z: pathPts[0].z, f: plungeRate });
-    for (let i = 1; i < pathPts.length; i++) {
-      moves.push({ type: 'feed', x: pathPts[i].x, y: pathPts[i].y, z: pathPts[i].z, f: feedRate });
+    // DFS over medial axis — each edge traversed forward + backward (covers all branches).
+    // Corner branches from JSPoly are often separate connected components, so we iterate
+    // over ALL components, not just the one containing the first leaf.
+    const edgeKey      = (a, b) => [ptKey(a), ptKey(b)].sort().join('~');
+    const visitedEdges = new Set();
+    const visitedNodes = new Set();
+
+    const dfsComponent = (startNode) => {
+      const pts = [];
+      (function dfs(node) {
+        visitedNodes.add(ptKey(node));
+        pts.push({ x: node.x, y: node.y, z: zOf(node.radius) });
+        for (const nbr of node.adj) {
+          const ek = edgeKey(node, nbr);
+          if (!visitedEdges.has(ek)) {
+            visitedEdges.add(ek);
+            dfs(nbr);
+            pts.push({ x: node.x, y: node.y, z: zOf(node.radius) }); // backtrack
+          }
+        }
+      })(startNode);
+      return pts;
+    };
+
+    // Pick best start for a component: prefer a leaf with the smallest radius
+    const bestStart = (candidates) => {
+      const leaves = candidates.filter(n => n.adj.length === 1);
+      return (leaves.length > 0 ? leaves : candidates)
+        .reduce((a, b) => a.radius < b.radius ? a : b);
+    };
+
+    let firstComponent = true;
+    while (true) {
+      const unvisited = nodeList.filter(n => !visitedNodes.has(ptKey(n)));
+      if (unvisited.length === 0) break;
+      const start = bestStart(unvisited);
+      const pathPts = dfsComponent(start);
+      if (pathPts.length === 0) continue;
+
+      moves.push({ type: 'rapid', x: pathPts[0].x, y: pathPts[0].y, z: safeZ });
+      moves.push({ type: 'feed',  x: pathPts[0].x, y: pathPts[0].y, z: pathPts[0].z, f: plungeRate });
+      for (let i = 1; i < pathPts.length; i++) {
+        moves.push({ type: 'feed', x: pathPts[i].x, y: pathPts[i].y, z: pathPts[i].z, f: feedRate });
+      }
+      moves.push({ type: 'rapid', x: pathPts.at(-1).x, y: pathPts.at(-1).y, z: safeZ });
+      firstComponent = false;
     }
-    moves.push({ type: 'rapid', x: pathPts.at(-1).x, y: pathPts.at(-1).y, z: safeZ });
+
+    if (firstComponent) continue; // no components emitted
   }
 
   return { moves, warnings };
