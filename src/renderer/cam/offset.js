@@ -105,6 +105,18 @@ function clipperClosedOffset(points, distance) {
     .sort((a, b) => polygonArea(b) - polygonArea(a));
 }
 
+function clipperClosedOffsetRound(points, distance) {
+  const co = new ClipperLib.ClipperOffset(2.0, 0.1 * SCALE); // arcTolerance = 0.1 mm
+  co.AddPath(toClipper(points), ClipperLib.JoinType.jtRound, ClipperLib.EndType.etClosedPolygon);
+  const solution = new ClipperLib.Paths();
+  co.Execute(solution, -distance * SCALE);
+  return solution
+    .map(fromClipper)
+    .filter(p => p.length >= 3)
+    .map(p => isClockwise(p) ? [...p].reverse() : p)
+    .sort((a, b) => polygonArea(b) - polygonArea(a));
+}
+
 // ── Public API ────────────────────────────────────────────────────────────────
 
 // Offset a polyline or closed polygon by `distance`.
@@ -122,6 +134,18 @@ export function offsetPolyline(points, distance, closed = true) {
   if (!results.length) return [[]];
 
   // Add closing point to each result to match the pre-existing API contract.
+  return results.map(r => [...r, { ...r[0] }]);
+}
+
+// Like offsetPolyline but uses round joins — smooth convex corners, no miter spikes.
+// Ideal for outer boundary envelopes around complex shapes.
+export function roundedOffsetPolyline(points, distance, closed = true) {
+  if (!points || points.length < 2) return [points || []];
+  if (!closed) return [simpleOpenOffset(points, distance)];
+  const pts = stripClose([...points]);
+  if (pts.length < 3) return [pts];
+  const results = clipperClosedOffsetRound(pts, distance);
+  if (!results.length) return [[]];
   return results.map(r => [...r, { ...r[0] }]);
 }
 

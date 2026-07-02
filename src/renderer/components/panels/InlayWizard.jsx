@@ -149,7 +149,7 @@ export default function InlayWizard({ onClose, onGenerate, onSelectEntities, sel
     pocketSafeZ:      0.5 * MM,
     pocketStockW:     0,
     pocketStockH:     0,
-    plugs: [{ id: 'plug-1', name: 'Plug 1', entityIds: [], topZ: 0, safeZ: 0.5 * MM, stockW: 0, stockH: 0 }],
+    plugs: [{ id: 'plug-1', name: 'Plug 1', entityIds: [], topZ: 0, safeZ: 0.5 * MM, stockW: 0, stockH: 0, boundaryEnabled: false, boundaryOffset: 5 }],
     taperToolId:      null,
     angle:            30,
     tipDia:           0.5,
@@ -207,7 +207,7 @@ export default function InlayWizard({ onClose, onGenerate, onSelectEntities, sel
   function addPlug() {
     setWiz(w => ({
       ...w,
-      plugs: [...w.plugs, { id: `plug-${Date.now()}`, name: `Plug ${w.plugs.length + 1}`, entityIds: [], topZ: 0, safeZ: 0.5 * MM, stockW: 0, stockH: 0 }],
+      plugs: [...w.plugs, { id: `plug-${Date.now()}`, name: `Plug ${w.plugs.length + 1}`, entityIds: [], topZ: 0, safeZ: 0.5 * MM, stockW: 0, stockH: 0, boundaryEnabled: false, boundaryOffset: 5 }],
     }));
   }
   function removePlug(id) { setWiz(w => ({ ...w, plugs: w.plugs.filter(p => p.id !== id) })); }
@@ -320,6 +320,8 @@ export default function InlayWizard({ onClose, onGenerate, onSelectEntities, sel
         pocketDepth: wiz.pocketDepth - (wiz.glueGap ?? 0), topZ: plug.topZ, safeZ: plug.safeZ,
         stockW: plug.stockW, stockH: plug.stockH,
         passes: buildPlugPasses(), mirror: wiz.mirror, fitTolerance, cutSide: 'outside',
+        boundaryEnabled: plug.boundaryEnabled ?? false,
+        boundaryOffset: plug.boundaryOffset ?? 5,
       },
     }));
     onGenerate(pocketOp, plugOps);
@@ -412,6 +414,20 @@ export default function InlayWizard({ onClose, onGenerate, onSelectEntities, sel
                   <Num value={d(plug.stockH)} onChange={v => updatePlug(plug.id, 'stockH', m(v))} min={0} step={dStep} />
                 </F>
               </div>
+              <div style={{ ...S.row, marginTop: 8 }}>
+                <input type="checkbox" style={{ marginRight: 6, cursor: 'pointer' }}
+                  checked={!!plug.boundaryEnabled}
+                  onChange={e => updatePlug(plug.id, 'boundaryEnabled', e.target.checked)} />
+                <span style={{ ...S.lbl, width: 'auto', marginRight: 8 }}>Boundary Offset</span>
+                <Num value={d(plug.boundaryOffset ?? 5)} disabled={!plug.boundaryEnabled}
+                  onChange={v => updatePlug(plug.id, 'boundaryOffset', m(v))} min={0} step={dStep} />
+                <span style={S.unit}>{dUnit}</span>
+              </div>
+              {plug.boundaryEnabled && (
+                <div style={{ ...S.info, fontSize: 10, marginTop: 4, marginBottom: 0 }}>
+                  Outer boundary cut: unions all contours, expands by {fmt(plug.boundaryOffset ?? 5)} {dUnit} with rounded corners, then profiles the perimeter to free the plug piece.
+                </div>
+              )}
             </div>
           );
         })}
@@ -744,6 +760,9 @@ export default function InlayWizard({ onClose, onGenerate, onSelectEntities, sel
                 )}
                 <div style={S.kv}><span style={S.kvK}>Mirror</span><span style={{ ...S.kvV, color: wiz.mirror === 'none' ? '#cc6666' : '#44cc88' }}>{mirrorLabels[wiz.mirror]}</span></div>
                 <div style={S.kv}><span style={S.kvK}>Engagement</span><span style={{ ...S.kvV, color:fitColor }}>{fmt(plugProud, isInch ? 3 : 2)} {dUnit} ({fitLabel})</span></div>
+                {plug.boundaryEnabled && (
+                  <div style={S.kv}><span style={S.kvK}>Boundary Offset</span><span style={{ ...S.kvV, color: '#cc88ff' }}>{fmt(plug.boundaryOffset ?? 5)} {dUnit}</span></div>
+                )}
                 <div style={{ marginTop:8, fontSize:10, color:'#444466', lineHeight:1.6 }}>
                   Passes: {plugPassList.join(' · ')}
                 </div>

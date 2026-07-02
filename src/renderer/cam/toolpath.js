@@ -1,6 +1,6 @@
 // CAM Toolpath Engine - all 2.5D operations
 
-import { offsetPolyline, generatePocketOffsets, generateRestMachiningPasses, generateRasterPasses, polygonArea, isClockwise, clipPolygonToRegion, stripClose, pointInPolygon, differencePolygons } from './offset.js';
+import { offsetPolyline, roundedOffsetPolyline, generatePocketOffsets, generateRestMachiningPasses, generateRasterPasses, polygonArea, isClockwise, clipPolygonToRegion, stripClose, pointInPolygon, differencePolygons, unionPolygons } from './offset.js';
 import { circleToPoints, arcToPoints, polylineToPoints } from '../dxf/parser.js';
 // jspoly loaded as a global via public/index.html <script> tag (webpack can't bundle it — it has internal requires).
 // In browser context the IIFE sets window.JSPoly (uppercase); module.exports.jspoly only exists in Node.
@@ -1294,7 +1294,68 @@ function generateTaperedPlug(op, entities, context = {}) {
   // writes p.cutSide when the user explicitly changes the dropdown, so p.cutSide
   // may be undefined on operations created before the field existed.
   const plugParams = p.cutSide != null ? p : { ...p, cutSide: 'outside' };
-  return buildTaperedPasses(selected, plugTopZ, depth, safeZ, plugParams, warnings, stockBound);
+  const result = buildTaperedPasses(selected, plugTopZ, depth, safeZ, plugParams, warnings, stockBound);
+
+  // Optional outer boundary contour — expands all profiles outward and cuts the perimeter.
+  if (p.boundaryEnabled && (p.boundaryOffset ?? 0) > 0) {
+    const allProfiles = buildPocketProfiles(selected);
+    if (allProfiles.length > 0) {
+      const cleanProfiles = allProfiles.map(pr => {
+        const s = stripClose([...pr]);
+        return isClockwise(s) ? [...s].reverse() : s;
+      });
+      // Expand each profile outward by boundaryOffset first (round joins bridge gaps between letters)
+      const expanded = cleanProfiles.flatMap(pr => roundedOffsetPolyline(pr, -p.boundaryOffset, true))
+        .filter(pr => pr?.length >= 3)
+        .map(pr => { const s = stripClose([...pr]); return isClockwise(s) ? [...s].reverse() : s; });
+      if (expanded.length > 0) {
+        // Union all expanded profiles into the outer boundary envelope
+        const unioned = unionPolygons(expanded);
+        const outerBoundary = unioned[0]; // largest region
+        if (outerBoundary?.length >= 3) {
+          const ccwBnd = isClockwise(outerBoundary) ? [...outerBoundary].reverse() : outerBoundary;
+          const passes  = p.passes || {};
+          const bePass  = passes.bulkEndmill   || {};
+          const dePass  = passes.detailEndmill || {};
+          const useEm   = (bePass.enabled !== false && (bePass.diameter || 0) > 0) ? bePass : dePass;
+          const emR     = (useEm.diameter || 6.35) / 2;
+          const emDpp   = useEm.depthPerPass || useEm.diameter || 6.35;
+          const emFeed  = useEm.feed || 1500;
+          const emPlunge = useEm.plunge || 500;
+
+          // Tool center path: move outward by tool radius from the boundary profile
+          const toolPath = offsetPolyline(stripClose([...ccwBnd]), -emR, true)[0];
+          if (toolPath?.length >= 3) {
+            const bndMoves = [];
+            const numPasses = Math.max(1, Math.ceil(depth / emDpp));
+            const start = toolPath[0];
+            bndMoves.push({ type: 'rapid', x: start.x, y: start.y, z: safeZ });
+            for (let i = 0; i < numPasses; i++) {
+              const z = plugTopZ - Math.min((i + 1) * emDpp, depth);
+              bndMoves.push({ type: 'feed', x: start.x, y: start.y, z, f: emPlunge });
+              for (let j = 1; j < toolPath.length; j++) {
+                bndMoves.push({ type: 'feed', x: toolPath[j].x, y: toolPath[j].y, z, f: emFeed });
+              }
+              bndMoves.push({ type: 'feed', x: start.x, y: start.y, z, f: emFeed });
+            }
+            bndMoves.push({ type: 'rapid', z: safeZ });
+
+            result.subToolpaths.push({
+              name: 'Boundary Cut',
+              color: '#cc44ff',
+              toolKey:  useEm.toolId ?? 'bulkEndmill',
+              toolDesc: `Endmill ⌀${useEm.diameter || 6.35}mm`,
+              rpm: useEm.rpm || 18000,
+              moves: bndMoves,
+            });
+            result.moves.push(...bndMoves);
+          }
+        }
+      }
+    }
+  }
+
+  return result;
 }
 
 // Shared 4-pass builder used by both Pocket and Plug.
