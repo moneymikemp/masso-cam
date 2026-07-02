@@ -1,8 +1,8 @@
-import React from 'react';
+import React, { useState } from 'react';
 import { v4 as uuid } from 'uuid';
 import { useApp } from '../../store/AppContext';
 import { circleToPoints, arcToPoints, polylineToPoints } from '../../dxf/parser';
-import { unionPolygons, differencePolygons, intersectPolygons, stripClose } from '../../cam/offset';
+import { unionPolygons, differencePolygons, intersectPolygons, stripClose, offsetPolyline, roundedOffsetPolyline, isClockwise } from '../../cam/offset';
 
 const TOOL_GROUPS = [
   {
@@ -95,14 +95,41 @@ function entityToPts(e) {
   }
 }
 
+const MM = 25.4;
+
+const numInp = {
+  width: 56, background: '#0d0d20', border: '1px solid #2a2a50',
+  color: '#ccccee', borderRadius: 3, padding: '2px 5px',
+  fontSize: 11, fontFamily: 'monospace',
+};
+
 export default function CADToolsPanel() {
   const { state, dispatch } = useApp();
   const { activeTool, gridSnap, entities, selectedEntityIds } = state;
+  const isInch = state.postConfig?.units === 'inch';
+  const unit = isInch ? 'in' : 'mm';
+
+  // Offset state — distance stored in mm, displayed in current unit
+  const [offsetDistMM, setOffsetDistMM] = useState(5);
+  const [offsetInward, setOffsetInward]  = useState(false);
+
+  const offsetDisp = isInch ? +(offsetDistMM / MM).toFixed(4) : +offsetDistMM.toFixed(3);
 
   const setTool = (key) => dispatch({ type: 'SET_ACTIVE_TOOL', payload: key });
 
   const selEnts = entities.filter(e => selectedEntityIds.includes(e.id));
   const canBoolean = selEnts.length >= 2;
+  const canOffset  = selEnts.length >= 1;
+
+  // ── helpers ────────────────────────────────────────────────────────────────
+
+  function toCCW(pts) {
+    const s = stripClose([...pts]);
+    return isClockwise(s) ? [...s].reverse() : s;
+  }
+
+  // sign: negative = expand outward, positive = shrink inward (matches offsetPolyline convention)
+  function offsetSign() { return offsetInward ? offsetDistMM : -offsetDistMM; }
 
   function doBoolean(op) {
     const polys = selEnts.map(entityToPts).filter(p => p && p.length >= 3).map(p => stripClose([...p]));
@@ -119,6 +146,49 @@ export default function CADToolsPanel() {
       closed: true,
     })) });
   }
+
+  // Offset each selected entity individually — adds new polylines, keeps originals
+  function doOffsetEach() {
+    const sign = offsetSign();
+    const newEnts = selEnts.flatMap(e => {
+      const pts = entityToPts(e);
+      if (!pts || pts.length < 3) return [];
+      const results = roundedOffsetPolyline(toCCW(pts), sign, true);
+      return results.filter(r => r?.length >= 3).map(r => ({
+        id: uuid(), type: 'polyline', layer: e.layer || '0',
+        vertices: r.map(p => ({ x: p.x, y: p.y })), closed: true,
+      }));
+    });
+    if (newEnts.length > 0) dispatch({ type: 'ADD_ENTITIES', payload: newEnts });
+  }
+
+  // Offset each entity, then union all results into a single perimeter — adds new polyline(s)
+  function doOffsetUnion() {
+    const sign = offsetSign();
+    const expanded = selEnts.flatMap(e => {
+      const pts = entityToPts(e);
+      if (!pts || pts.length < 3) return [];
+      return roundedOffsetPolyline(toCCW(pts), sign, true)
+        .filter(r => r?.length >= 3)
+        .map(r => toCCW(r));
+    });
+    if (!expanded.length) return;
+    const unioned = unionPolygons(expanded.map(r => stripClose([...r])));
+    if (!unioned?.length) return;
+    dispatch({ type: 'ADD_ENTITIES', payload: unioned.map(pts => ({
+      id: uuid(), type: 'polyline', layer: '0',
+      vertices: pts.map(p => ({ x: p.x, y: p.y })), closed: true,
+    })) });
+  }
+
+  // ── render ─────────────────────────────────────────────────────────────────
+
+  const dirBtnStyle = {
+    ...btn(false),
+    fontSize: 11, width: 'auto', padding: '0 7px',
+    background: '#111128', color: offsetInward ? '#88aaff' : '#88ffcc',
+    border: `1px solid ${offsetInward ? '#3344aa' : '#226644'}`,
+  };
 
   return (
     <div style={{ borderTop: '1px solid #2a2a50', background: '#13132a', flexShrink: 0, padding: '6px 8px 8px', display: 'flex', flexDirection: 'column', gap: 6 }}>
@@ -145,6 +215,46 @@ export default function CADToolsPanel() {
           <button title="Weld — union of selected shapes (need ≥2 selected)" style={actionBtn(!canBoolean)} disabled={!canBoolean} onClick={() => doBoolean('union')}>∪</button>
           <button title="Subtract — first selected minus the rest (need ≥2 selected)" style={actionBtn(!canBoolean)} disabled={!canBoolean} onClick={() => doBoolean('subtract')}>∖</button>
           <button title="Intersect — common area of selected shapes (need ≥2 selected)" style={actionBtn(!canBoolean)} disabled={!canBoolean} onClick={() => doBoolean('intersect')}>∩</button>
+        </div>
+      </div>
+
+      <div>
+        <div style={{ fontSize: 9, color: '#333355', marginBottom: 4 }}>Offset</div>
+        {/* Distance + direction row */}
+        <div style={{ display: 'flex', alignItems: 'center', gap: 4, marginBottom: 4 }}>
+          <input
+            type="number" min={0} step={isInch ? 0.001 : 0.1}
+            value={offsetDisp}
+            onChange={e => {
+              const v = parseFloat(e.target.value);
+              if (!isNaN(v) && v >= 0) setOffsetDistMM(isInch ? v * MM : v);
+            }}
+            style={numInp}
+          />
+          <span style={{ fontSize: 10, color: '#555577' }}>{unit}</span>
+          <button
+            title={offsetInward ? 'Offset direction: Inward — click to switch to Outward' : 'Offset direction: Outward — click to switch to Inward'}
+            style={dirBtnStyle}
+            onClick={() => setOffsetInward(v => !v)}>
+            {offsetInward ? '◀ In' : 'Out ▶'}
+          </button>
+        </div>
+        {/* Action buttons row */}
+        <div style={{ display: 'flex', gap: 3 }}>
+          <button
+            title="Offset Each — offset every selected entity individually, keep originals (need ≥1 selected)"
+            style={{ ...actionBtn(!canOffset), fontSize: 11, width: 'auto', padding: '0 7px' }}
+            disabled={!canOffset}
+            onClick={doOffsetEach}>
+            Each
+          </button>
+          <button
+            title="Offset & Union — offset all selected entities, then merge overlapping results into one perimeter (need ≥1 selected)"
+            style={{ ...actionBtn(!canOffset), fontSize: 11, width: 'auto', padding: '0 7px', flexShrink: 0 }}
+            disabled={!canOffset}
+            onClick={doOffsetUnion}>
+            Union
+          </button>
         </div>
       </div>
 
