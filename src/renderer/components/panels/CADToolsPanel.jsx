@@ -17,6 +17,7 @@ const TOOL_GROUPS = [
       { key: 'polyline', label: '⌒╱', title: 'Polyline — A=arc · L=line · C=close · Enter=finish  [P]' },
       { key: 'polygon',  label: '⬡',  title: 'Polygon — click center, set sides, click radius' },
       { key: 'mirror',   label: '⇔',  title: 'Mirror — select entities, click two axis points  [M]' },
+      { key: 'text',     label: 'T',   title: 'Add Text — place arc-fitted text as CAD geometry' },
     ],
   },
   {

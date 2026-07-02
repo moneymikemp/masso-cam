@@ -16,6 +16,7 @@ import { generateGcode, generateGcodeByTool } from './gcode/postprocessor';
 import { offsetEntity } from './cam/offsetEngine';
 import { traceImage, fitArcsToChain } from './cam/traceEngine';
 import InlayWizard from './components/panels/InlayWizard';
+import CadTextPanel from './components/panels/CadTextPanel';
 import ToolLibraryModal from './components/panels/ToolLibraryModal';
 import MachineProfilesModal from './components/panels/MachineProfilesModal';
 import CADToolsPanel from './components/panels/CADToolsPanel';
@@ -606,6 +607,7 @@ export default function App() {
           </div>
         </div>
       )}
+      {activeTool === 'text' && <CadTextPanel />}
       {modal === 'inlay-wizard' && (
         <InlayWizard
           onClose={() => setModal(null)}

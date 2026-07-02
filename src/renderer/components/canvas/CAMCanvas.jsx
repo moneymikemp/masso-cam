@@ -3123,7 +3123,7 @@ export default function CAMCanvas({ tracePreview = null }) {
       )}
 
       {/* ── Drawing tool status banner ───────────────────────────────────────── */}
-      {activeTool !== 'select' && !tabPlacementActive && !dogboneSelectionActive && !textPlacementActive && (() => {
+      {activeTool !== 'select' && activeTool !== 'text' && !tabPlacementActive && !dogboneSelectionActive && !textPlacementActive && (() => {
         const ds = drawStateRef.current;
         const msgs = {
           line:     ds?.pts?.length === 1 ? 'Click to set endpoint (Shift = 45°)' : 'Click to set start point',
