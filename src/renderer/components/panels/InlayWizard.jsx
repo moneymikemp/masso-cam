@@ -197,7 +197,7 @@ export default function InlayWizard({ onClose, onGenerate, onSelectEntities, sel
   const picking = pickingFor !== null;
 
   useEffect(() => {
-    window.electron.storeGet('inlayPresets').then(data => {
+    window.electron?.storeGet('inlayPresets').then(data => {
       if (Array.isArray(data)) setPresets(data);
     });
   }, []);
@@ -259,7 +259,7 @@ export default function InlayWizard({ onClose, onGenerate, onSelectEntities, sel
       setSelectedPresetId(data.id);
     }
     setPresets(updated);
-    await window.electron.storeSet('inlayPresets', updated);
+    await window.electron?.storeSet('inlayPresets', updated);
   }
 
   async function handleDeletePreset() {
@@ -268,7 +268,7 @@ export default function InlayWizard({ onClose, onGenerate, onSelectEntities, sel
     setPresets(updated);
     setSelectedPresetId('');
     setPresetName('');
-    await window.electron.storeSet('inlayPresets', updated);
+    await window.electron?.storeSet('inlayPresets', updated);
   }
 
   // Fit calculations — fitTolerance is derived, never stored directly
@@ -315,7 +315,7 @@ export default function InlayWizard({ onClose, onGenerate, onSelectEntities, sel
     const plugOps = wiz.plugs.map(plug => ({
       type: 'taperedplug',
       name: `${wiz.jobName} — ${plug.name}`,
-      selectedIds: plug.entityIds,
+      selectedIds: plug.entityIds.length > 0 ? plug.entityIds : wiz.entityIds,
       params: {
         pocketDepth: wiz.pocketDepth - (wiz.glueGap ?? 0), topZ: plug.topZ, safeZ: plug.safeZ,
         stockW: plug.stockW, stockH: plug.stockH,
@@ -392,12 +392,12 @@ export default function InlayWizard({ onClose, onGenerate, onSelectEntities, sel
                 )}
               </div>
               {nPl === 0 ? (
-                <div style={{ ...S.warn, fontSize:10, marginBottom:8 }}>No geometry selected for this plug.</div>
+                <div style={{ ...S.info, fontSize:10, marginBottom:8 }}>No geometry selected — will use pocket entities ({wiz.entityIds.length})</div>
               ) : (
                 <div style={{ ...S.info, fontSize:10, marginBottom:8 }}>{nPl} {nPl === 1 ? 'entity' : 'entities'} selected</div>
               )}
               <button style={{ ...S.btn, ...S.btnSec, marginBottom:10, fontSize:11 }}
-                onClick={() => { if (onSelectEntities) onSelectEntities(plug.entityIds); setPickingFor(plug.id); }}>
+                onClick={() => { if (onSelectEntities) onSelectEntities(nPl > 0 ? plug.entityIds : wiz.entityIds); setPickingFor(plug.id); }}>
                 {nPl === 0 ? 'Select Geometry' : 'Change Selection'}
               </button>
               <div style={S.grid2}>
@@ -752,7 +752,7 @@ export default function InlayWizard({ onClose, onGenerate, onSelectEntities, sel
             {wiz.plugs.map(plug => (
               <div key={plug.id} style={S.card}>
                 <div style={S.cardT}>{plug.name} — {wiz.jobName}</div>
-                <div style={S.kv}><span style={S.kvK}>Entities</span><span style={{ ...S.kvV, color: plug.entityIds.length === 0 ? '#cc6666' : S.kvV.color }}>{plug.entityIds.length === 0 ? 'none' : plug.entityIds.length}</span></div>
+                <div style={S.kv}><span style={S.kvK}>Entities</span><span style={{ ...S.kvV, color: plug.entityIds.length === 0 ? '#aaaacc' : S.kvV.color }}>{plug.entityIds.length === 0 ? `pocket (${wiz.entityIds.length})` : plug.entityIds.length}</span></div>
                 <div style={S.kv}><span style={S.kvK}>Top of Stock</span><span style={S.kvV}>{fmt(plug.topZ)} {dUnit}</span></div>
                 <div style={S.kv}><span style={S.kvK}>Safe Z</span><span style={S.kvV}>{fmt(plug.safeZ)} {dUnit}</span></div>
                 {(plug.stockW > 0 || plug.stockH > 0) && (
@@ -805,9 +805,9 @@ export default function InlayWizard({ onClose, onGenerate, onSelectEntities, sel
         {wiz.entityIds.length === 0 && (
           <div style={{ ...S.warn, marginTop:12 }}>No pocket geometry selected.</div>
         )}
-        {wiz.plugs.some(p => p.entityIds.length === 0) && (
+        {wiz.plugs.some(p => p.entityIds.length === 0) && wiz.entityIds.length === 0 && (
           <div style={{ ...S.warn, marginTop:6 }}>
-            Plugs with no geometry: {wiz.plugs.filter(p => p.entityIds.length === 0).map(p => p.name).join(', ')}
+            Some plugs have no geometry and no pocket geometry to fall back to.
           </div>
         )}
       </>

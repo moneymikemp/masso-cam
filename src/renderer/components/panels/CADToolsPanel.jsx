@@ -2,7 +2,7 @@ import React, { useState } from 'react';
 import { v4 as uuid } from 'uuid';
 import { useApp } from '../../store/AppContext';
 import { circleToPoints, arcToPoints, polylineToPoints } from '../../dxf/parser';
-import { unionPolygons, differencePolygons, intersectPolygons, stripClose, offsetPolyline, roundedOffsetPolyline, isClockwise } from '../../cam/offset';
+import { unionPolygons, differencePolygons, intersectPolygons, stripClose, offsetPolyline, roundedOffsetPolyline, isClockwise, pointInPolygon, polygonArea } from '../../cam/offset';
 
 const TOOL_GROUPS = [
   {
@@ -147,27 +147,53 @@ export default function CADToolsPanel() {
     })) });
   }
 
-  // Offset each selected entity individually — adds new polylines, keeps originals
+  // Offset each selected entity individually — adds new polylines, keeps originals.
+  // Inner contours (holes) are skipped using the same containment check as Union.
   function doOffsetEach() {
     const sign = offsetSign();
-    const newEnts = selEnts.flatMap(e => {
-      const pts = entityToPts(e);
-      if (!pts || pts.length < 3) return [];
-      const results = roundedOffsetPolyline(toCCW(pts), sign, true);
-      return results.filter(r => r?.length >= 3).map(r => ({
-        id: uuid(), type: 'polyline', layer: e.layer || '0',
-        vertices: r.map(p => ({ x: p.x, y: p.y })), closed: true,
-      }));
+    const allPtsSets = selEnts
+      .map(e => ({ e, pts: entityToPts(e) }))
+      .filter(({ pts }) => pts && pts.length >= 3)
+      .map(({ e, pts }) => ({ e, pts: stripClose([...pts]) }));
+
+    const newEnts = allPtsSets.flatMap(({ e, pts }) => {
+      const cx = pts.reduce((s, p) => s + p.x, 0) / pts.length;
+      const cy = pts.reduce((s, p) => s + p.y, 0) / pts.length;
+      const isHole = allPtsSets.some(({ pts: other }) => other !== pts && pointInPolygon({ x: cx, y: cy }, other));
+      if (isHole) return [];
+      return roundedOffsetPolyline(toCCW(pts), sign, true)
+        .filter(r => r?.length >= 3)
+        .map(r => ({
+          id: uuid(), type: 'polyline', layer: e.layer || '0',
+          vertices: r.map(p => ({ x: p.x, y: p.y })), closed: true,
+        }));
     });
     if (newEnts.length > 0) dispatch({ type: 'ADD_ENTITIES', payload: newEnts });
   }
 
-  // Offset each entity, then union all results into a single perimeter — adds new polyline(s)
+  // Offset each entity, then union all results into a single perimeter — adds new polyline(s).
+  // Inner contours (holes, like the counter inside a D) are detected by containment and skipped
+  // so they don't produce artifacts in the outer boundary.
   function doOffsetUnion() {
     const sign = offsetSign();
-    const expanded = selEnts.flatMap(e => {
-      const pts = entityToPts(e);
-      if (!pts || pts.length < 3) return [];
+
+    // Build all point sets first so we can test containment between them.
+    const allPtsSets = selEnts
+      .map(e => entityToPts(e))
+      .filter(p => p && p.length >= 3)
+      .map(p => stripClose([...p]));
+
+    // An inner contour's centroid is inside one of the other selected contours.
+    // Keep only the outer (non-contained) contours for the perimeter expansion.
+    const outerPtsSets = allPtsSets.filter(pts => {
+      const cx = pts.reduce((s, p) => s + p.x, 0) / pts.length;
+      const cy = pts.reduce((s, p) => s + p.y, 0) / pts.length;
+      return !allPtsSets.some(other => other !== pts && pointInPolygon({ x: cx, y: cy }, other));
+    });
+
+    if (!outerPtsSets.length) return;
+
+    const expanded = outerPtsSets.flatMap(pts => {
       return roundedOffsetPolyline(toCCW(pts), sign, true)
         .filter(r => r?.length >= 3)
         .map(r => toCCW(r));

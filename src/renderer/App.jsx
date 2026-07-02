@@ -10,10 +10,12 @@ import GcodePanel from './components/panels/GcodePanel';
 import StockPanel from './components/panels/StockPanel';
 import CADPropertiesPanel from './components/panels/CADPropertiesPanel';
 import ArrayModal from './components/modals/ArrayModal';
-import { parseDxf, getBounds } from './dxf/parser';
+import { parseDxf, getBounds, circleToPoints, arcToPoints, polylineToPoints } from './dxf/parser';
 import { exportDxf as generateDxf } from './dxf/exporter';
 import { generateGcode, generateGcodeByTool } from './gcode/postprocessor';
 import { offsetEntity } from './cam/offsetEngine';
+import { roundedOffsetPolyline, isClockwise, stripClose, pointInPolygon, unionPolygons } from './cam/offset';
+import { mirrorEntitiesX, mirrorEntitiesY } from './cam/toolpath';
 import { traceImage, fitArcsToChain } from './cam/traceEngine';
 import InlayWizard from './components/panels/InlayWizard';
 import CadTextPanel from './components/panels/CadTextPanel';
@@ -550,12 +552,64 @@ export default function App() {
     const pocketWsId = uuid();
     dispatch({ type: 'ADD_WORKSPACE', payload: { id: pocketWsId, name: pocketOp.name, color: '#1a5a2a' } });
     dispatch({ type: 'ADD_OPERATION', payload: { ...pocketOp, workspaceId: pocketWsId } });
+    let lastPlugWsId = pocketWsId;
     for (const plugOp of plugOps) {
       const plugWsId = uuid();
+      lastPlugWsId = plugWsId;
       dispatch({ type: 'ADD_WORKSPACE', payload: { id: plugWsId, name: plugOp.name, color: '#1a2a5a' } });
       dispatch({ type: 'ADD_OPERATION', payload: { ...plugOp, workspaceId: plugWsId } });
+
+      // Create boundary contour as a real CAD entity so it's visible immediately.
+      // Apply the same mirroring the toolpath uses so the entity matches the plug's
+      // actual cut position, not the (possibly unmirrored) pocket entity positions.
+      const p = plugOp.params;
+      if (p.boundaryEnabled && (p.boundaryOffset ?? 0) > 0) {
+        let plugEnts = entities.filter(e => plugOp.selectedIds.includes(e.id));
+        if (p.mirror === 'x') plugEnts = mirrorEntitiesX(plugEnts);
+        else if (p.mirror === 'y') plugEnts = mirrorEntitiesY(plugEnts);
+
+        const allPts = plugEnts.map(e => {
+          switch (e.type) {
+            case 'circle':   return circleToPoints(e.center, e.radius, 64);
+            case 'arc':      return arcToPoints(e.center, e.radius, e.startAngle, e.endAngle, 48);
+            case 'polyline': return polylineToPoints(e.vertices, e.closed);
+            case 'ellipse': {
+              const { center, rx, ry, rotation = 0 } = e;
+              const cos = Math.cos(rotation), sin = Math.sin(rotation);
+              return Array.from({ length: 64 }, (_, i) => {
+                const t = (i / 64) * 2 * Math.PI;
+                const lx = rx * Math.cos(t), ly = ry * Math.sin(t);
+                return { x: center.x + lx * cos - ly * sin, y: center.y + lx * sin + ly * cos };
+              });
+            }
+            default: return null;
+          }
+        }).filter(pts => pts && pts.length >= 3).map(pts => stripClose([...pts]));
+
+        if (allPts.length > 0) {
+          const toCCW = pts => isClockwise(pts) ? [...pts].reverse() : pts;
+          const outerPts = allPts.filter(pts => {
+            const cx = pts.reduce((s, pt) => s + pt.x, 0) / pts.length;
+            const cy = pts.reduce((s, pt) => s + pt.y, 0) / pts.length;
+            return !allPts.some(other => other !== pts && pointInPolygon({ x: cx, y: cy }, other));
+          });
+          const expanded = outerPts
+            .flatMap(pts => roundedOffsetPolyline(toCCW(pts), -p.boundaryOffset, true))
+            .filter(r => r?.length >= 3)
+            .map(r => toCCW(stripClose([...r])));
+          if (expanded.length > 0) {
+            const unioned = unionPolygons(expanded);
+            const boundaryEnts = unioned.map(pts => ({
+              id: uuid(), type: 'polyline', layer: plugOp.name,
+              vertices: pts.map(pt => ({ x: pt.x, y: pt.y })), closed: true,
+            }));
+            if (boundaryEnts.length > 0) dispatch({ type: 'ADD_ENTITIES', payload: boundaryEnts });
+          }
+        }
+      }
     }
-    dispatch({ type: 'SET_ACTIVE_WORKSPACE', payload: pocketWsId });
+    // Switch to the plug workspace so the boundary entity is viewed in plug context.
+    dispatch({ type: 'SET_ACTIVE_WORKSPACE', payload: lastPlugWsId });
     dispatch({ type: 'SET_PANEL_TAB', payload: 'operations' });
     dispatch({ type: 'SET_STATUS', payload: `Inlay: Pocket + ${plugOps.length} plug workspace${plugOps.length > 1 ? 's' : ''} created` });
   }

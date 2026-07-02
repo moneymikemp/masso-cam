@@ -760,6 +760,18 @@ function ellipseToPoints(entity, count = 64) {
   });
 }
 
+// DXF bulge from three on-arc points: p0=start, pm=mid, p1=end.
+// bulge = tan(θ/4), positive=CCW, negative=CW.
+function bulgFrom3Pts(p0, pm, p1) {
+  const chordDx = p1.x - p0.x, chordDy = p1.y - p0.y;
+  const chordLen = Math.hypot(chordDx, chordDy);
+  if (chordLen < 1e-10) return 0;
+  const mx = (p0.x + p1.x) / 2, my = (p0.y + p1.y) / 2;
+  // Signed sagitta: dot(pm-midpoint, left-normal-of-chord) / chordLen
+  const sag = ((pm.x - mx) * (-chordDy) + (pm.y - my) * chordDx) / chordLen;
+  return -2 * sag / chordLen;
+}
+
 // or null if points are collinear.
 function arcFrom3Pts(p1, p2, p3) {
   const ax = p2.x-p1.x, ay = p2.y-p1.y;
@@ -2691,25 +2703,22 @@ export default function CAMCanvas({ tracePreview = null }) {
     setDrawPhase(p => p + 1);
   }
 
-  // Commit all pending polyline segments as individual line/arc entities
+  // Commit all pending polyline segments as a single polyline entity with bulge values for arcs
   function commitPolyline(close = false) {
     const ds = drawStateRef.current;
     if (!ds || ds.tool !== 'polyline') return;
     const pts = ds.pts, segs = ds.segs || [];
     if (pts.length >= 2 && segs.length >= 1) {
-      const finalPts = close ? [...pts, pts[0]] : pts;
-      const finalSegs = close ? [...segs, { type: 'line' }] : segs;
-      const newEntities = [];
-      for (let i = 0; i < finalSegs.length && i < finalPts.length - 1; i++) {
-        const seg = finalSegs[i];
-        if (seg.type === 'line') {
-          newEntities.push({ id: uuid(), type: 'line', layer: '0', start: { ...finalPts[i] }, end: { ...finalPts[i + 1] } });
-        } else if (seg.type === 'arc') {
-          const arc = arcFrom3Pts(finalPts[i], finalPts[i + 1], seg.mid);
-          if (arc) newEntities.push({ id: uuid(), type: 'arc', layer: '0', ...arc });
-        }
+      const vertices = [];
+      for (let i = 0; i < segs.length && i < pts.length - 1; i++) {
+        const seg = segs[i];
+        const bulge = (seg.type === 'arc' && seg.mid) ? bulgFrom3Pts(pts[i], seg.mid, pts[i + 1]) : 0;
+        vertices.push({ x: pts[i].x, y: pts[i].y, ...(bulge ? { bulge } : {}) });
       }
-      if (newEntities.length > 0) dispatch({ type: 'ADD_ENTITIES', payload: newEntities });
+      vertices.push({ x: pts[pts.length - 1].x, y: pts[pts.length - 1].y });
+      if (vertices.length >= 2) {
+        dispatch({ type: 'ADD_ENTITIES', payload: [{ id: uuid(), type: 'polyline', layer: '0', vertices, closed: close }] });
+      }
     }
     drawStateRef.current = { tool: 'polyline', pts: [], segs: [], nextSegType: 'line', arcMid: null, arcSubMode: 'tangent', endTangent: null, dragging: false };
     previewRef.current = null;

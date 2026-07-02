@@ -1296,59 +1296,68 @@ function generateTaperedPlug(op, entities, context = {}) {
   const plugParams = p.cutSide != null ? p : { ...p, cutSide: 'outside' };
   const result = buildTaperedPasses(selected, plugTopZ, depth, safeZ, plugParams, warnings, stockBound);
 
-  // Optional outer boundary contour — expands all profiles outward and cuts the perimeter.
+  // Optional outer boundary contour — same logic as CAD "Offset & Union":
+  // expand only outer contours (skip inner islands detected by centroid containment),
+  // offset each outward with round joins, union into one perimeter, then profile-cut it.
   if (p.boundaryEnabled && (p.boundaryOffset ?? 0) > 0) {
-    const allProfiles = buildPocketProfiles(selected);
+    const allProfiles = buildPocketProfiles(selected).map(pr => stripClose([...pr]));
     if (allProfiles.length > 0) {
-      const cleanProfiles = allProfiles.map(pr => {
-        const s = stripClose([...pr]);
-        return isClockwise(s) ? [...s].reverse() : s;
+      // Skip inner contours: if a profile's centroid is inside any other profile, it's a hole.
+      const outerProfiles = allProfiles.filter(pts => {
+        const cx = pts.reduce((s, pt) => s + pt.x, 0) / pts.length;
+        const cy = pts.reduce((s, pt) => s + pt.y, 0) / pts.length;
+        return !allProfiles.some(other => other !== pts && pointInPolygon({ x: cx, y: cy }, other));
       });
-      // Expand each profile outward by boundaryOffset first (round joins bridge gaps between letters)
-      const expanded = cleanProfiles.flatMap(pr => roundedOffsetPolyline(pr, -p.boundaryOffset, true))
-        .filter(pr => pr?.length >= 3)
-        .map(pr => { const s = stripClose([...pr]); return isClockwise(s) ? [...s].reverse() : s; });
-      if (expanded.length > 0) {
-        // Union all expanded profiles into the outer boundary envelope
-        const unioned = unionPolygons(expanded);
-        const outerBoundary = unioned[0]; // largest region
-        if (outerBoundary?.length >= 3) {
-          const ccwBnd = isClockwise(outerBoundary) ? [...outerBoundary].reverse() : outerBoundary;
-          const passes  = p.passes || {};
-          const bePass  = passes.bulkEndmill   || {};
-          const dePass  = passes.detailEndmill || {};
-          const useEm   = (bePass.enabled !== false && (bePass.diameter || 0) > 0) ? bePass : dePass;
-          const emR     = (useEm.diameter || 6.35) / 2;
-          const emDpp   = useEm.depthPerPass || useEm.diameter || 6.35;
-          const emFeed  = useEm.feed || 1500;
-          const emPlunge = useEm.plunge || 500;
 
-          // Tool center path: move outward by tool radius from the boundary profile
-          const toolPath = offsetPolyline(stripClose([...ccwBnd]), -emR, true)[0];
-          if (toolPath?.length >= 3) {
-            const bndMoves = [];
-            const numPasses = Math.max(1, Math.ceil(depth / emDpp));
-            const start = toolPath[0];
-            bndMoves.push({ type: 'rapid', x: start.x, y: start.y, z: safeZ });
-            for (let i = 0; i < numPasses; i++) {
-              const z = plugTopZ - Math.min((i + 1) * emDpp, depth);
-              bndMoves.push({ type: 'feed', x: start.x, y: start.y, z, f: emPlunge });
-              for (let j = 1; j < toolPath.length; j++) {
-                bndMoves.push({ type: 'feed', x: toolPath[j].x, y: toolPath[j].y, z, f: emFeed });
+      if (outerProfiles.length > 0) {
+        // Ensure CCW, then expand outward with round joins so gaps between shapes fill in
+        const toCCW = pts => isClockwise(pts) ? [...pts].reverse() : pts;
+        const expanded = outerProfiles
+          .flatMap(pts => roundedOffsetPolyline(toCCW(pts), -p.boundaryOffset, true))
+          .filter(pr => pr?.length >= 3)
+          .map(pr => { const s = stripClose([...pr]); return toCCW(s); });
+
+        if (expanded.length > 0) {
+          const unioned = unionPolygons(expanded);
+          const outerBoundary = unioned[0];
+          if (outerBoundary?.length >= 3) {
+            const ccwBnd = isClockwise(outerBoundary) ? [...outerBoundary].reverse() : outerBoundary;
+            const passes   = p.passes || {};
+            const bePass   = passes.bulkEndmill   || {};
+            const dePass   = passes.detailEndmill || {};
+            const useEm    = (bePass.enabled !== false && (bePass.diameter || 0) > 0) ? bePass : dePass;
+            const emR      = (useEm.diameter || 6.35) / 2;
+            const emDpp    = useEm.depthPerPass || useEm.diameter || 6.35;
+            const emFeed   = useEm.feed || 1500;
+            const emPlunge = useEm.plunge || 500;
+
+            // Tool centre path: boundary expanded outward by tool radius
+            const toolPath = offsetPolyline(stripClose([...ccwBnd]), -emR, true)[0];
+            if (toolPath?.length >= 3) {
+              const bndMoves = [];
+              const numPasses = Math.max(1, Math.ceil(depth / emDpp));
+              const start = toolPath[0];
+              bndMoves.push({ type: 'rapid', x: start.x, y: start.y, z: safeZ });
+              for (let i = 0; i < numPasses; i++) {
+                const z = plugTopZ - Math.min((i + 1) * emDpp, depth);
+                bndMoves.push({ type: 'feed', x: start.x, y: start.y, z, f: emPlunge });
+                for (let j = 1; j < toolPath.length; j++) {
+                  bndMoves.push({ type: 'feed', x: toolPath[j].x, y: toolPath[j].y, z, f: emFeed });
+                }
+                bndMoves.push({ type: 'feed', x: start.x, y: start.y, z, f: emFeed });
               }
-              bndMoves.push({ type: 'feed', x: start.x, y: start.y, z, f: emFeed });
-            }
-            bndMoves.push({ type: 'rapid', z: safeZ });
+              bndMoves.push({ type: 'rapid', z: safeZ });
 
-            result.subToolpaths.push({
-              name: 'Boundary Cut',
-              color: '#cc44ff',
-              toolKey:  useEm.toolId ?? 'bulkEndmill',
-              toolDesc: `Endmill ⌀${useEm.diameter || 6.35}mm`,
-              rpm: useEm.rpm || 18000,
-              moves: bndMoves,
-            });
-            result.moves.push(...bndMoves);
+              result.subToolpaths.push({
+                name: 'Boundary Cut',
+                color: '#cc44ff',
+                toolKey:  useEm.toolId ?? 'bulkEndmill',
+                toolDesc: `Endmill ⌀${useEm.diameter || 6.35}mm`,
+                rpm: useEm.rpm || 18000,
+                moves: bndMoves,
+              });
+              result.moves.push(...bndMoves);
+            }
           }
         }
       }
