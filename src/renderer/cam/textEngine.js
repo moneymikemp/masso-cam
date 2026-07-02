@@ -244,6 +244,19 @@ export function textToGlyphContours(font, text, capHeightMm, tolerance = 0.1) {
   return glyphGroups;
 }
 
+// Convert a single cubic Bezier into arc-fitted polyline vertices.
+// Returns [{x,y,bulge}] starting from p0, suitable for a polyline entity.
+export function cubicBezierToPolyline(p0, p1, p2, p3, tolerance = 0.05) {
+  const verts = [{ x: p0.x, y: p0.y, bulge: 0 }];
+  const segs = [];
+  fitCubicArcs(p0.x, p0.y, p1.x, p1.y, p2.x, p2.y, p3.x, p3.y, tolerance, 0, segs);
+  for (const seg of segs) {
+    verts[verts.length - 1].bulge = seg.bulge;
+    verts.push({ x: seg.x, y: seg.y, bulge: 0 });
+  }
+  return verts;
+}
+
 // Convert text to arc-fitted polylines for use as CAD entities.
 // Returns [{vertices:[{x,y,bulge}], closed}] — one entry per glyph contour.
 // Coordinates are in mm, Y-up (CNC), relative to baseline start at (0,0).

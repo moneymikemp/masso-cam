@@ -66,6 +66,29 @@ export function differencePolygons(subjectPts, clipPtsList) {
     .map(p => isClockwise(p) ? [...p].reverse() : p);
 }
 
+// Union of multiple polygons. Returns array of CCW result polygons.
+export function unionPolygons(ptsList) {
+  const clean = ptsList.map(p => stripClose([...p])).filter(p => p.length >= 3);
+  if (!clean.length) return [];
+  const c = new ClipperLib.Clipper();
+  for (const pts of clean) c.AddPath(toClipper(pts), ClipperLib.PolyType.ptSubject, true);
+  const solution = new ClipperLib.Paths();
+  c.Execute(ClipperLib.ClipType.ctUnion, solution, ClipperLib.PolyFillType.pftNonZero, ClipperLib.PolyFillType.pftNonZero);
+  return solution.map(fromClipper).filter(p => p.length >= 3).map(p => isClockwise(p) ? [...p].reverse() : p);
+}
+
+// Intersection of all polygons. Returns array of CCW result polygons.
+export function intersectPolygons(ptsList) {
+  const clean = ptsList.map(p => stripClose([...p])).filter(p => p.length >= 3);
+  if (clean.length < 2) return clean;
+  const c = new ClipperLib.Clipper();
+  c.AddPath(toClipper(clean[0]), ClipperLib.PolyType.ptSubject, true);
+  for (let i = 1; i < clean.length; i++) c.AddPath(toClipper(clean[i]), ClipperLib.PolyType.ptClip, true);
+  const solution = new ClipperLib.Paths();
+  c.Execute(ClipperLib.ClipType.ctIntersection, solution);
+  return solution.map(fromClipper).filter(p => p.length >= 3).map(p => isClockwise(p) ? [...p].reverse() : p);
+}
+
 // Offset a closed polygon.
 // positive distance = shrink inward; negative = expand outward.
 // Returns result polygons (CCW, no closing point) sorted by area descending.

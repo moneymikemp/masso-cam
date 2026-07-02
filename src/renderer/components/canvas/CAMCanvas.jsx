@@ -3,6 +3,7 @@ import { v4 as uuid } from 'uuid';
 import { useApp } from '../../store/AppContext';
 import { circleToPoints, arcToPoints, polylineToPoints } from '../../dxf/parser';
 import { computeAutoTabPositions, mirrorEntitiesX, mirrorEntitiesY } from '../../cam/toolpath';
+import { cubicBezierToPolyline } from '../../cam/textEngine';
 
 const COLORS = {
   background: '#1a1a2e',
@@ -29,6 +30,7 @@ function entityBounds(e) {
     case 'circle':   return { minX: e.center.x - e.radius, maxX: e.center.x + e.radius, minY: e.center.y - e.radius, maxY: e.center.y + e.radius };
     case 'arc':      return { minX: e.center.x - e.radius, maxX: e.center.x + e.radius, minY: e.center.y - e.radius, maxY: e.center.y + e.radius };
     case 'polyline': { const xs = (e.vertices||[]).map(v=>v.x), ys = (e.vertices||[]).map(v=>v.y); return { minX: Math.min(...xs), maxX: Math.max(...xs), minY: Math.min(...ys), maxY: Math.max(...ys) }; }
+    case 'ellipse': return { minX: e.center.x - Math.max(e.rx, e.ry), maxX: e.center.x + Math.max(e.rx, e.ry), minY: e.center.y - Math.max(e.rx, e.ry), maxY: e.center.y + Math.max(e.rx, e.ry) };
     default: return null;
   }
 }
@@ -63,6 +65,12 @@ function applyXform(entity, xf) {
       startAngle: xf.type==='rotate' ? entity.startAngle + xf.a : entity.startAngle,
       endAngle:   xf.type==='rotate' ? entity.endAngle   + xf.a : entity.endAngle };
     case 'polyline': return { ...entity, vertices: (entity.vertices||[]).map(pt) };
+    case 'ellipse': {
+      const newCenter = pt(entity.center);
+      const s = (xf.type === 'scale') ? xf.s : 1;
+      const newRot = (xf.type === 'rotate') ? (entity.rotation ?? 0) + xf.a : (entity.rotation ?? 0);
+      return { ...entity, center: newCenter, rx: entity.rx * s, ry: entity.ry * s, rotation: newRot };
+    }
     default: return entity;
   }
 }
@@ -742,6 +750,16 @@ function snapEntities(world, entities, layers, radius) {
 }
 
 // Returns { center, radius, startAngle, endAngle } for an arc through 3 points,
+function ellipseToPoints(entity, count = 64) {
+  const { center, rx, ry, rotation = 0 } = entity;
+  const cos = Math.cos(rotation), sin = Math.sin(rotation);
+  return Array.from({ length: count + 1 }, (_, i) => {
+    const t = (i / count) * 2 * Math.PI;
+    const lx = rx * Math.cos(t), ly = ry * Math.sin(t);
+    return { x: center.x + lx * cos - ly * sin, y: center.y + lx * sin + ly * cos };
+  });
+}
+
 // or null if points are collinear.
 function arcFrom3Pts(p1, p2, p3) {
   const ax = p2.x-p1.x, ay = p2.y-p1.y;
@@ -1312,6 +1330,18 @@ export default function CAMCanvas({ tracePreview = null }) {
         if (entity.closed) ctx.closePath();
         break;
       }
+      case 'ellipse': {
+        const pts = ellipseToPoints(entity, 64);
+        if (!pts.length) break;
+        const first = w2c(pts[0].x, pts[0].y);
+        ctx.moveTo(first.x, first.y);
+        for (let i = 1; i < pts.length; i++) {
+          const p = w2c(pts[i].x, pts[i].y);
+          ctx.lineTo(p.x, p.y);
+        }
+        ctx.closePath();
+        break;
+      }
     }
     ctx.stroke();
   }
@@ -1831,6 +1861,69 @@ export default function CAMCanvas({ tracePreview = null }) {
         const rp = w2c(cur.x, cur.y);
         const cp = w2c(pts[0].x, pts[0].y);
         ctx.beginPath(); ctx.moveTo(cp.x, cp.y); ctx.lineTo(rp.x, rp.y); ctx.stroke();
+        break;
+      }
+      case 'ellipse': {
+        if (pts.length < 1) break;
+        const center = pts[0];
+        if (pts.length === 1) {
+          const s0 = w2c(center.x, center.y), sc = w2c(cur.x, cur.y);
+          ctx.beginPath(); ctx.moveTo(s0.x, s0.y); ctx.lineTo(sc.x, sc.y); ctx.stroke();
+        } else {
+          const majorEnd = pts[1];
+          const rx = Math.hypot(majorEnd.x - center.x, majorEnd.y - center.y);
+          const rotation = Math.atan2(majorEnd.y - center.y, majorEnd.x - center.x);
+          const edx = cur.x - center.x, edy = cur.y - center.y;
+          const ec = Math.cos(rotation), es = Math.sin(rotation);
+          const ry = Math.abs(-edx * es + edy * ec);
+          if (rx > 0.01 && ry > 0.01) {
+            const fakePts = ellipseToPoints({ center, rx, ry, rotation }, 64);
+            const f = w2c(fakePts[0].x, fakePts[0].y);
+            ctx.beginPath(); ctx.moveTo(f.x, f.y);
+            for (let i = 1; i < fakePts.length; i++) {
+              const p = w2c(fakePts[i].x, fakePts[i].y); ctx.lineTo(p.x, p.y);
+            }
+            ctx.closePath(); ctx.stroke();
+          }
+          const cs = w2c(center.x, center.y), ms = w2c(majorEnd.x, majorEnd.y);
+          ctx.setLineDash([3, 3]);
+          ctx.beginPath(); ctx.moveTo(cs.x, cs.y); ctx.lineTo(ms.x, ms.y); ctx.stroke();
+        }
+        break;
+      }
+      case 'bezier': {
+        if (pts.length < 1) break;
+        const bp0s = w2c(pts[0].x, pts[0].y);
+        if (pts.length >= 2) {
+          const bp1s = w2c(pts[1].x, pts[1].y);
+          ctx.setLineDash([3, 3]);
+          ctx.beginPath(); ctx.moveTo(bp0s.x, bp0s.y); ctx.lineTo(bp1s.x, bp1s.y); ctx.stroke();
+          ctx.fillStyle = '#ff8844';
+          ctx.beginPath(); ctx.arc(bp1s.x, bp1s.y, 4, 0, Math.PI*2); ctx.fill();
+        }
+        if (pts.length >= 3) {
+          const bp2s = w2c(pts[2].x, pts[2].y);
+          const bcs = w2c(cur.x, cur.y);
+          ctx.setLineDash([3, 3]);
+          ctx.beginPath(); ctx.moveTo(bcs.x, bcs.y); ctx.lineTo(bp2s.x, bp2s.y); ctx.stroke();
+          ctx.fillStyle = '#ff8844';
+          ctx.beginPath(); ctx.arc(bp2s.x, bp2s.y, 4, 0, Math.PI*2); ctx.fill();
+          const bverts = cubicBezierToPolyline(pts[0], pts[1], pts[2], cur);
+          if (bverts.length > 1) {
+            const bf = w2c(bverts[0].x, bverts[0].y);
+            ctx.strokeStyle = '#44ff88';
+            ctx.setLineDash([5, 3]);
+            ctx.beginPath(); ctx.moveTo(bf.x, bf.y);
+            for (let i = 1; i < bverts.length; i++) {
+              const p = w2c(bverts[i].x, bverts[i].y); ctx.lineTo(p.x, p.y);
+            }
+            ctx.stroke();
+          }
+        } else {
+          const bcs = w2c(cur.x, cur.y);
+          ctx.setLineDash([5, 3]);
+          ctx.beginPath(); ctx.moveTo(bp0s.x, bp0s.y); ctx.lineTo(bcs.x, bcs.y); ctx.stroke();
+        }
         break;
       }
       case 'polyline': {
@@ -2446,6 +2539,35 @@ export default function CAMCanvas({ tracePreview = null }) {
         }
         break;
       }
+      case 'ellipse':
+        if (ds.pts.length === 0) {
+          drawStateRef.current = { ...ds, pts: [snapped] };
+        } else if (ds.pts.length === 1) {
+          drawStateRef.current = { ...ds, pts: [...ds.pts, snapped] };
+        } else {
+          const ecenter = ds.pts[0], emajorEnd = ds.pts[1];
+          const erx = Math.hypot(emajorEnd.x - ecenter.x, emajorEnd.y - ecenter.y);
+          const erot = Math.atan2(emajorEnd.y - ecenter.y, emajorEnd.x - ecenter.x);
+          const edx2 = snapped.x - ecenter.x, edy2 = snapped.y - ecenter.y;
+          const ery = Math.abs(-edx2 * Math.sin(erot) + edy2 * Math.cos(erot));
+          if (erx > 0.01 && ery > 0.01) {
+            dispatch({ type: 'ADD_ENTITIES', payload: [{ id: uuid(), type: 'ellipse', layer: '0', center: { ...ecenter }, rx: erx, ry: ery, rotation: erot }] });
+          }
+          drawStateRef.current = { tool: 'ellipse', pts: [], dragging: false };
+        }
+        break;
+      case 'bezier':
+        if (ds.pts.length < 3) {
+          drawStateRef.current = { ...ds, pts: [...ds.pts, snapped] };
+        } else {
+          const [bp0, bp1, bp2] = ds.pts;
+          const bverts = cubicBezierToPolyline(bp0, bp1, bp2, snapped);
+          if (bverts.length >= 2) {
+            dispatch({ type: 'ADD_ENTITIES', payload: [{ id: uuid(), type: 'polyline', layer: '0', vertices: bverts, closed: false }] });
+          }
+          drawStateRef.current = { tool: 'bezier', pts: [], dragging: false };
+        }
+        break;
       case 'polyline': {
         const segs = ds.segs || [];
         if (ds.pts.length === 0) {
@@ -3144,12 +3266,14 @@ export default function CAMCanvas({ tracePreview = null }) {
           polygon:  ds?.pts?.length === 1 ? 'Click to set radius (or type Sides/Radius above)' : 'Click to set center',
           mirror:   ds?.pts?.length === 1 ? 'Click second point of mirror axis' : selectedEntityIds.length === 0 ? 'Select entities first, then click mirror axis start' : 'Click first point of mirror axis',
           measure:  ds?.pts?.length === 2 ? 'Click third point to measure angle · Esc to reset' : ds?.pts?.length === 1 ? 'Click second point to lock distance' : 'Click first point',
+          ellipse:  ds?.pts?.length === 2 ? 'Click to set minor-axis end' : ds?.pts?.length === 1 ? 'Click to set major-axis end' : 'Click to set center',
+          bezier:   ds?.pts?.length === 3 ? 'Click end point (P3)' : ds?.pts?.length === 2 ? 'Click second control point (P2)' : ds?.pts?.length === 1 ? 'Click first control point (P1)' : 'Click start point',
           trim:     'Click segment to trim · Esc to exit',
           extend:   'Click near an end of a line or arc to extend it · Esc to exit',
           fillet:   ds?.ent1 ? 'Click the second line to complete fillet' : 'Click first line to fillet',
           chamfer:  ds?.ent1 ? 'Click the second line to complete chamfer' : 'Click first line to chamfer',
         };
-        const labels = { line: 'Line', circle: 'Circle', arc: 'Arc', rect: 'Rectangle', polyline: 'Polyline', polygon: 'Polygon', mirror: 'Mirror', measure: 'Measure', trim: 'Trim', extend: 'Extend', fillet: 'Fillet', chamfer: 'Chamfer' };
+        const labels = { line: 'Line', circle: 'Circle', arc: 'Arc', rect: 'Rectangle', ellipse: 'Ellipse', bezier: 'Bezier', polyline: 'Polyline', polygon: 'Polygon', mirror: 'Mirror', measure: 'Measure', trim: 'Trim', extend: 'Extend', fillet: 'Fillet', chamfer: 'Chamfer' };
         return (
           <div style={{ position: 'absolute', top: 8, left: '50%', transform: 'translateX(-50%)', background: 'rgba(10,30,10,0.9)', color: '#88ff88', padding: '4px 14px', borderRadius: 4, fontSize: 11, pointerEvents: 'none', border: '1px solid rgba(68,255,68,0.4)', whiteSpace: 'nowrap' }}>
             <strong>{labels[activeTool]}</strong> — {msgs[activeTool]} · Esc to cancel

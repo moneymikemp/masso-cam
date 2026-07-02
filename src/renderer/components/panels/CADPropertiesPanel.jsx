@@ -176,6 +176,24 @@ export default function CADPropertiesPanel() {
         </div>
       );
     }
+    case 'ellipse': {
+      const rotDeg = (e.rotation ?? 0) * 180 / Math.PI;
+      return (
+        <div style={S.wrap}>
+          <div style={S.entityType}>Ellipse</div>
+          <div style={S.grid}>
+            <span style={{ ...S.section }}>Center</span>
+            <NumField label={`Center X (${unit})`} value={toDisp(e.center.x)} onChange={v => update(e, { center: { ...e.center, x: toMM(v) } })} />
+            <NumField label={`Center Y (${unit})`} value={toDisp(e.center.y)} onChange={v => update(e, { center: { ...e.center, y: toMM(v) } })} />
+            <span style={{ ...S.section }}>Size</span>
+            <NumField label={`Major R (${unit})`} value={toDisp(e.rx)} onChange={v => update(e, { rx: toMM(v) })} />
+            <NumField label={`Minor R (${unit})`} value={toDisp(e.ry)} onChange={v => update(e, { ry: toMM(v) })} />
+            <span style={{ ...S.section }}>Orientation</span>
+            <NumField label="Rotation (°)" value={+rotDeg.toFixed(2)} onChange={v => update(e, { rotation: v * Math.PI / 180 })} />
+          </div>
+        </div>
+      );
+    }
     default:
       return <div style={S.empty}>Unsupported entity type: {e.type}</div>;
   }

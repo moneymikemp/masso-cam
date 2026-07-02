@@ -2099,6 +2099,15 @@ function entityToProfile(entity) {
     case 'arc':      return arcToPoints(entity.center, entity.radius, entity.startAngle, entity.endAngle, 36);
     case 'polyline': return polylineToPoints(entity.vertices, entity.closed);
     case 'line':     return [entity.start, entity.end];
+    case 'ellipse': {
+      const { center, rx, ry, rotation = 0 } = entity;
+      const cos = Math.cos(rotation), sin = Math.sin(rotation);
+      return Array.from({ length: 64 }, (_, i) => {
+        const t = (i / 64) * 2 * Math.PI;
+        const lx = rx * Math.cos(t), ly = ry * Math.sin(t);
+        return { x: center.x + lx * cos - ly * sin, y: center.y + lx * sin + ly * cos };
+      });
+    }
     default:         return null;
   }
 }
@@ -2108,6 +2117,7 @@ function isEntityClosed(entity) {
   if (entity.type === 'circle') return true;
   if (entity.type === 'arc') return false;
   if (entity.type === 'polyline') return entity.closed;
+  if (entity.type === 'ellipse') return true;
   return false;
 }
 

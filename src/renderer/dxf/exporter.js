@@ -37,17 +37,26 @@ function hexToAci(hex) {
   return best;
 }
 
-// Flatten text operation contours into a list of absolute-coordinate polyline records.
+// Flatten text operation contours into [{vertices:[{x,y,bulge}], closed}] records.
+// Prefers arc-fitted data (textArcContoursRel); falls back to line segments (textContoursRel).
 function collectTextContours(operations) {
   const contours = [];
   for (const op of (operations || [])) {
     if (op.type !== 'text' || !op.enabled) continue;
-    const { textContoursRel, textX = 0, textY = 0 } = op.params || {};
-    if (!textContoursRel?.length) continue;
-    for (const group of textContoursRel) {
-      for (const contour of group) {
-        if (!contour?.length) continue;
-        contours.push(contour.map(pt => ({ x: pt.x + textX, y: pt.y + textY })));
+    const { textArcContoursRel, textContoursRel, textX = 0, textY = 0 } = op.params || {};
+    if (textArcContoursRel?.length) {
+      for (const pl of textArcContoursRel) {
+        contours.push({
+          vertices: pl.vertices.map(v => ({ x: v.x + textX, y: v.y + textY, bulge: v.bulge ?? 0 })),
+          closed: pl.closed,
+        });
+      }
+    } else if (textContoursRel?.length) {
+      for (const group of textContoursRel) {
+        for (const contour of group) {
+          if (!contour?.length) continue;
+          contours.push({ vertices: contour.map(pt => ({ x: pt.x + textX, y: pt.y + textY, bulge: 0 })), closed: true });
+        }
       }
     }
   }
@@ -137,19 +146,38 @@ export function exportDxf(entities, layers, operations) {
         break;
       }
 
+      case 'ellipse': {
+        const { center, rx, ry, rotation: erot = 0 } = e;
+        const ecos = Math.cos(erot), esin = Math.sin(erot);
+        const everts = Array.from({ length: 64 }, (_, i) => {
+          const t = (i / 64) * 2 * Math.PI;
+          const lx = rx * Math.cos(t), ly = ry * Math.sin(t);
+          return { x: center.x + lx * ecos - ly * esin, y: center.y + lx * esin + ly * ecos };
+        });
+        w(0, 'POLYLINE'); w(8, layer);
+        w(66, 1); w(10, '0.0'); w(20, '0.0'); w(30, '0.0'); w(70, 1);
+        for (const v of everts) {
+          w(0, 'VERTEX'); w(8, layer);
+          w(10, fmt(v.x)); w(20, fmt(v.y)); w(30, '0.0');
+        }
+        w(0, 'SEQEND'); w(8, layer);
+        break;
+      }
+
       default: break;
     }
   }
 
-  // Text engraving contours (absolute coordinates, closed polylines on layer TEXT)
+  // Text engraving contours (absolute coordinates, on layer TEXT)
   for (const contour of textContours) {
     w(0, 'POLYLINE'); w(8, 'TEXT');
     w(66, 1); // vertices follow
     w(10, '0.0'); w(20, '0.0'); w(30, '0.0');
-    w(70, 1); // closed
-    for (const pt of contour) {
+    w(70, contour.closed ? 1 : 0);
+    for (const v of contour.vertices) {
       w(0, 'VERTEX'); w(8, 'TEXT');
-      w(10, fmt(pt.x)); w(20, fmt(pt.y)); w(30, '0.0');
+      w(10, fmt(v.x)); w(20, fmt(v.y)); w(30, '0.0');
+      if (v.bulge) w(42, fmt(v.bulge));
     }
     w(0, 'SEQEND'); w(8, 'TEXT');
   }

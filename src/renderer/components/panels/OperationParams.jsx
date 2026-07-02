@@ -1,6 +1,6 @@
 import React, { useState, useEffect } from 'react';
 import { useApp } from '../../store/AppContext';
-import { loadFontFromArrayBuffer, textToGlyphContours, getTextBounds } from '../../cam/textEngine';
+import { loadFontFromArrayBuffer, textToGlyphContours, textToArcPolylines, getTextBounds } from '../../cam/textEngine';
 
 const S = {
   form: { padding: '6px 8px', fontSize: 11 },
@@ -141,7 +141,8 @@ export default function OperationParams({ op, tools, operations = [], onChange }
       const capHeightMm = p.fontSize ?? 10; // always stored in mm via toMM()
       const glyphGroups = textToGlyphContours(font, p.text, capHeightMm);
       const bounds = getTextBounds(glyphGroups);
-      onChange({ params: { ...p, textContoursRel: glyphGroups, textBoundsRel: bounds } });
+      const arcPolylines = textToArcPolylines(font, p.text, capHeightMm);
+      onChange({ params: { ...p, textContoursRel: glyphGroups, textBoundsRel: bounds, textArcContoursRel: arcPolylines } });
     } catch (e) {
       console.error('Text geometry generation failed:', e);
     }
