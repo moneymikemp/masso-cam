@@ -131,6 +131,7 @@ export function exportDxf(entities, layers, operations) {
         for (const v of (e.vertices || [])) {
           w(0, 'VERTEX'); w(8, layer);
           w(10, fmt(v.x)); w(20, fmt(v.y)); w(30, '0.0');
+          if (v.bulge) w(42, fmt(v.bulge));  // DXF group 42 = arc bulge
         }
         w(0, 'SEQEND'); w(8, layer);
         break;
