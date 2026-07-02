@@ -10,7 +10,7 @@ const PRESET_KEYS = [
   'plugDetailEnabled','plugDetailToolId','plugDetailDiameter','plugDetailRpm','plugDetailFeed','plugDetailPlunge','plugDetailWallStock',
   'plugBulkEnabled','plugBulkToolId','plugBulkDiameter','plugBulkRpm','plugBulkFeed','plugBulkPlunge','plugBulkWallStock',
   'pocketDepth','pocketTopZ','pocketSafeZ','pocketStockW','pocketStockH',
-  'engagementDepth','mirror',
+  'engagementDepth','glueGap','mirror',
 ];
 
 // ─── Styles ───────────────────────────────────────────────────────────────────
@@ -144,14 +144,14 @@ export default function InlayWizard({ onClose, onGenerate, onSelectEntities, sel
   const [wiz, setWiz] = useState(() => ({
     jobName:          'Inlay',
     entityIds:        [...selectedEntityIds],
-    pocketDepth:      5,
+    pocketDepth:      0.25 * MM,
     pocketTopZ:       0,
-    pocketSafeZ:      10,
+    pocketSafeZ:      0.5 * MM,
     pocketStockW:     0,
     pocketStockH:     0,
-    plugs: [{ id: 'plug-1', name: 'Plug 1', entityIds: [], topZ: 0, safeZ: 10, stockW: 0, stockH: 0 }],
+    plugs: [{ id: 'plug-1', name: 'Plug 1', entityIds: [], topZ: 0, safeZ: 0.5 * MM, stockW: 0, stockH: 0 }],
     taperToolId:      null,
-    angle:            10,
+    angle:            30,
     tipDia:           0.5,
     taperRpm:         24000,
     taperFeed:        1000,
@@ -172,6 +172,7 @@ export default function InlayWizard({ onClose, onGenerate, onSelectEntities, sel
     bulkPlunge:       500,
     bulkWallStock:    0.254,
     engagementDepth:  0.057 * MM,   // mm — 0.057" is middle of ideal range
+    glueGap:          0.02 * MM,    // mm — clearance at bottom of pocket for glue
     mirror:           'x',           // 'x' | 'y' | 'none'
     plugDetailEnabled:    true,
     plugDetailToolId:     null,
@@ -206,7 +207,7 @@ export default function InlayWizard({ onClose, onGenerate, onSelectEntities, sel
   function addPlug() {
     setWiz(w => ({
       ...w,
-      plugs: [...w.plugs, { id: `plug-${Date.now()}`, name: `Plug ${w.plugs.length + 1}`, entityIds: [], topZ: 0, safeZ: 10, stockW: 0, stockH: 0 }],
+      plugs: [...w.plugs, { id: `plug-${Date.now()}`, name: `Plug ${w.plugs.length + 1}`, entityIds: [], topZ: 0, safeZ: 0.5 * MM, stockW: 0, stockH: 0 }],
     }));
   }
   function removePlug(id) { setWiz(w => ({ ...w, plugs: w.plugs.filter(p => p.id !== id) })); }
@@ -316,7 +317,7 @@ export default function InlayWizard({ onClose, onGenerate, onSelectEntities, sel
       name: `${wiz.jobName} — ${plug.name}`,
       selectedIds: plug.entityIds,
       params: {
-        pocketDepth: wiz.pocketDepth, topZ: plug.topZ, safeZ: plug.safeZ,
+        pocketDepth: wiz.pocketDepth - (wiz.glueGap ?? 0), topZ: plug.topZ, safeZ: plug.safeZ,
         stockW: plug.stockW, stockH: plug.stockH,
         passes: buildPlugPasses(), mirror: wiz.mirror, fitTolerance, cutSide: 'outside',
       },
@@ -648,7 +649,7 @@ export default function InlayWizard({ onClose, onGenerate, onSelectEntities, sel
         {/* Read-only calculated outputs */}
         <div style={{ ...S.card, marginBottom:14 }}>
           <div style={{ display:'flex', justifyContent:'space-between', alignItems:'center', marginBottom:6 }}>
-            <span style={S.kvK}>Plug Proud</span>
+            <span style={S.kvK}>Plug Proud (Surface Gap)</span>
             <span style={S.kvV}>{fmt(plugProud, isInch ? 3 : 2)} {dUnit}</span>
           </div>
           <div style={{ display:'flex', justifyContent:'space-between', alignItems:'center' }}>
@@ -656,9 +657,20 @@ export default function InlayWizard({ onClose, onGenerate, onSelectEntities, sel
             <span style={{ color:fitColor, fontWeight:700, fontSize:12 }}>● {fitLabel}</span>
           </div>
           <div style={{ fontSize:9, color:'#444466', marginTop:8, lineHeight:1.5 }}>
-            Plug Proud: how far the plug sits above the surface before pressing flush.
+            Plug Proud (Surface Gap): how far the plug sits above the surface before pressing flush.
             Ideal range: {isInch ? '0.030–0.080"' : '0.76–2.03 mm'}.
           </div>
+        </div>
+
+        <div style={S.sec}>Glue Gap</div>
+        <div style={{ ...S.info, fontSize:10, marginTop:-4, marginBottom:10 }}>
+          Clearance between the plug bottom and pocket floor. Provides space for glue to pool during press-fit.
+          The plug is cut this amount shallower than the pocket depth.
+        </div>
+        <div style={S.grid2}>
+          <F label="Glue Gap" unit={dUnit}>
+            <Num value={d(wiz.glueGap ?? 0)} onChange={v => set('glueGap', m(v))} min={0} step={dStep} />
+          </F>
         </div>
 
         <div style={S.sec}>Orientation — Mirror Axis</div>
@@ -709,6 +721,7 @@ export default function InlayWizard({ onClose, onGenerate, onSelectEntities, sel
             <div style={S.cardT}>Pocket — {wiz.jobName}</div>
             <div style={S.kv}><span style={S.kvK}>Entities</span><span style={S.kvV}>{wiz.entityIds.length}</span></div>
             <div style={S.kv}><span style={S.kvK}>Depth</span><span style={S.kvV}>{fmt(wiz.pocketDepth)} {dUnit}</span></div>
+            <div style={S.kv}><span style={S.kvK}>Glue Gap</span><span style={S.kvV}>{fmt(wiz.glueGap ?? 0)} {dUnit}</span></div>
             <div style={S.kv}><span style={S.kvK}>Top of Stock</span><span style={S.kvV}>{fmt(wiz.pocketTopZ)} {dUnit}</span></div>
             <div style={S.kv}><span style={S.kvK}>Safe Z</span><span style={S.kvV}>{fmt(wiz.pocketSafeZ)} {dUnit}</span></div>
             {(wiz.pocketStockW > 0 || wiz.pocketStockH > 0) && (
@@ -747,7 +760,7 @@ export default function InlayWizard({ onClose, onGenerate, onSelectEntities, sel
               <div style={{ color:fitColor, fontWeight:700, fontSize:15 }}>{fmt(plugProud, isInch ? 3 : 2)} {dUnit}</div>
             </div>
             <div>
-              <div style={{ color:'#444466', marginBottom:3 }}>Plug Proud</div>
+              <div style={{ color:'#444466', marginBottom:3 }}>Plug Proud (Surface Gap)</div>
               <div style={{ color:'#ccccee', fontWeight:700, fontSize:15 }}>{fmt(plugProud, isInch ? 3 : 2)} {dUnit}</div>
             </div>
             <div>
