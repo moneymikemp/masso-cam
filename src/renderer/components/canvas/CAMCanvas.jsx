@@ -949,17 +949,25 @@ export default function CAMCanvas({ tracePreview = null }) {
   // Resolved index into zLevels (null = show all).
   const filterZIndex = zSliderPos === 0 ? null : zSliderPos - 1;
 
-  // On a plug workspace tab: show only the plug's selected geometry, mirrored as it will be cut.
+  // On a plug workspace tab: show only the plug's selected geometry, mirrored as it will be cut,
+  // plus any boundary entities stored on a layer named after the plug op (already at plug position).
   const plugCanvasEntities = useMemo(() => {
     const plugOp = operations.find(op => op.type === 'taperedplug');
     if (!plugOp) return null;
     const selEntities = entities.filter(e => plugOp.selectedIds?.includes(e.id));
-    if (!selEntities.length) return null;
+    // Boundary entities live on a layer named after the plug op; they are already stored at the
+    // mirrored/plug position so they must NOT be re-mirrored here.
+    const boundaryEntities = entities.filter(
+      e => e.layer === plugOp.name && !plugOp.selectedIds?.includes(e.id)
+    );
+    if (!selEntities.length && !boundaryEntities.length) return null;
     const mirror = plugOp.params?.mirror ?? 'none';
+    let mirrored;
     try {
-      if (mirror === 'none') return selEntities;
-      return mirror === 'x' ? mirrorEntitiesX(selEntities) : mirrorEntitiesY(selEntities);
-    } catch { return selEntities; }
+      if (mirror === 'none') mirrored = selEntities;
+      else mirrored = mirror === 'x' ? mirrorEntitiesX(selEntities) : mirrorEntitiesY(selEntities);
+    } catch { mirrored = selEntities; }
+    return [...mirrored, ...boundaryEntities];
   }, [operations, entities]);
 
   // Reset slider whenever the toolpath depth structure changes.
@@ -1250,7 +1258,12 @@ export default function CAMCanvas({ tracePreview = null }) {
   function drawEntities(ctx) {
     const xf = xfRef.current;
     const gd = gripDragRef.current;
-    const entityList = plugCanvasEntities || entities;
+    // On a non-plug workspace, hide entities that live on plug-boundary layers so the boundary
+    // doesn't bleed onto the pocket canvas (those layers are only meaningful on the plug tab).
+    const plugBoundaryLayers = plugCanvasEntities
+      ? new Set()
+      : new Set(allOperations.filter(op => op.type === 'taperedplug').map(op => op.name));
+    const entityList = plugCanvasEntities || entities.filter(e => !plugBoundaryLayers.has(e.layer));
     for (const entity of entityList) {
       const layer = layers[entity.layer];
       if (layer && !layer.visible) continue;
