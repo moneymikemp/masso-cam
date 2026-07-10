@@ -467,19 +467,61 @@ export function polylineToPoints(vertices, closed) {
   const pts = [];
   for (let i = 0; i < vertices.length; i++) {
     const v = vertices[i];
-    pts.push({ x: v.x, y: v.y });
+    const pt = { x: v.x, y: v.y };
+
+    // If the previous segment was a bulge arc ending at this vertex, attach the
+    // true arc tangent so corner detection can use it instead of the short chord.
+    const prevI = (i - 1 + vertices.length) % vertices.length;
+    const prevV = vertices[prevI];
+    const hasPrevBulge = !SKIP_BULGE && prevV.bulge !== 0 && (i > 0 || closed);
+    if (hasPrevBulge) {
+      const { cx, cy } = _bulgeCenter(prevV, v, prevV.bulge);
+      const t = _arcTangent(cx, cy, v.x, v.y, prevV.bulge > 0);
+      if (t) pt._arcTangentIn = t;
+    }
+
+    pts.push(pt);
 
     // Include the last vertex's bulge when the polyline is closed — it creates
     // the arc that connects the last vertex back to vertex[0].
     const hasNext = i < vertices.length - 1 || closed;
-    if (!SKIP_BULGE && v.bulge && v.bulge !== 0 && hasNext) {
+    if (!SKIP_BULGE && v.bulge !== 0 && hasNext) {
       const next = vertices[(i + 1) % vertices.length];
+
+      // Attach the true outgoing arc tangent at v so corner detection works at
+      // line-to-arc junctions where the first arc chord may be very short.
+      const { cx, cy } = _bulgeCenter(v, next, v.bulge);
+      const t = _arcTangent(cx, cy, v.x, v.y, v.bulge > 0);
+      if (t) pts[pts.length - 1]._arcTangentOut = t;
+
       const bulgePts = bulgeToPts(v, next, v.bulge);
       pts.push(...bulgePts.slice(1, -1));
     }
   }
   if (closed && pts.length > 0) pts.push({ ...pts[0] });
   return pts;
+}
+
+// Returns the arc center {cx, cy} for a bulge arc from p1 to p2.
+function _bulgeCenter(p1, p2, bulge) {
+  const angle = 4 * Math.atan(Math.abs(bulge));
+  const dist  = Math.hypot(p2.x - p1.x, p2.y - p1.y);
+  if (dist < 1e-10) return { cx: p1.x, cy: p1.y };
+  const r     = dist / (2 * Math.sin(angle / 2));
+  const midX  = (p1.x + p2.x) / 2, midY = (p1.y + p2.y) / 2;
+  const dx = p2.x - p1.x, dy = p2.y - p1.y;
+  const perpX = -dy / dist, perpY = dx / dist;
+  const d    = Math.sqrt(Math.max(0, r * r - (dist / 2) * (dist / 2)));
+  const sign = bulge > 0 ? 1 : -1;
+  return { cx: midX + sign * d * perpX, cy: midY + sign * d * perpY };
+}
+
+// Returns the unit tangent {dx, dy} of a bulge arc at point (px, py) given arc center.
+// isCCW: positive bulge → CCW travel; negative → CW.
+function _arcTangent(cx, cy, px, py, isCCW) {
+  const rx = px - cx, ry = py - cy, r = Math.hypot(rx, ry);
+  if (r < 1e-10) return null;
+  return isCCW ? { dx: -ry / r, dy: rx / r } : { dx: ry / r, dy: -rx / r };
 }
 
 function bulgeToPts(p1, p2, bulge) {

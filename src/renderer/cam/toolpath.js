@@ -1,17 +1,17 @@
-// CAM Toolpath Engine - all 2.5D operations
+﻿// CAM Toolpath Engine - all 2.5D operations
 
-import { offsetPolyline, roundedOffsetPolyline, generatePocketOffsets, generateRestMachiningPasses, generateRasterPasses, polygonArea, isClockwise, clipPolygonToRegion, stripClose, pointInPolygon, differencePolygons, unionPolygons } from './offset.js';
+import { offsetPolyline, roundedOffsetPolyline, generatePocketOffsets, generateRestMachiningPasses, generateRasterPasses, polygonArea, isClockwise, clipPolygonToRegion, stripClose, pointInPolygon, differencePolygons, unionPolygons, intersectPolygons } from './offset.js';
 import { circleToPoints, arcToPoints, polylineToPoints } from '../dxf/parser.js';
-// jspoly loaded as a global via public/index.html <script> tag (webpack can't bundle it — it has internal requires).
+// jspoly loaded as a global via public/index.html <script> tag (webpack can't bundle it â€” it has internal requires).
 // In browser context the IIFE sets window.JSPoly (uppercase); module.exports.jspoly only exists in Node.
 const _jspoly = window.JSPoly;
 
-// ── Entry point ───────────────────────────────────────────────────────────────
+// â”€â”€ Entry point â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
-// Compute approximate medial axis (skeleton) of V-carve shapes for visualization.
-// Returns {polylines: [[{x,y},...], ...]} — closed polylines at several erosion
-// depth fractions.  Early fractions expose thin stroke slivers; late fractions
-// converge on the medial axis of each filled region / hole annulus.
+// Compute the TRUE medial axis (skeleton) of V-carve shapes for visualization.
+// Uses the same JSPoly Voronoi engine as the toolpath generator, so the preview
+// exactly matches the equidistant centerline that the V-bit will follow.
+// Returns {polylines: [[{x,y},...], ...]} â€” one 2-point polyline per medial axis edge.
 export function computeVCarveMedialAxis(op, entities) {
   if (!op.selectedIds?.length) return { polylines: [] };
   const selected = getSelectedEntities(entities, op.selectedIds);
@@ -24,55 +24,67 @@ export function computeVCarveMedialAxis(op, entities) {
 
   const shapeGroups = [];
   for (const rawProfile of allProfiles) {
-    const profile = isClockwise(rawProfile) ? [...rawProfile].reverse() : rawProfile;
     let placed = false;
     for (const group of shapeGroups) {
-      if (profile.some(pt => pointInPolygon(pt, group.outer))) {
-        group.holes.push(profile);
-        placed = true;
-        break;
+      if (rawProfile.some(pt => pointInPolygon(pt, group.outer))) {
+        group.holes.push(rawProfile); placed = true; break;
       }
     }
-    if (!placed) shapeGroups.push({ outer: profile, holes: [] });
+    if (!placed) shapeGroups.push({ outer: rawProfile, holes: [] });
   }
 
-  const SKEL_STEP = 0.3; // mm — coarser than toolpath ring step; fast enough for UI
   const polylines = [];
 
-  for (const { outer, holes } of shapeGroups) {
-    if (Math.abs(polygonArea(outer)) < SKEL_STEP * SKEL_STEP * 4) continue;
+  for (const { outer: rawOuter, holes } of shapeGroups) {
+    const outer = stripClose([...rawOuter]);
+    if (outer.length < 3) continue;
+    const jsHoles = holes.map(h => stripClose([...h]).map(v => ({ x: v.x, y: v.y })));
 
-    // Collect the eroded ring-sets at every step until the region collapses.
-    const allRings = [];
-    for (let i = 1; i <= 2000; i++) {
-      const d = i * SKEL_STEP;
-      const shrunkOuter = offsetPolyline(outer, d, true);
-      if (!shrunkOuter || !shrunkOuter.length) break;
+    let segs;
+    try {
+      segs = _jspoly.construct_medial_axis(outer.map(v => ({ x: v.x, y: v.y })), jsHoles, 0.1, undefined, 0);
+    } catch (_) { continue; }
+    if (!segs?.length) continue;
 
-      const expandedHoles = holes.flatMap(h => offsetPolyline(h, -d, true));
-      const validRings = expandedHoles.length > 0
-        ? shrunkOuter.flatMap(r => differencePolygons(r, expandedHoles))
-        : shrunkOuter;
+    segs = segs.filter(s => s.point0.radius > 1e-6 || s.point1.radius > 1e-6);
+    if (!segs.length) continue;
 
-      if (!validRings || !validRings.length) break;
-      allRings.push(validRings);
+    // Build adjacency graph
+    const nodeMap = new Map();
+    const ptKey  = v => `${v.x.toFixed(4)},${v.y.toFixed(4)}`;
+    const getNode = v => {
+      const k = ptKey(v);
+      if (!nodeMap.has(k)) nodeMap.set(k, { x: v.x, y: v.y, radius: v.radius, adj: [] });
+      return nodeMap.get(k);
+    };
+    for (const seg of segs) {
+      const n0 = getNode(seg.point0), n1 = getNode(seg.point1);
+      if (n0 !== n1 && !n0.adj.includes(n1)) { n0.adj.push(n1); n1.adj.push(n0); }
     }
 
-    const n = allRings.length;
-    if (n === 0) continue;
+    // Prune short hair branches (same threshold as the toolpath generator)
+    let anyPruned = true;
+    while (anyPruned) {
+      anyPruned = false;
+      for (const [key, node] of [...nodeMap]) {
+        if (node.adj.length !== 1) continue;
+        const nbr = node.adj[0];
+        if (Math.hypot(node.x - nbr.x, node.y - nbr.y) < 1.5) {
+          nbr.adj = nbr.adj.filter(n => n !== node);
+          nodeMap.delete(key);
+          anyPruned = true; break;
+        }
+      }
+    }
 
-    // Emit rings at a spread of erosion fractions so the user can see:
-    //  - early fractions: stroke regions that collapse first (thin strokes visible)
-    //  - late fractions: innermost rings converging on the medial axis
-    const fractions = [0.15, 0.35, 0.55, 0.75, 0.9, 1.0];
-    const emitted = new Set();
-    for (const frac of fractions) {
-      const idx = Math.min(n - 1, Math.floor(frac * n));
-      if (emitted.has(idx)) continue;
-      emitted.add(idx);
-      for (const ring of allRings[idx]) {
-        const pts = stripClose([...ring]);
-        if (pts.length >= 2) polylines.push([...pts, pts[0]]);
+    // Emit each graph edge as a 2-point polyline â€” this IS the true medial axis
+    const seen = new Set();
+    for (const [, node] of nodeMap) {
+      for (const nbr of node.adj) {
+        const ek = [ptKey(node), ptKey(nbr)].sort().join('~');
+        if (seen.has(ek)) continue;
+        seen.add(ek);
+        polylines.push([{ x: node.x, y: node.y }, { x: nbr.x, y: nbr.y }]);
       }
     }
   }
@@ -98,18 +110,20 @@ export function generateToolpath(operation, entities, context = {}) {
     case 'taperedpocket': return generateTaperedPocket(operation, entities, context);
     case 'taperedplug':   return generateTaperedPlug(operation, entities, context);
     case 'vcarve':        return generateVCarve(operation, entities, context);
+    case 'vcarve2':       return generateVCarve2(operation, entities, context);
+    case 'cornerlift':    return generateCornerLift(operation, entities, context);
     case 'dogbone':       return generateDogbone(operation, entities);
     case 'text':          return generateText(operation, entities);
     case 'stlraster': {
       const hm = context.stlHeightmap;
-      if (!hm) return { moves: [], warnings: ['STL heightmap not available — re-generate from the 3D view'] };
+      if (!hm) return { moves: [], warnings: ['STL heightmap not available â€” re-generate from the 3D view'] };
       return generateSTLRaster(hm, operation.params);
     }
     default:             return { moves: [], warnings: ['Unknown operation: ' + type] };
   }
 }
 
-// ── Tab engine ────────────────────────────────────────────────────────────────
+// â”€â”€ Tab engine â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 // Returns evenly-spaced tab centre t-values [0,1) for automatic placement.
 export function computeAutoTabPositions(tabCount) {
@@ -119,10 +133,10 @@ export function computeAutoTabPositions(tabCount) {
 // Insert hold-down tab Z-lifts into one Z-pass around a closed contour.
 //
 // Assumes the caller has already moved to pts[0] at cutZ (via plunge or ramp).
-// Returns feed moves covering pts[1]…pts[n-1]…close-to-pts[0], with Z shaped
-// by tabProfile: 'flat' (step plateau), 'dmd' (sin² curve), 'triangle' (ramp).
+// Returns feed moves covering pts[1]â€¦pts[n-1]â€¦close-to-pts[0], with Z shaped
+// by tabProfile: 'flat' (step plateau), 'dmd' (sinÂ² curve), 'triangle' (ramp).
 //
-// tabTValues : t ∈ [0,1) — arc-fraction positions of tab centres
+// tabTValues : t âˆˆ [0,1) â€” arc-fraction positions of tab centres
 // tabTopZ    : Z of tab top surface = floorZ + tabHeight  (must be > cutZ)
 function insertTabsIntoContour(contourPts, cutZ, tabTopZ, tabWidth, tabTValues, feedRate, tabProfile) {
   tabProfile = tabProfile || 'flat';
@@ -160,7 +174,7 @@ function insertTabsIntoContour(contourPts, cutZ, tabTopZ, tabWidth, tabTValues, 
   }
 
   if (tabProfile === 'flat') {
-    // Convert t-values → sorted entering/leaving arc-length events.
+    // Convert t-values â†’ sorted entering/leaving arc-length events.
     // Tabs that straddle the seam (s = 0 / totalLen) are nudged inward.
     const tabBounds = [];
     for (const t of tabTValues) {
@@ -194,7 +208,7 @@ function insertTabsIntoContour(contourPts, cutZ, tabTopZ, tabWidth, tabTValues, 
     return moves;
   }
 
-  // Profiled tab: DMD Curve (sin²) or Triangle
+  // Profiled tab: DMD Curve (sinÂ²) or Triangle
   const tabH = tabTopZ - cutZ;
 
   function profileZ(d, w) {
@@ -246,7 +260,7 @@ function insertTabsIntoContour(contourPts, cutZ, tabTopZ, tabWidth, tabTValues, 
   return moves;
 }
 
-// ── Contour ───────────────────────────────────────────────────────────────────
+// â”€â”€ Contour â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 function generateContour(op, entities) {
   const moves = [], warnings = [];
@@ -298,7 +312,7 @@ function generateContour(op, entities) {
     for (let zi = 0; zi < passes.length; zi++) {
       const z = passes[zi];
       // For 'both': odd passes reverse direction while keeping the same start point (P0) so
-      // keepDown transitions are seamless — the closed loop always returns to P0.
+      // keepDown transitions are seamless â€” the closed loop always returns to P0.
       const passProfile = (p.climb === 'both' && zi % 2 === 1 && contourPts.length > 1)
         ? [contourPts[0], ...[...contourPts].slice(1).reverse()]
         : contourPts;
@@ -306,7 +320,7 @@ function generateContour(op, entities) {
       if (zi === 0 || !p.keepDown || !closed) {
         moves.push(...buildLeadIn(passProfile, p.topZ ?? 0, z, safeZ, resolvedLeadIn, p.rampAngle || 3, leadInArcR, p.feedRate || 1500, p.plungeRate || 500, cutSide));
       } else {
-        // Keep down: tool is at passProfile[0] (always contourPts[0]) — just plunge deeper
+        // Keep down: tool is at passProfile[0] (always contourPts[0]) â€” just plunge deeper
         moves.push({ type: 'feed', x: passProfile[0].x, y: passProfile[0].y, z, f: p.plungeRate || 500 });
       }
 
@@ -351,7 +365,7 @@ function sortPassesByProximity(passes) {
   return result;
 }
 
-// ── Pocket ────────────────────────────────────────────────────────────────────
+// â”€â”€ Pocket â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 function generatePocket(op, entities, context = {}) {
   const moves = [], warnings = [];
@@ -461,7 +475,7 @@ function generatePocket(op, entities, context = {}) {
         const pass = (p.climb === 'both' && pi % 2 === 1) ? [...orderedPasses[pi]].reverse() : orderedPasses[pi];
         if (!pass || pass.length < 2) continue;
         if (pi === 0) {
-          // buildLeadIn left us near pass start inside the already-cut area — short hop is safe
+          // buildLeadIn left us near pass start inside the already-cut area â€” short hop is safe
           moves.push({ type: 'rapid', x: pass[0].x, y: pass[0].y, z: z + 0.5 });
         } else if (hasIslands && !p.keepDown) {
           // Two-step retract: lift Z straight up at current XY first, then traverse at
@@ -501,7 +515,7 @@ function generatePocket(op, entities, context = {}) {
   return { moves, warnings };
 }
 
-// ── Adaptive ──────────────────────────────────────────────────────────────────
+// â”€â”€ Adaptive â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 function generateAdaptive(op, entities, context = {}) {
   const moves = [], warnings = [];
@@ -602,7 +616,7 @@ function generateAdaptive(op, entities, context = {}) {
   return { moves, warnings };
 }
 
-// ── Face ──────────────────────────────────────────────────────────────────────
+// â”€â”€ Face â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 function generateFace(op, entities) {
   const moves = [];
@@ -630,7 +644,7 @@ function generateFace(op, entities) {
   return { moves, warnings: [] };
 }
 
-// ── Drill ─────────────────────────────────────────────────────────────────────
+// â”€â”€ Drill â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 function generateDrill(op, entities) {
   const moves = [];
@@ -680,7 +694,7 @@ function generateDrill(op, entities) {
   return { moves, warnings: [] };
 }
 
-// ── Bore ──────────────────────────────────────────────────────────────────────
+// â”€â”€ Bore â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 function generateBore(op, entities) {
   const moves = [];
@@ -716,7 +730,7 @@ function generateBore(op, entities) {
   return { moves, warnings: [] };
 }
 
-// ── Circular Pocket ───────────────────────────────────────────────────────────
+// â”€â”€ Circular Pocket â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 function generateCircular(op, entities) {
   const moves = [];
@@ -773,7 +787,7 @@ function generateCircular(op, entities) {
   return { moves, warnings: [] };
 }
 
-// ── Engrave / Trace ───────────────────────────────────────────────────────────
+// â”€â”€ Engrave / Trace â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 function generateEngrave(op, entities) {
   const moves = [];
@@ -800,7 +814,7 @@ function generateEngrave(op, entities) {
   return { moves, warnings: [] };
 }
 
-// ── Slot ──────────────────────────────────────────────────────────────────────
+// â”€â”€ Slot â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 function generateSlot(op, entities) {
   const moves = [];
@@ -836,7 +850,7 @@ function generateSlot(op, entities) {
   return { moves, warnings: [] };
 }
 
-// ── Chamfer ───────────────────────────────────────────────────────────────────
+// â”€â”€ Chamfer â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 function generateChamfer(op, entities) {
   const moves = [];
@@ -870,7 +884,7 @@ function generateChamfer(op, entities) {
   return { moves, warnings: [] };
 }
 
-// ── Thread ────────────────────────────────────────────────────────────────────
+// â”€â”€ Thread â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 function generateThread(op, entities) {
   const moves = [];
@@ -906,24 +920,24 @@ function generateThread(op, entities) {
   return { moves, warnings: [] };
 }
 
-// ── Tapered Pocket / Tapered Plug ────────────────────────────────────────────
+// â”€â”€ Tapered Pocket / Tapered Plug â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 //
 // Each operation has four independently-enabled passes:
-//   Taper Contour  — V-bit traces the exact profile at full depth (defines walls)
-//   Taper Cleanup  — V-bit concentric clearing of floor area near walls
-//   Detail Endmill — small endmill clears medium-detail areas
-//   Bulk Endmill   — large endmill removes remaining bulk
+//   Taper Contour  â€” V-bit traces the exact profile at full depth (defines walls)
+//   Taper Cleanup  â€” V-bit concentric clearing of floor area near walls
+//   Detail Endmill â€” small endmill clears medium-detail areas
+//   Bulk Endmill   â€” large endmill removes remaining bulk
 //
 // cutSide 'inside'  (pocket default): clears inside the profile boundary.
 // cutSide 'outside' (plug default):   clears outside the profile boundary.
-//   For outside cuts the taper-contour tip is offset outward by depth×tan(halfAngle)
+//   For outside cuts the taper-contour tip is offset outward by depthÃ—tan(halfAngle)
 //   so the taper wall intersects the profile edge exactly at the top surface.
 //
 // Plug raises the effective topZ by fitTolerance/tan(halfAngle) so the plug
 // engages the pocket walls fractionally higher, leaving a controlled fit gap.
 //
 // Wall-clearance formula used by all concentric-clearing passes:
-//   wallLeave = depth × tan(halfAngle) + wallStock
+//   wallLeave = depth Ã— tan(halfAngle) + wallStock
 // Inside: outer boundary inset by (toolR + wallLeave); islands outset by same.
 // Outside: profile outset by (toolR + wallLeave) becomes the exclusion island;
 //          stock bounding box is the outer clearing boundary.
@@ -937,7 +951,7 @@ export function mirrorEntitiesX(entities) {
   const profiles = buildPocketProfiles(entities);
   if (!profiles.length) return entities;
 
-  // Strip closing points before centroid computation — polylineToPoints adds
+  // Strip closing points before centroid computation â€” polylineToPoints adds
   // a duplicate closing vertex for closed polylines, biasing the vertex average
   // toward the first vertex and shifting the mirrored geometry off-center.
   const cleanProfiles = profiles.map(p => stripClose([...p]));
@@ -1026,7 +1040,7 @@ function applyMirror(selected, p) {
   return selected;
 }
 
-// ── V-Carve ───────────────────────────────────────────────────────────────────
+// â”€â”€ V-Carve â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 //
 // Returns the shortest distance from point pt to any edge of outer or any hole.
 // Used to compute true V-bit contact depth at each skeleton centroid.
@@ -1050,195 +1064,830 @@ function distToNearestWall(pt, outer, holes) {
 function generateVCarve(op, entities, context = {}) {
   const moves = [], warnings = [];
   const p = op.params;
-
   const safeZ        = p.safeZ ?? 25;
   const topZ         = p.topZ ?? 0;
   const maxDepth     = Math.abs(p.maxDepth ?? 15);
   const halfAngle    = Math.max(1, Math.min(89, p.halfAngle ?? 15));
-  const tipRadius    = (p.tipDiameter ?? 0) / 2;
-  const flatDepth    = p.flatDepth ?? 0;
-  const feedRate     = p.feedRate ?? 1500;
-  const plungeRate   = p.plungeRate ?? 500;
   const tanHalfAngle = Math.tan(halfAngle * Math.PI / 180);
+  const tipR         = (p.tipDiameter ?? 0) / 2;
+  const plungeRate   = p.plungeRate ?? 500;
+  const feedRate     = p.feedRate ?? 1500;
 
-  if (!op.selectedIds?.length) return { moves, warnings: ['Select entities for V-Carve'] };
+  if (!op.selectedIds?.length) return { moves, warnings: ['Select entities'] };
   const selected = getSelectedEntities(entities, op.selectedIds);
-  if (!selected.length) return { moves, warnings: ['No entities selected'] };
-  const rawProfiles = buildPocketProfiles(selected);
-  if (!rawProfiles.length) return { moves, warnings: ['No closed profiles found'] };
+  const profiles = buildPocketProfiles(selected);
 
-  // Group profiles into { outer, holes[] } by containment — same pattern as skeleton preview.
-  // Sort largest first so outers are processed before any holes they contain.
-  // pointInPolygon is winding-agnostic so we don't need to normalise before the check.
-  // We do NOT force CCW on the outer before passing to JSPoly — JSPoly handles both
-  // windings and the raw polygon produces the correct corner branches.
-  rawProfiles.sort((a, b) => polygonArea(b) - polygonArea(a));
-  const shapeGroups = [];
-  for (const raw of rawProfiles) {
-    let placed = false;
-    for (const group of shapeGroups) {
-      if (raw.some(pt => pointInPolygon(pt, group.outer))) {
-        group.holes.push(raw);
-        placed = true;
-        break;
-      }
-    }
-    if (!placed) shapeGroups.push({ outer: raw, holes: [] });
-  }
+  // Contact-First Z: depth where V-bit sides touch nearest wall
+  const zOf = r => topZ - Math.min(maxDepth, Math.max(p.flatDepth || 0, (r - tipR) / tanHalfAngle));
 
-  // zOf: convert JSPoly radius (distance to nearest wall) to Z height
-  const zOf = radius => {
-    const depth = Math.min(maxDepth, Math.max(flatDepth, (radius - tipRadius) / tanHalfAngle));
-    return topZ - depth;
+  // Closest point on segment [A,B] to point P
+  const closestOnSeg = (P, A, B) => {
+    const dx = B.x - A.x, dy = B.y - A.y;
+    const len2 = dx*dx + dy*dy;
+    if (len2 < 1e-20) return { x: A.x, y: A.y };
+    const t = Math.max(0, Math.min(1, ((P.x-A.x)*dx + (P.y-A.y)*dy) / len2));
+    return { x: A.x + t*dx, y: A.y + t*dy };
   };
 
-  for (const { outer: rawOuter, holes } of shapeGroups) {
-    const outer = stripClose([...rawOuter]);
-    if (outer.length < 3) continue;
+  // Nudge a spine node to the exact midpoint between its two nearest boundary walls.
+  // Wall-1: absolute closest boundary point.
+  // Wall-2: closest boundary point whose direction from node is opposite to wall-1
+  //         (dot product < 0), ensuring we find the far wall, not a second nearby point
+  //         on the same wall.
+  // Returns { x, y, radius } with corrected position and updated wall-distance.
+  const nudgeToCenter = (node, boundary) => {
+    const nb = boundary.length;
+    let d1 = Infinity, p1 = null;
+    for (let i = 0; i < nb; i++) {
+      const cp = closestOnSeg(node, boundary[i], boundary[(i+1)%nb]);
+      const d  = Math.hypot(cp.x - node.x, cp.y - node.y);
+      if (d < d1) { d1 = d; p1 = cp; }
+    }
+    if (!p1) return node;
+    const dx1 = p1.x - node.x, dy1 = p1.y - node.y;
+    let d2 = Infinity, p2 = null;
+    for (let i = 0; i < nb; i++) {
+      const cp = closestOnSeg(node, boundary[i], boundary[(i+1)%nb]);
+      const dx = cp.x - node.x, dy = cp.y - node.y;
+      if (dx*dx1 + dy*dy1 >= 0) continue; // same half-plane as wall-1 â†’ skip
+      const d  = Math.hypot(dx, dy);
+      if (d < d2) { d2 = d; p2 = cp; }
+    }
+    if (!p2) return node; // can't identify opposite wall â€” leave unchanged
+    return { x: (p1.x+p2.x)/2, y: (p1.y+p2.y)/2, radius: (d1+d2)/2 };
+  };
 
-    // Compute exact medial axis via JSPoly (Boost Polygon Voronoi).
-    // Returns [{point0:{x,y,radius}, point1:{x,y,radius}}, …] where radius = dist to nearest wall.
-    // Holes (inner counters like the counter of 'e') are passed so the medial axis is
-    // computed in the annular region between outer and inner walls.
+  // Ramer-Douglas-Peucker (perpendicular distance in XY, Z carried by index)
+  const simplify = (pts, tol) => {
+    if (pts.length <= 2) return pts;
+    const sqTol = tol * tol;
+    const step = (arr, a, b) => {
+      let maxD = -1, idx = -1;
+      for (let i = a + 1; i < b; i++) {
+        const d = (function(pt, p1, p2) {
+          let x = p1.x, y = p1.y, dx = p2.x - x, dy = p2.y - y;
+          if (dx !== 0 || dy !== 0) {
+            const t = ((pt.x - x) * dx + (pt.y - y) * dy) / (dx * dx + dy * dy);
+            if (t > 1) { x = p2.x; y = p2.y; } else if (t > 0) { x += dx * t; y += dy * t; }
+          }
+          return (pt.x - x) ** 2 + (pt.y - y) ** 2;
+        })(arr[i], arr[a], arr[b]);
+        if (d > maxD) { maxD = d; idx = i; }
+      }
+      if (idx !== -1 && maxD > sqTol) return [...step(arr, a, idx), ...step(arr, idx, b)];
+      return [arr[b]];
+    };
+    return [pts[0], ...step(pts, 0, pts.length - 1)];
+  };
+
+  for (const raw of profiles) {
+
+    // â”€â”€ Step 1: Input smoothing â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+    const boundary = simplify(stripClose([...raw]), 0.01);
+    if (boundary.length < 3) continue;
+
+    // â”€â”€ Step 2: Build medial axis graph â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
     let segs;
     try {
-      const jsHoles = holes.map(h => stripClose([...h]).map(v => ({ x: v.x, y: v.y })));
-      // filtering_angle=0 keeps all branches including corner-reach segments.
-      segs = _jspoly.construct_medial_axis(outer.map(v => ({ x: v.x, y: v.y })), jsHoles, 0.1, undefined, 0);
-    } catch (e) {
-      warnings.push(`V-Carve medial axis failed: ${e.message}`);
-      continue;
-    }
-    if (!segs || segs.length === 0) { warnings.push('No medial axis found'); continue; }
+      segs = _jspoly.construct_medial_axis(boundary.map(v => ({ x: v.x, y: v.y })), [], 0.1, undefined, 0);
+    } catch (e) { continue; }
+    if (!segs?.length) continue;
 
-    segs = segs.filter(s => s.point0.radius > 1e-6 || s.point1.radius > 1e-6);
-    if (segs.length === 0) continue;
-
-    // Build adjacency graph from the unordered segment list
     const nodeMap = new Map();
-    const ptKey  = v => `${v.x.toFixed(4)},${v.y.toFixed(4)}`;
+    const ptKey   = v => `${v.x.toFixed(3)},${v.y.toFixed(3)}`;
     const getNode = v => {
       const k = ptKey(v);
-      if (!nodeMap.has(k)) nodeMap.set(k, { x: v.x, y: v.y, radius: v.radius, adj: [] });
+      if (!nodeMap.has(k)) nodeMap.set(k, { x: v.x, y: v.y, radius: v.radius, adj: [], protected: false });
       return nodeMap.get(k);
     };
-
-    for (const seg of segs) {
-      const n0 = getNode(seg.point0);
-      const n1 = getNode(seg.point1);
+    for (const s of segs) {
+      const n0 = getNode(s.point0), n1 = getNode(s.point1);
       if (n0 !== n1 && !n0.adj.includes(n1)) { n0.adj.push(n1); n1.adj.push(n0); }
     }
 
-    // Extend each leaf to the two endpoints of the wall edge it faces.
-    // JSPoly's medial axis terminates at the midpoint between the two edges that form a
-    // corner — the leaf stops short at radius r, never touching the corner vertices.
-    // We cast a ray from each leaf in its outward direction (junction→leaf), find the
-    // wall edge that ray hits, then connect the leaf to both endpoints of that edge.
-    // The DFS then traverses leaf→cornerA (backtrack) leaf→cornerB at depth=flatDepth,
-    // which physically carves the V-bit tip into both corner vertices.
-    {
-      const holePtsRay = holes.map(h => stripClose([...h]));
-      const allBoundaries = [outer, ...holePtsRay];
-      const maxR = segs.reduce((m, s) => Math.max(m, s.point0.radius, s.point1.radius), 0);
+    // â”€â”€ Step 3: Identify & protect convex corners â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+    const nb = boundary.length;
+    let area = 0;
+    for (let i = 0; i < nb; i++) {
+      const j = (i + 1) % nb;
+      area += boundary[i].x * boundary[j].y - boundary[j].x * boundary[i].y;
+    }
+    for (let i = 0; i < nb; i++) {
+      const A = boundary[(i - 1 + nb) % nb];
+      const B = boundary[i];
+      const C = boundary[(i + 1) % nb];
+      const cross = (B.x - A.x) * (C.y - B.y) - (B.y - A.y) * (C.x - B.x);
+      if (cross * area <= 0) continue; // concave or flat â€” skip
+      let best = null, dMin = Infinity;
+      for (const n of nodeMap.values()) {
+        const d = (n.x - B.x) ** 2 + (n.y - B.y) ** 2;
+        if (d < dMin) { dMin = d; best = n; }
+      }
+      if (!best) continue;
+      const ck = `CV_${B.x.toFixed(3)},${B.y.toFixed(3)}`;
+      if (!nodeMap.has(ck)) nodeMap.set(ck, { x: B.x, y: B.y, radius: 0, adj: [], protected: true });
+      const cn = nodeMap.get(ck);
+      cn.protected = true;
+      if (!best.adj.includes(cn)) { best.adj.push(cn); cn.adj.push(best); }
+    }
 
-      for (const leaf of [...nodeMap.values()].filter(n => n.adj.length === 1)) {
-        const junction = leaf.adj[0];
-        const dx = leaf.x - junction.x, dy = leaf.y - junction.y;
-        const outLen = Math.hypot(dx, dy);
-        if (outLen < 1e-9) continue;
-        const nx = dx / outLen, ny = dy / outLen;
-
-        // Ray-cast in outward direction; find nearest wall edge hit.
-        let minT = Infinity, hitP1 = null, hitP2 = null;
-        for (const poly of allBoundaries) {
-          const np = poly.length;
-          for (let i = 0; i < np; i++) {
-            const p1 = poly[i], p2 = poly[(i + 1) % np];
-            const ex = p2.x - p1.x, ey = p2.y - p1.y;
-            const denom = nx * ey - ny * ex;
-            if (Math.abs(denom) < 1e-12) continue;
-            const fx = p1.x - leaf.x, fy = p1.y - leaf.y;
-            const t = (fx * ey - fy * ex) / denom;
-            const u = (fx * ny - fy * nx) / denom;
-            if (t > 1e-4 && u >= -1e-4 && u <= 1 + 1e-4 && t < minT) {
-              minT = t; hitP1 = p1; hitP2 = p2;
-            }
-          }
-        }
-
-        if (!hitP1 || minT > maxR * 4) continue;
-
-        for (const corner of [hitP1, hitP2]) {
-          const ck = `CV_${corner.x.toFixed(4)},${corner.y.toFixed(4)}`;
-          if (!nodeMap.has(ck)) nodeMap.set(ck, { x: corner.x, y: corner.y, radius: 0, adj: [] });
-          const cn = nodeMap.get(ck);
-          if (!leaf.adj.includes(cn)) { leaf.adj.push(cn); cn.adj.push(leaf); }
+    // â”€â”€ Step 4: Corner-to-Corner pruning â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+    // Iteratively delete non-protected leaves until every remaining leaf is a
+    // protected corner.  Restarting after each deletion lets cascading stubs
+    // collapse automatically, leaving only the clean spine + corner extensions.
+    let pruned = true;
+    while (pruned) {
+      pruned = false;
+      for (const [key, node] of nodeMap) {
+        if (node.adj.length === 1 && !node.protected) {
+          node.adj[0].adj = node.adj[0].adj.filter(a => a !== node);
+          nodeMap.delete(key);
+          pruned = true;
+          break;
         }
       }
     }
+    if (nodeMap.size === 0) continue;
 
-    const nodeList = [...nodeMap.values()];
-    if (nodeList.length === 0) continue;
+    // â”€â”€ Step 5: Midpoint nudging â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+    // JSPoly's Voronoi can be biased toward one wall due to polygon tessellation.
+    // For each non-protected spine node: find the two nearest boundary walls on
+    // opposite sides, move the node to their exact midpoint, and update radius.
+    // Protected corner nodes sit on the boundary (radius=0) â€” do not nudge them.
+    for (const node of nodeMap.values()) {
+      if (node.protected) continue;
+      const nudged = nudgeToCenter(node, boundary);
+      node.x      = nudged.x;
+      node.y      = nudged.y;
+      node.radius = nudged.radius;
+    }
 
-    // DFS over medial axis — each edge traversed forward + backward (covers all branches).
-    // Corner branches from JSPoly are often separate connected components, so we iterate
-    // over ALL components, not just the one containing the first leaf.
-    const edgeKey      = (a, b) => [ptKey(a), ptKey(b)].sort().join('~');
+    // â”€â”€ Step 6: Chain-based path extraction â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+    // A "chain" is a maximal run of consecutive degree-2 nodes between two
+    // junctions or leaves.  Walking chains instead of DFS-with-backtrack fixes
+    // three artifacts at once:
+    //   â€¢ No rainbow fragmentation â€” each edge visited exactly once, one direction.
+    //   â€¢ No stray cross-gap line â€” RDP chord is a short in-material vector, never
+    //     a zero-length start==end that degenerates into a distance-from-origin check.
+    //   â€¢ No false-lift ribs â€” Corner-to-Corner pruning (Step 4) already removed
+    //     every non-protected leaf, so the only chains left are spine + corner arms.
+    const edgeKey     = (a, b) => [ptKey(a), ptKey(b)].sort().join('~');
     const visitedEdges = new Set();
-    const visitedNodes = new Set();
 
-    const dfsComponent = (startNode) => {
-      const pts = [];
-      (function dfs(node) {
-        visitedNodes.add(ptKey(node));
-        pts.push({ x: node.x, y: node.y, z: zOf(node.radius) });
-        for (const nbr of node.adj) {
-          const ek = edgeKey(node, nbr);
-          if (!visitedEdges.has(ek)) {
-            visitedEdges.add(ek);
-            dfs(nbr);
-            pts.push({ x: node.x, y: node.y, z: zOf(node.radius) }); // backtrack
-          }
+    for (const [, startNode] of nodeMap) {
+      for (const neighbor of [...startNode.adj]) {
+        const ek = edgeKey(startNode, neighbor);
+        if (visitedEdges.has(ek)) continue;
+
+        // Walk the chain: follow degree-2 nodes until a junction (â‰¥3) or leaf (1)
+        const chain = [startNode];
+        let prev = startNode, cur = neighbor;
+        while (true) {
+          visitedEdges.add(edgeKey(prev, cur));
+          chain.push(cur);
+          if (cur.adj.length !== 2) break;
+          const nxt = cur.adj.find(n => n !== prev);
+          if (!nxt || visitedEdges.has(edgeKey(cur, nxt))) break;
+          prev = cur; cur = nxt;
         }
-      })(startNode);
-      return pts;
-    };
 
-    // Pick best start for a component: prefer a leaf with the smallest radius
-    const bestStart = (candidates) => {
-      const leaves = candidates.filter(n => n.adj.length === 1);
-      return (leaves.length > 0 ? leaves : candidates)
-        .reduce((a, b) => a.radius < b.radius ? a : b);
-    };
+        if (chain.length < 2) continue;
 
-    let firstComponent = true;
-    while (true) {
-      const unvisited = nodeList.filter(n => !visitedNodes.has(ptKey(n)));
-      if (unvisited.length === 0) break;
-      const start = bestStart(unvisited);
-      const pathPts = dfsComponent(start);
-      if (pathPts.length === 0) continue;
+        // â”€â”€ Step 7: RDP after nudging (arc already centred) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+        const rawPts = chain.map(n => ({ x: n.x, y: n.y, z: zOf(n.radius) }));
+        const smooth = simplify(rawPts, 0.1);
+        if (smooth.length < 2) continue;
 
-      moves.push({ type: 'rapid', x: pathPts[0].x, y: pathPts[0].y, z: safeZ });
-      moves.push({ type: 'feed',  x: pathPts[0].x, y: pathPts[0].y, z: pathPts[0].z, f: plungeRate });
-      for (let i = 1; i < pathPts.length; i++) {
-        moves.push({ type: 'feed', x: pathPts[i].x, y: pathPts[i].y, z: pathPts[i].z, f: feedRate });
+        // â”€â”€ Step 8: Safe transitions â€” rapid to safeZ before every chain â”€â”€â”€â”€â”€â”€
+        moves.push({ type: 'rapid', x: smooth[0].x, y: smooth[0].y, z: safeZ });
+        moves.push({ type: 'feed',  x: smooth[0].x, y: smooth[0].y, z: smooth[0].z, f: plungeRate });
+        smooth.slice(1).forEach(pt => moves.push({ type: 'feed', ...pt, f: feedRate }));
+        moves.push({ type: 'rapid', z: safeZ });
       }
-      moves.push({ type: 'rapid', x: pathPts.at(-1).x, y: pathPts.at(-1).y, z: safeZ });
-      firstComponent = false;
+    }
+  }
+  return { moves, warnings };
+}
+
+// â”€â”€ vcarve2: experimental F-Engrave-inspired directional V-carve â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+//
+// Adds two ideas on top of vcarve's Corner-to-Corner + Midpoint-Nudge foundation:
+//
+//  1. Directional rib filter (Step 4b): after Corner-to-Corner pruning, any
+//     remaining branch that runs nearly perpendicular (>80Â°) to its parent chain
+//     is a Voronoi rib, not a corner arm â€” delete it.
+//
+//  2. Parallel-wall Z filter (Step 7): when computing Z for a spine node, ignore
+//     boundary wall segments whose direction is within 10Â° of the spine's travel
+//     direction at that node.  The "parallel trap" is why Voronoi Z lifts the bit
+//     too early on long curves â€” the bit is running alongside a wall, the Voronoi
+//     radius shrinks, and the formula incorrectly signals shallowing.  By skipping
+//     that parallel wall and using the next-closest non-parallel wall instead,
+//     depth stays true until the channel genuinely narrows.
+//
+function generateVCarve2(op, entities, context = {}) {
+  console.log('[VCARVE-VERSION]', 'BUILD-TEST-' + Date.now());
+  const moves = [], warnings = [];
+  const p = op.params;
+
+  const halfAngleDeg = Math.max(1, Math.min(89, p.halfAngle ?? 15));
+  const tanAngle     = Math.tan(halfAngleDeg * Math.PI / 180);
+  const tipRadius    = (p.tipDiameter ?? 0) / 2;
+  const safeZ        = p.safeZ ?? 25;
+  const topZ         = p.topZ ?? 0;
+  const maxDepth     = Math.abs(p.maxDepth ?? 15);
+  const feedRate     = p.feedRate ?? 1500;
+  const plungeRate   = p.plungeRate ?? 300;
+
+  if (!op.selectedIds?.length) return { moves: [], warnings: ['Select entities'] };
+  const selected = getSelectedEntities(entities, op.selectedIds);
+  if (!selected.length) return { moves: [], warnings: ['No entities selected'] };
+  const allProfiles = buildPocketProfiles(selected);
+  if (!allProfiles.length) return { moves: [], warnings: ['No closed profiles found'] };
+
+  // Ray vs segment: returns distance t along ray, or null if no hit.
+  const raySeg = (px, py, dx, dy, ax, ay, bx, by) => {
+    const ex = bx - ax, ey = by - ay;
+    const denom = dx * ey - dy * ex;
+    if (Math.abs(denom) < 1e-12) return null;
+    const fx = ax - px, fy = ay - py;
+    const t = (fx * ey - fy * ex) / denom;
+    const s = (fx * dy - fy * dx) / denom;
+    return (t > 1e-6 && s >= 0 && s <= 1) ? t : null;
+  };
+
+  // RDP in XY, carries Z by value.
+  const rdp = (pts, tol) => {
+    if (pts.length <= 2) return pts;
+    const sq = tol * tol;
+    const reduce = (a, b) => {
+      let mi = a, md = -1;
+      const dx = pts[b].x - pts[a].x, dy = pts[b].y - pts[a].y;
+      const len2 = dx * dx + dy * dy;
+      for (let i = a + 1; i < b; i++) {
+        let d;
+        if (len2 < 1e-20) {
+          d = (pts[i].x - pts[a].x) ** 2 + (pts[i].y - pts[a].y) ** 2;
+        } else {
+          const tc = Math.max(0, Math.min(1, ((pts[i].x - pts[a].x) * dx + (pts[i].y - pts[a].y) * dy) / len2));
+          d = (pts[i].x - pts[a].x - tc * dx) ** 2 + (pts[i].y - pts[a].y - tc * dy) ** 2;
+        }
+        if (d > md) { md = d; mi = i; }
+      }
+      if (md > sq) return [...reduce(a, mi), ...reduce(mi, b)];
+      return [pts[b]];
+    };
+    return [pts[0], ...reduce(0, pts.length - 1)];
+  };
+
+  let _profileIdx = 0;
+  for (const profile of allProfiles) {
+    const _pi = _profileIdx++;
+    const boundary = stripClose([...profile]);
+    const nb = boundary.length;
+    if (nb < 3) continue;
+
+    let cx = 0, cy = 0;
+    for (const v of boundary) { cx += v.x; cy += v.y; }
+    cx /= nb; cy /= nb;
+
+    const cumLen = [0];
+    for (let i = 0; i < nb; i++) {
+      const a = boundary[i], b = boundary[(i + 1) % nb];
+      cumLen.push(cumLen[i] + Math.hypot(b.x - a.x, b.y - a.y));
+    }
+    const totalLen = cumLen[nb];
+    const sampleStep = Math.min(totalLen / 200, 1.0);
+    const numSamples = Math.ceil(totalLen / sampleStep);
+
+    // Step 1: sample boundary, cast inward ray, collect spine candidates.
+    // Build arc-length positions: uniform grid + dense cluster near each sharp
+    // corner vertex.  Near a corner where two walls converge, the cross-section
+    // narrows to zero; sampling only at the uniform grid step misses the tiny
+    // cross-sections because the corner vertex itself falls between grid points.
+    // Injecting samples at 0.02–0.5 mm from the corner forces the ray-caster to
+    // emit spine candidates with very small w (MIC → 0) right at the tip.
+    const arcPositions = [];
+    for (let k = 0; k < numSamples; k++) {
+      arcPositions.push((k + 0.5) / numSamples * totalLen);
+    }
+    for (let i = 0; i < nb; i++) {
+      const prv = boundary[(i - 1 + nb) % nb], cur = boundary[i], nxt = boundary[(i + 1) % nb];
+      const ax = prv.x - cur.x, ay = prv.y - cur.y;
+      const bx = nxt.x - cur.x, by = nxt.y - cur.y;
+      const la = Math.hypot(ax, ay), lb = Math.hypot(bx, by);
+      if (la < 1e-9 || lb < 1e-9) continue;
+      const angleDeg = Math.acos(Math.max(-1, Math.min(1, (ax * bx + ay * by) / (la * lb)))) * 180 / Math.PI;
+      if (angleDeg > 120) continue; // only dense-sample near genuinely sharp corners
+      const pos = cumLen[i];
+      for (const d of [0.005, 0.01, 0.02, 0.03, 0.05, 0.08, 0.12, 0.2, 0.35, 0.5]) {
+        if (pos - d > 0)        arcPositions.push(pos - d);
+        if (pos + d < totalLen) arcPositions.push(pos + d);
+      }
     }
 
-    if (firstComponent) continue; // no components emitted
+    const candidates = [];
+    for (const s of arcPositions) {
+      let si = 0;
+      for (let i = 0; i < nb; i++) { if (cumLen[i + 1] >= s) { si = i; break; } }
+      const A = boundary[si], B = boundary[(si + 1) % nb];
+      const segLen = cumLen[si + 1] - cumLen[si];
+      const frac   = segLen > 1e-9 ? (s - cumLen[si]) / segLen : 0;
+      const px = A.x + frac * (B.x - A.x);
+      const py = A.y + frac * (B.y - A.y);
+      const el = segLen || 1;
+      const ex = (B.x - A.x) / el, ey = (B.y - A.y) / el;
+      const lx = -ey, ly = ex;
+      const inward = (lx * (cx - px) + ly * (cy - py)) >= 0;
+      const nx = inward ? lx : ey;
+      const ny = inward ? ly : -ex;
+
+      let bestT = Infinity;
+      for (let i = 0; i < nb; i++) {
+        const C = boundary[i], D = boundary[(i + 1) % nb];
+        const hit = raySeg(px, py, nx, ny, C.x, C.y, D.x, D.y);
+        if (hit !== null && hit < bestT) bestT = hit;
+      }
+      if (!isFinite(bestT)) continue;
+
+      const halfW = bestT / 2;
+      const mx = px + nx * halfW;
+      const my = py + ny * halfW;
+
+      let inside = false;
+      for (let i = 0; i < nb; i++) {
+        const ci = boundary[i], di = boundary[(i + 1) % nb];
+        if ((ci.y > my) !== (di.y > my)) {
+          const xc = ci.x + (my - ci.y) / (di.y - ci.y) * (di.x - ci.x);
+          if (mx < xc) inside = !inside;
+        }
+      }
+      if (!inside) continue;
+
+      const depth = Math.min(maxDepth, Math.max(0, (halfW - tipRadius) / tanAngle));
+      candidates.push({ x: mx, y: my, z: topZ - depth, w: bestT, s });
+    }
+    if (candidates.length < 2) continue;
+
+    // Step 2: reject longitudinal samples whose width >> median cross-sectional width.
+    const sorted  = [...candidates].sort((a, b) => a.w - b.w);
+    const medianW = sorted[Math.floor(sorted.length / 2)].w;
+    const filtered = candidates.filter(c => c.w <= medianW * 2.2);
+    if (filtered.length < 2) continue;
+
+    // Diagnostic A: does the raw skeleton contain near-zero MIC points at all?
+    const minWFiltered = Math.min(...filtered.map(p => p.w));
+    console.log('[vcarve2 min-mic] after-filter:', (minWFiltered / 2).toFixed(3), 'mm  median:', (medianW / 2).toFixed(3), 'mm  pts:', filtered.length, 'profile#', _pi);
+
+    // Step 3: global spatial deduplication.  Keep w (= full ray distance = 2×MIC)
+    // so downstream steps can distinguish genuine terminal nodes (w → 0) from noise.
+    // Only merge two nearby candidates when their w values are within 4× of each other —
+    // a corner-tip sample (w≈0.14) and a stroke-body sample (w≈2.4) are at genuinely
+    // different spine locations and must NOT be collapsed together.
+    const MERGE_D = sampleStep * 0.6;
+    const deduped = [];
+    for (const c of filtered) {
+      let merged = false;
+      for (const d of deduped) {
+        // Adaptive merge radius: two spine points may only merge when their
+        // spatial distance is less than the smaller of their two MIC radii.
+        // This prevents a corner-tip node (halfW≈0.07mm) from being collapsed
+        // into a nearby stroke-body node (halfW≈0.28mm) that is 0.2mm away —
+        // they represent genuinely different medial-axis locations.
+        const mergeThresh = Math.min(MERGE_D, c.w / 2, d.w / 2);
+        if (Math.hypot(c.x - d.x, c.y - d.y) < mergeThresh) {
+          if (c.z < d.z) { d.z = c.z; d.w = c.w; }
+          merged = true; break;
+        }
+      }
+      if (!merged) deduped.push({ x: c.x, y: c.y, z: c.z, w: c.w, s: c.s });
+    }
+    const minWDeduped = deduped.length ? Math.min(...deduped.map(p => p.w)) : Infinity;
+    console.log('[vcarve2 min-mic] after-dedup:', (minWDeduped / 2).toFixed(3), 'mm  pts:', deduped.length, 'profile#', _pi);
+    if (deduped.length < 2) continue;
+
+    // Step 4: order by boundary arc-length parameter s.
+    // Each candidate records the arc-length position on the boundary where its
+    // inward ray was cast; sorting by s makes the toolpath trace the contour in
+    // boundary order.  Depth rises naturally at every serif corner tip as the
+    // local half-width → 0.  No proximity graph or branch pruning needed.
+    deduped.sort((a, b) => a.s - b.s);
+    const ordered = [];
+    for (let i = 0; i < deduped.length; i++) {
+      const pt = { ...deduped[i] };
+      if (i > 0) {
+        const prev = ordered[ordered.length - 1];
+        if (Math.hypot(pt.x - prev.x, pt.y - prev.y) > sampleStep * 4) pt.breakPath = true;
+      }
+      ordered.push(pt);
+    }
+    console.log('[vcarve2 s-sort]', `profile#${_pi} pts=${ordered.length} s-range=[${deduped[0].s.toFixed(1)},${deduped[deduped.length-1].s.toFixed(1)}]`);
+    if (ordered.length < 2) continue;
+
+    // Step 4.5: remove isolated Z spikes within each continuous segment.
+    for (let i = ordered.length - 2; i >= 1; i--) {
+      if (ordered[i].breakPath || ordered[i + 1]?.breakPath) continue;
+      if (ordered[i].z < ordered[i - 1].z - 0.3 && ordered[i].z < ordered[i + 1].z - 0.3)
+        ordered.splice(i, 1);
+    }
+
+    // Step 5: split into continuous segments (deep-clone to avoid mutation).
+    // Carry w so Step 6 can log back-calculated MIC radius.
+    const segments = [];
+    let seg = [{ x: ordered[0].x, y: ordered[0].y, z: ordered[0].z, w: ordered[0].w }];
+    for (let i = 1; i < ordered.length; i++) {
+      if (ordered[i].breakPath) {
+        segments.push(seg);
+        seg = [{ x: ordered[i].x, y: ordered[i].y, z: ordered[i].z, w: ordered[i].w }];
+      } else {
+        seg.push({ x: ordered[i].x, y: ordered[i].y, z: ordered[i].z, w: ordered[i].w });
+      }
+    }
+    segments.push(seg);
+
+    // Step 6: orient, optionally split, RDP-smooth, and emit each segment.
+    //
+    // Three cases based on where the min-mic (narrowest = shallowest) point sits:
+    //   end   (>90%): clean terminal branch already ordered junction→tip — emit as-is
+    //   start (<10%): terminal branch traversed tip-first — reverse so tip is at tail
+    //   middle       : through-stroke crossing a waist — split at the waist into two
+    //                  sub-segments, each running from the waist outward to its arm end
+    //
+    // This ensures every emitted path ends at the shallowest point (or starts there
+    // for split arms), so the bit rises naturally to the surface at corner tips.
+    const segsToEmit = [];
+    for (const segment of segments) {
+      if (segment.length < 1) continue;
+
+      let minW = Infinity, minIdx = 0;
+      for (let i = 0; i < segment.length; i++) {
+        const w = segment[i].w ?? Infinity;
+        if (w < minW) { minW = w; minIdx = i; }
+      }
+      const relPos = minIdx / Math.max(1, segment.length - 1);
+      const posLabel = relPos < 0.1 ? 'start' : relPos > 0.9 ? 'end' : 'middle';
+      console.log('[vcarve2 order]', `len=${segment.length} min-mic=${(minW / 2).toFixed(3)} at=${posLabel}(idx=${minIdx})`);
+
+      if (posLabel === 'end') {
+        // Tip at tail — trim any straggler points past the minimum.
+        segsToEmit.push(segment.slice(0, minIdx + 1));
+      } else if (posLabel === 'start' && minIdx === 0) {
+        // Tip is the very first point — just reverse the whole segment.
+        console.log('[vcarve2 reversed]', 'minIdx=0, reversing whole segment');
+        segsToEmit.push([...segment].reverse());
+      } else {
+        // minIdx is in the middle OR near the start with pre-tip nodes.
+        // Pre-tip nodes (original[0..minIdx-1]) may be a second Y-arm traversed
+        // before the min-mic point — emit them as a separate forward-order segment
+        // (junction → its own tip) so both serif arms get cut.
+        if (minIdx > 0) {
+          console.log('[vcarve2 split-pre]', `emitting ${minIdx} pre-tip nodes as second arm`);
+          segsToEmit.push(segment.slice(0, minIdx)); // second arm: already tip-at-end order
+        }
+        // Main segment reversed so the min-mic tip is at the tail.
+        console.log('[vcarve2 split-main]', `emitting ${segment.length - minIdx} main nodes reversed`);
+        segsToEmit.push([...segment.slice(minIdx)].reverse());
+      }
+    }
+
+    for (const seg of segsToEmit) {
+      const smooth = rdp(seg, 0.03);
+      if (smooth.length < 1) continue;
+
+      // Diagnostic: last-5 MIC/Z values to confirm the tip is rising.
+      const tail = smooth.slice(-Math.min(5, smooth.length));
+      console.log('[vcarve2 tail]', `len=${smooth.length}`, tail.map(pt => {
+        const mic = pt.w != null ? pt.w / 2 : (topZ - pt.z) * tanAngle + tipRadius;
+        return `mic=${mic.toFixed(3)} z=${pt.z.toFixed(3)}`;
+      }).join(' → '));
+
+      moves.push({ type: 'rapid', x: smooth[0].x, y: smooth[0].y, z: safeZ });
+      moves.push({ type: 'feed',  x: smooth[0].x, y: smooth[0].y, z: smooth[0].z, f: plungeRate });
+      for (let i = 1; i < smooth.length; i++)
+        moves.push({ type: 'feed', x: smooth[i].x, y: smooth[i].y, z: smooth[i].z, f: feedRate });
+      moves.push({ type: 'rapid', z: safeZ });
+    }
   }
 
   return { moves, warnings };
 }
 
+// ── Corner Lift diagnostic ──────────────────────────────────────────────────
+// For each sharp concave corner, walks the angle bisector inward from the tip
+// and computes V-bit depth at each step.  Nearby corners (same serif) are
+// merged into a single Y-branch path so their walks don't cross.
+
+function _cornerLiftPaths(op, entities) {
+  const p = op.params;
+  const halfAngleDeg  = Math.max(1, Math.min(89, p.halfAngle ?? 15));
+  const tanAngle      = Math.tan(halfAngleDeg * Math.PI / 180);
+  const tipRadius     = (p.tipDiameter ?? 0) / 2;
+  const topZ          = p.topZ ?? 0;
+  const maxDepth      = Math.abs(p.maxDepth ?? 15);
+  const cornerThresh  = p.cornerAngle ?? 110;
+  const stepSize      = 0.1;
+  const minSegLen     = 0.5;
+  const clusterRadius = 10.0; // corners within this distance share a Y-branch
+
+  if (!op.selectedIds?.length) return [];
+  const selected = getSelectedEntities(entities, op.selectedIds);
+  if (!selected.length) return [];
+  const allProfiles = buildPocketProfiles(selected);
+  if (!allProfiles.length) return [];
+
+  const ptSegDist = (px, py, ax, ay, bx, by) => {
+    const dx = bx - ax, dy = by - ay;
+    const len2 = dx*dx + dy*dy;
+    if (len2 < 1e-20) return Math.hypot(px-ax, py-ay);
+    const t = Math.max(0, Math.min(1, ((px-ax)*dx + (py-ay)*dy) / len2));
+    return Math.hypot(px - (ax + t*dx), py - (ay + t*dy));
+  };
+
+  // Returns clusters: [{ paths: [{x,y,z},...], type: 'single'|'y-branch' }]
+  const clusters = [];
+  console.log('[cornerlift] profiles found:', allProfiles.length);
+
+  for (const profile of allProfiles) {
+    const boundary = stripClose([...profile]);
+    const nb = boundary.length;
+    if (nb < 3) continue;
+
+    const cw = isClockwise(boundary);
+    console.log('[cornerlift] profile: vertices=', nb, 'isClockwise=', cw,
+      'polygonArea=', polygonArea(boundary).toFixed(3));
+
+    const stopDist = maxDepth * tanAngle + tipRadius + 1.0;
+
+    // ── Pass 1: find qualifying corners — position + bisector direction only,
+    //           no walk generated yet.  Clustering must happen before walking so
+    //           paired corners can use each other's position for stopping. ─────
+    const candidates = []; // { idx, cur:{x,y}, dx, dy }
+
+    for (let i = 0; i < nb; i++) {
+      const prv = boundary[(i - 1 + nb) % nb];
+      const cur = boundary[i];
+      const nxt = boundary[(i + 1) % nb];
+
+      // Incoming direction: from cur back toward the previous segment.
+      // If the incoming segment is an arc, use its true tangent at cur (negated
+      // to point backward) instead of the chord to prv, which may be very short.
+      let ax, ay, la;
+      if (cur._arcTangentIn) {
+        ax = -cur._arcTangentIn.dx;
+        ay = -cur._arcTangentIn.dy;
+        la = 1; // unit vector — bypass the minSegLen chord-length check
+      } else {
+        ax = prv.x - cur.x; ay = prv.y - cur.y;
+        la = Math.hypot(ax, ay);
+        if (la < minSegLen) continue;
+      }
+
+      // Outgoing direction: from cur toward the next segment.
+      // Same logic for arc starts.
+      let bx, by, lb;
+      if (cur._arcTangentOut) {
+        bx = cur._arcTangentOut.dx;
+        by = cur._arcTangentOut.dy;
+        lb = 1;
+      } else {
+        bx = nxt.x - cur.x; by = nxt.y - cur.y;
+        lb = Math.hypot(bx, by);
+        if (lb < minSegLen) continue;
+      }
+
+      const cross = ax * by - ay * bx;
+      const isConcave = cw ? (cross > 0) : (cross < 0);
+
+      const cosA = Math.max(-1, Math.min(1, (ax*bx + ay*by) / (la*lb)));
+      const wedgeAngle = Math.acos(cosA) * 180 / Math.PI;
+
+      const verdict = !isConcave ? 'skip(convex)'
+        : wedgeAngle > cornerThresh ? `skip(angle>${cornerThresh}°)` : 'LIFT';
+      console.log('[cornerlift] v#' + i,
+        `(${cur.x.toFixed(3)},${cur.y.toFixed(3)})`,
+        isConcave ? 'CONCAVE' : 'convex',
+        `wedge=${wedgeAngle.toFixed(1)}°  cross=${cross.toFixed(4)}  → ${verdict}`);
+
+      if (!isConcave || wedgeAngle > cornerThresh) continue;
+
+      const biX = ax/la + bx/lb, biY = ay/la + by/lb;
+      const biL = Math.hypot(biX, biY);
+      if (biL < 1e-9) continue;
+
+      let dx = -biX/biL, dy = -biY/biL;
+      if (!pointInPolygon({ x: cur.x + dx * 0.5, y: cur.y + dy * 0.5 }, boundary)) {
+        dx = -dx; dy = -dy;
+      }
+
+      candidates.push({ idx: i, cur: { x: cur.x, y: cur.y }, dx, dy });
+    }
+
+    // ── Pass 2: cluster candidates within clusterRadius ────────────────────
+    const used = new Set();
+    const clusterGroups = [];
+    for (let a = 0; a < candidates.length; a++) {
+      if (used.has(a)) continue;
+      used.add(a);
+      const group = [candidates[a]];
+      for (let b = a + 1; b < candidates.length; b++) {
+        if (used.has(b)) continue;
+        if (Math.hypot(candidates[a].cur.x - candidates[b].cur.x,
+            candidates[a].cur.y - candidates[b].cur.y) < clusterRadius) {
+          group.push(candidates[b]);
+          used.add(b);
+        }
+      }
+      clusterGroups.push(group);
+    }
+
+    // ── Pass 3: generate walks with cluster-appropriate stopping ───────────
+    //
+    // Single corner: stop when wallDist peaks (crossed the stroke medial axis).
+    //
+    // Paired corners (same serif): each arm stops at the PERPENDICULAR BISECTOR
+    // Single-corner walk: follow bisector direction, stop when wallDist peaks.
+    const makeWalkSingle = (cand, boundary, nb) => {
+      const path = [];
+      let px = cand.cur.x, py = cand.cur.y;
+      let peakWallDist = 0;
+      for (let step = 0; step <= 200; step++) {
+        let wallDist = Infinity;
+        for (let j = 0; j < nb; j++) {
+          const d = ptSegDist(px, py,
+            boundary[j].x, boundary[j].y,
+            boundary[(j+1)%nb].x, boundary[(j+1)%nb].y);
+          if (d < wallDist) wallDist = d;
+        }
+        if (wallDist > peakWallDist) peakWallDist = wallDist;
+        if (step > 3 && wallDist < peakWallDist - stepSize) break;
+        const z = topZ - Math.max(0, Math.min(maxDepth, (wallDist - tipRadius) / tanAngle));
+        path.push({ x: px, y: py, z });
+        if (wallDist >= stopDist) break;
+        px += cand.dx * stepSize;
+        py += cand.dy * stepSize;
+      }
+      return path;
+    };
+
+    // Paired-corner walk: straight line from corner tip to junction.
+    // The junction is pre-computed so both arms share exactly the same endpoint.
+    const makeWalkToJunction = (cand, jx, jy, jz, boundary, nb) => {
+      const path = [];
+      const totalDist = Math.hypot(jx - cand.cur.x, jy - cand.cur.y);
+      if (totalDist < stepSize) return path;
+      const dirX = (jx - cand.cur.x) / totalDist;
+      const dirY = (jy - cand.cur.y) / totalDist;
+      const numSteps = Math.ceil(totalDist / stepSize);
+      for (let step = 0; step <= numSteps; step++) {
+        const t = Math.min(step * stepSize, totalDist);
+        const px = cand.cur.x + dirX * t;
+        const py = cand.cur.y + dirY * t;
+        let wallDist = Infinity;
+        for (let j = 0; j < nb; j++) {
+          const d = ptSegDist(px, py,
+            boundary[j].x, boundary[j].y,
+            boundary[(j+1)%nb].x, boundary[(j+1)%nb].y);
+          if (d < wallDist) wallDist = d;
+        }
+        const z = topZ - Math.max(0, Math.min(maxDepth, (wallDist - tipRadius) / tanAngle));
+        path.push({ x: px, y: py, z });
+      }
+      // Snap last point to exact junction so both arms share the same coordinate.
+      if (path.length > 0) path[path.length - 1] = { x: jx, y: jy, z: jz };
+      return path;
+    };
+
+    for (const group of clusterGroups) {
+      const isPaired = group.length >= 2;
+      // For clusters > 2, keep the two with the most separation (widest serif).
+      if (group.length > 2) {
+        group.sort((a, b) => {
+          const dA = Math.hypot(a.cur.x - group[0].cur.x, a.cur.y - group[0].cur.y);
+          const dB = Math.hypot(b.cur.x - group[0].cur.x, b.cur.y - group[0].cur.y);
+          return dB - dA;
+        });
+        group.splice(2);
+      }
+
+      const paths = [];
+
+      if (!isPaired) {
+        const path = makeWalkSingle(group[0], boundary, nb);
+        if (path.length >= 2) {
+          console.log('[cornerlift] single v#' + group[0].idx + ' steps=' + path.length,
+            `tip-z=${path[0].z.toFixed(3)} end-z=${path[path.length-1].z.toFixed(3)}`);
+          paths.push(path);
+        }
+      } else {
+        const ca = group[0], cb = group[1];
+
+        // Find junction = intersection of bisector rays from ca and cb.
+        // Ray from ca: P = ca.cur + t * (ca.dx, ca.dy)
+        // Ray from cb: P = cb.cur + s * (cb.dx, cb.dy)
+        // Solving: t*ca.dx - s*cb.dx = ex,  t*ca.dy - s*cb.dy = ey
+        // det = ca.dy*cb.dx - ca.dx*cb.dy,  t = (cb.dx*ey - cb.dy*ex) / det
+        const ex = cb.cur.x - ca.cur.x, ey = cb.cur.y - ca.cur.y;
+        const det = ca.dy * cb.dx - ca.dx * cb.dy;
+        const midX = (ca.cur.x + cb.cur.x) / 2;
+        const midY = (ca.cur.y + cb.cur.y) / 2;
+
+        let jx = midX, jy = midY;
+        if (Math.abs(det) > 1e-6) {
+          const t = (cb.dx * ey - cb.dy * ex) / det;
+          if (t > 0 && t < 40) {
+            jx = ca.cur.x + t * ca.dx;
+            jy = ca.cur.y + t * ca.dy;
+          }
+          // t <= 0 means rays diverge — fall back to midpoint M.
+        }
+
+        // Compute junction Z from wallDist at junction point.
+        let jWallDist = Infinity;
+        for (let j = 0; j < nb; j++) {
+          const d = ptSegDist(jx, jy,
+            boundary[j].x, boundary[j].y,
+            boundary[(j+1)%nb].x, boundary[(j+1)%nb].y);
+          if (d < jWallDist) jWallDist = d;
+        }
+        const jz = topZ - Math.max(0, Math.min(maxDepth, (jWallDist - tipRadius) / tanAngle));
+
+        console.log('[cornerlift] Y-branch v#' + ca.idx + ' + v#' + cb.idx,
+          `det=${det.toFixed(4)} junc=(${jx.toFixed(3)},${jy.toFixed(3)},${jz.toFixed(3)})`);
+
+        for (const cand of [ca, cb]) {
+          const path = makeWalkToJunction(cand, jx, jy, jz, boundary, nb);
+          if (path.length >= 2) {
+            console.log('[cornerlift] → v#' + cand.idx + ' steps=' + path.length,
+              `tip-z=${path[0].z.toFixed(3)} junc-z=${path[path.length-1].z.toFixed(3)}`);
+            paths.push(path);
+          }
+        }
+      }
+
+      if (paths.length === 0) continue;
+      clusters.push({ paths, type: isPaired && paths.length === 2 ? 'y-branch' : 'single' });
+    }
+  }
+
+  return clusters;
+}
+
+export function computeCornerLiftPolylines(op, entities) {
+  // Each cluster contributes one polyline per arm so the canvas shows the full Y.
+  return _cornerLiftPaths(op, entities)
+    .flatMap(({ paths }) => paths.map(path => path.map(pt => ({ x: pt.x, y: pt.y }))));
+}
+
+function generateCornerLift(op, entities, context = {}) {
+  const moves = [], warnings = [];
+  const p = op.params;
+  const safeZ      = p.safeZ ?? 25;
+  const feedRate   = p.feedRate ?? 1500;
+  const plungeRate = p.plungeRate ?? 300;
+
+  const clusters = _cornerLiftPaths(op, entities);
+  if (clusters.length === 0) {
+    warnings.push('No sharp corners found — try raising the Corner Angle threshold');
+    return { moves, warnings };
+  }
+
+  for (const { paths, type } of clusters) {
+    if (type === 'single') {
+      const [path] = paths;
+      moves.push({ type: 'rapid', z: safeZ });
+      moves.push({ type: 'rapid', x: path[0].x, y: path[0].y, z: safeZ });
+      moves.push({ type: 'feed',  x: path[0].x, y: path[0].y, z: path[0].z, f: plungeRate });
+      for (let i = 1; i < path.length; i++)
+        moves.push({ type: 'feed', x: path[i].x, y: path[i].y, z: path[i].z, f: feedRate });
+      moves.push({ type: 'rapid', z: safeZ });
+    } else {
+      // Y-branch: enter at corner1 tip, deepen along arm1 to junction,
+      // bridge to arm2 junction, then rise along arm2 reversed to corner2 tip.
+      const [path1, path2] = paths;
+      const j1 = path1[path1.length - 1];
+      const j2 = path2[path2.length - 1];
+      moves.push({ type: 'rapid', z: safeZ });
+      moves.push({ type: 'rapid', x: path1[0].x, y: path1[0].y, z: safeZ });
+      moves.push({ type: 'feed',  x: path1[0].x, y: path1[0].y, z: path1[0].z, f: plungeRate });
+      for (let i = 1; i < path1.length; i++)
+        moves.push({ type: 'feed', x: path1[i].x, y: path1[i].y, z: path1[i].z, f: feedRate });
+      // Bridge between the two arm endpoints (negligible for symmetric serifs).
+      if (Math.hypot(j1.x - j2.x, j1.y - j2.y) > 0.01)
+        moves.push({ type: 'feed', x: j2.x, y: j2.y, z: Math.min(j1.z, j2.z), f: feedRate });
+      // Rise along arm2 reversed toward corner2 tip.
+      for (let i = path2.length - 2; i >= 0; i--)
+        moves.push({ type: 'feed', x: path2[i].x, y: path2[i].y, z: path2[i].z, f: feedRate });
+      moves.push({ type: 'rapid', z: safeZ });
+    }
+  }
+
+  return { moves, warnings };
+}
 
 function generateTaperedPocket(op, entities, context = {}) {
   const p = op.params;
   const warnings = [];
-  // Require explicit entity selection — falling back to all entities risks picking
+  // Require explicit entity selection â€” falling back to all entities risks picking
   // up stock boundary rectangles or other reference geometry as the pocket outline.
   if (!op.selectedIds?.length) {
     return { moves: [], subToolpaths: [], warnings: ['Select specific entities before calculating Tapered Pocket'] };
@@ -1296,7 +1945,7 @@ function generateTaperedPlug(op, entities, context = {}) {
   const plugParams = p.cutSide != null ? p : { ...p, cutSide: 'outside' };
   const result = buildTaperedPasses(selected, plugTopZ, depth, safeZ, plugParams, warnings, stockBound);
 
-  // Optional outer boundary contour — same logic as CAD "Offset & Union":
+  // Optional outer boundary contour â€” same logic as CAD "Offset & Union":
   // expand only outer contours (skip inner islands detected by centroid containment),
   // offset each outward with round joins, union into one perimeter, then profile-cut it.
   if (p.boundaryEnabled && (p.boundaryOffset ?? 0) > 0) {
@@ -1352,7 +2001,7 @@ function generateTaperedPlug(op, entities, context = {}) {
                 name: 'Boundary Cut',
                 color: '#cc44ff',
                 toolKey:  useEm.toolId ?? 'bulkEndmill',
-                toolDesc: `Endmill ⌀${useEm.diameter || 6.35}mm`,
+                toolDesc: `Endmill âŒ€${useEm.diameter || 6.35}mm`,
                 rpm: useEm.rpm || 18000,
                 moves: bndMoves,
               });
@@ -1384,9 +2033,9 @@ function buildTaperedPasses(selected, topZ, depth, safeZ, p, warnings, stockBoun
   const wallRad   = Math.max(0.5, wallAngle / 2) * Math.PI / 180;
 
   // Build profiles from selected entities.  All profiles are machined (taper trace +
-  // clearing).  buildPocketClearing / buildPlugClearing internally sort by area so the
-  // largest profile becomes the outer clearing boundary and smaller ones become island
-  // exclusions — no need to split them here.
+  // clearing).  buildPocketClearing groups them by containment so spatially-separate
+  // shapes (e.g. letters "C" and "L") each get independent clearing, while truly
+  // nested profiles (e.g. the counter inside "O") become island exclusions.
   const allProfiles = buildPocketProfiles(selected);
   allProfiles.sort((a, b) => Math.abs(polygonArea(b)) - Math.abs(polygonArea(a)));
   const partProfiles = allProfiles;
@@ -1394,31 +2043,22 @@ function buildTaperedPasses(selected, topZ, depth, safeZ, p, warnings, stockBoun
 
   const subToolpaths = [];
 
-  if (tc.enabled !== false) {
-    const tcRad = Math.max(0.5, (tc.angle || 10) / 2) * Math.PI / 180;
-    subToolpaths.push({
-      name: 'Taper Contour', color: '#ff8844',
-      toolKey:  tc.toolId ?? 'taper',
-      toolDesc: `Taper bit — tip ⌀${tc.tipDia || 0.5}mm  ${tc.angle || 10}° half-angle`,
-      rpm: tc.rpm || 24000,
-      moves: buildTaperTrace(selected, topZ, depth, safeZ, tc.feed || 1000, tc.plunge || 300, tcRad, cutSide, (tc.tipDia || 0) / 2, p.sharpCornerAngle ?? 180, tc.leadInStyle || 'plunge', tc.leadInRampAngle || 3, tc.leadInArcRadius || 0, partProfiles),
-    });
-  }
+  // Operation order: clearing first (Bulk â†’ Detail), taper traces last (Cleanup â†’ Contour).
+  // Clearing must run before the taper trace so the endmill can reach right to the profile
+  // boundary on clean stock; the taper bit then cuts the finished tapered wall last.
 
-  if (tk.enabled !== false) {
-    const tkRad = Math.max(0.5, (tk.angle || 10) / 2) * Math.PI / 180;
-    const tipR  = (tk.tipDia || 0.5) / 2;
+  if (be.enabled !== false) {
+    const beR = (be.diameter || 6.35) / 2;
+    const beDepthPerPass = be.depthPerPass || be.diameter || 6.35;
+    const bePrevR = be.restMachining && (be.prevDiameter || 0) > 0 ? be.prevDiameter / 2 : 0;
     subToolpaths.push({
-      name: 'Taper Cleanup', color: '#ffcc44',
-      toolKey:  tk.toolId ?? 'taper',
-      toolDesc: `Taper bit — tip ⌀${tk.tipDia || 0.5}mm  ${tk.angle || 10}° half-angle`,
-      rpm: tk.rpm || 24000,
-      // Single contour trace at final wall position — not a clearing pass.
-      // Reaches all profiles (including inner contours) unlike clearFn which treats
-      // inner profiles as island exclusions.
-      moves: buildTaperTrace(selected, topZ, depth, safeZ,
-        tk.feed || 1000, tk.plunge || 300, tkRad, cutSide, tipR,
-        p.sharpCornerAngle ?? 180, tk.leadInStyle || 'plunge', tk.leadInRampAngle || 3, tk.leadInArcRadius || 0, partProfiles),
+      name: 'Bulk Endmill', color: '#4499ff',
+      toolKey:  be.toolId ?? 'bulkEndmill',
+      toolDesc: `Endmill âŒ€${be.diameter || 6.35}mm`,
+      rpm: be.rpm || 18000,
+      moves: clearFn(selected, topZ, depth, safeZ,
+        beR, beDepthPerPass, be.wallStock || 0.254, be.feed || 1500, be.plunge || 500,
+        wallRad, 'Bulk Endmill', warnings, bePrevR, effectiveClipBound, be.leadInStyle || 'plunge', be.leadInArcRadius || 0, partProfiles),
     });
   }
 
@@ -1429,7 +2069,7 @@ function buildTaperedPasses(selected, topZ, depth, safeZ, p, warnings, stockBoun
     subToolpaths.push({
       name: 'Detail Endmill', color: '#44ff88',
       toolKey:  de.toolId ?? 'detailEndmill',
-      toolDesc: `Endmill ⌀${de.diameter || 1.5875}mm`,
+      toolDesc: `Endmill âŒ€${de.diameter || 1.5875}mm`,
       rpm: de.rpm || 18000,
       moves: clearFn(selected, topZ, depth, safeZ,
         deR, deDepthPerPass, de.wallStock || 0.254, de.feed || 800, de.plunge || 300,
@@ -1437,18 +2077,31 @@ function buildTaperedPasses(selected, topZ, depth, safeZ, p, warnings, stockBoun
     });
   }
 
-  if (be.enabled !== false) {
-    const beR = (be.diameter || 6.35) / 2;
-    const beDepthPerPass = be.depthPerPass || be.diameter || 6.35;
-    const bePrevR = be.restMachining && (be.prevDiameter || 0) > 0 ? be.prevDiameter / 2 : 0;
+  if (tk.enabled !== false) {
+    const tkRad = Math.max(0.5, (tk.angle || 10) / 2) * Math.PI / 180;
+    const tipR  = (tk.tipDia || 0.5) / 2;
     subToolpaths.push({
-      name: 'Bulk Endmill', color: '#4499ff',
-      toolKey:  be.toolId ?? 'bulkEndmill',
-      toolDesc: `Endmill ⌀${be.diameter || 6.35}mm`,
-      rpm: be.rpm || 18000,
-      moves: clearFn(selected, topZ, depth, safeZ,
-        beR, beDepthPerPass, be.wallStock || 0.254, be.feed || 1500, be.plunge || 500,
-        wallRad, 'Bulk Endmill', warnings, bePrevR, effectiveClipBound, be.leadInStyle || 'plunge', be.leadInArcRadius || 0, partProfiles),
+      name: 'Taper Cleanup', color: '#ffcc44',
+      toolKey:  tk.toolId ?? 'taper',
+      toolDesc: `Taper bit â€” tip âŒ€${tk.tipDia || 0.5}mm  ${tk.angle || 10}Â° half-angle`,
+      rpm: tk.rpm || 24000,
+      // Single contour trace at final wall position â€” not a clearing pass.
+      // Reaches all profiles (including inner contours) unlike clearFn which treats
+      // inner profiles as island exclusions.
+      moves: buildTaperTrace(selected, topZ, depth, safeZ,
+        tk.feed || 1000, tk.plunge || 300, tkRad, cutSide, tipR,
+        p.sharpCornerAngle ?? 180, tk.leadInStyle || 'plunge', tk.leadInRampAngle || 3, tk.leadInArcRadius || 0, partProfiles),
+    });
+  }
+
+  if (tc.enabled !== false) {
+    const tcRad = Math.max(0.5, (tc.angle || 10) / 2) * Math.PI / 180;
+    subToolpaths.push({
+      name: 'Taper Contour', color: '#ff8844',
+      toolKey:  tc.toolId ?? 'taper',
+      toolDesc: `Taper bit â€” tip âŒ€${tc.tipDia || 0.5}mm  ${tc.angle || 10}Â° half-angle`,
+      rpm: tc.rpm || 24000,
+      moves: buildTaperTrace(selected, topZ, depth, safeZ, tc.feed || 1000, tc.plunge || 300, tcRad, cutSide, (tc.tipDia || 0) / 2, p.sharpCornerAngle ?? 180, tc.leadInStyle || 'plunge', tc.leadInRampAngle || 3, tc.leadInArcRadius || 0, partProfiles),
     });
   }
 
@@ -1456,7 +2109,7 @@ function buildTaperedPasses(selected, topZ, depth, safeZ, p, warnings, stockBoun
   return { moves, subToolpaths, warnings };
 }
 
-// ── Corner-relief helpers ─────────────────────────────────────────────────────
+// â”€â”€ Corner-relief helpers â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 // Cumulative arc lengths for a closed polygon (no closing point assumed).
 function cumArcLen(pts) {
@@ -1467,17 +2120,17 @@ function cumArcLen(pts) {
 }
 
 // For each contour point, compute the inscribed circle radius: the largest circle
-// centred at (P + r·n_P) — where n_P is the inward normal at P — that fits inside
+// centred at (P + rÂ·n_P) â€” where n_P is the inward normal at P â€” that fits inside
 // the polygon without crossing any non-adjacent boundary segment.
 //
 // Apollonius formula for segment j with inward normal n_j:
-//   r = L_P / (1 − n_P · n_j)
-// where L_P = n_j · (P − A) is the signed distance from P to the line of segment j.
-// When n_P · n_j ≈ 1 (nearly parallel, same direction — dense tessellation neighbours),
-// the denominator collapses to ≈ 0 and the constraint is skipped automatically.
+//   r = L_P / (1 âˆ’ n_P Â· n_j)
+// where L_P = n_j Â· (P âˆ’ A) is the signed distance from P to the line of segment j.
+// When n_P Â· n_j â‰ˆ 1 (nearly parallel, same direction â€” dense tessellation neighbours),
+// the denominator collapses to â‰ˆ 0 and the constraint is skipped automatically.
 // Endpoint constraints handle cases where the circle centre projects past a segment end.
 //
-// Used by:  maxDepth = (r_inscribed − tipRadius) / tan(halfAngle)
+// Used by:  maxDepth = (r_inscribed âˆ’ tipRadius) / tan(halfAngle)
 function computeContourLocalWidths(rawPts) {
   const cw  = isClockwise(rawPts);
   const pts = cw ? [...rawPts].reverse() : rawPts;
@@ -1489,7 +2142,7 @@ function computeContourLocalWidths(rawPts) {
     const curr = pts[i];
     const next = pts[(i + 1) % n];
 
-    // Inward normal at vertex i: average adjacent-edge tangents, rotate 90° CCW.
+    // Inward normal at vertex i: average adjacent-edge tangents, rotate 90Â° CCW.
     const t1x = curr.x - prev.x, t1y = curr.y - prev.y;
     const t2x = next.x - curr.x, t2y = next.y - curr.y;
     const l1  = Math.hypot(t1x, t1y) || 1, l2 = Math.hypot(t2x, t2y) || 1;
@@ -1507,7 +2160,7 @@ function computeContourLocalWidths(rawPts) {
       const ax = pts[j].x,  ay = pts[j].y;
       const bx = pts[j2].x, by = pts[j2].y;
 
-      // Inward normal of segment j (CCW polygon: rotate edge vector 90° CCW).
+      // Inward normal of segment j (CCW polygon: rotate edge vector 90Â° CCW).
       const ex = bx - ax, ey = by - ay;
       const el = Math.hypot(ex, ey);
       if (el < 1e-10) continue;
@@ -1515,10 +2168,10 @@ function computeContourLocalWidths(rawPts) {
 
       // Signed distance from curr to the line of segment j (positive = inside polygon).
       const lp = njx * (curr.x - ax) + njy * (curr.y - ay);
-      if (lp <= 0) continue;  // curr outside this half-plane — non-convex artefact, skip
+      if (lp <= 0) continue;  // curr outside this half-plane â€” non-convex artefact, skip
 
-      // Apollonius constraint: r = lp / (1 − n_P · n_j).
-      // denom → 0 when walls are nearly co-directional (dense tessellation neighbours) — skip.
+      // Apollonius constraint: r = lp / (1 âˆ’ n_P Â· n_j).
+      // denom â†’ 0 when walls are nearly co-directional (dense tessellation neighbours) â€” skip.
       // Guard: also verify the inscribed-circle tangent point falls within the actual
       // segment (not just on its infinite line extension).  A segment whose LINE passes
       // close to P but whose extents are far away (e.g. a handle wall above a pan body
@@ -1528,18 +2181,18 @@ function computeContourLocalWidths(rawPts) {
       if (denom > 1e-6) {
         const r = lp / denom;
         if (r > 0 && r < rMin) {
-          // Inscribed circle centre Q = P + r·n_P; tangent point T = Q − r·n_j.
+          // Inscribed circle centre Q = P + rÂ·n_P; tangent point T = Q âˆ’ rÂ·n_j.
           const qx = curr.x + r * nPx, qy = curr.y + r * nPy;
           const tx = qx - r * njx,     ty = qy - r * njy;
-          // Parameterise T along segment j: s ∈ [0,1] means T is within the segment.
+          // Parameterise T along segment j: s âˆˆ [0,1] means T is within the segment.
           const s = ((tx - ax) * ex + (ty - ay) * ey) / (el * el);
           if (s >= 0 && s <= 1) rMin = r;
         }
       }
 
       // Endpoint constraints: prevent the inscribed-circle centre from flying past
-      // an endpoint vertex into open space.  For vertex V: dist(centre, V) ≥ r
-      // simplifies to r ≤ |P−V|² / (2·|(P−V)·n_P|) when (P−V)·n_P < 0.
+      // an endpoint vertex into open space.  For vertex V: dist(centre, V) â‰¥ r
+      // simplifies to r â‰¤ |Pâˆ’V|Â² / (2Â·|(Pâˆ’V)Â·n_P|) when (Pâˆ’V)Â·n_P < 0.
       for (const [vx, vy] of [[curr.x - ax, curr.y - ay], [curr.x - bx, curr.y - by]]) {
         const dotV = vx * nPx + vy * nPy;
         if (dotV < -1e-10) {
@@ -1556,8 +2209,8 @@ function computeContourLocalWidths(rawPts) {
 }
 
 // Smooth a circular depth array in two passes:
-//   1. min-filter — never exceed the tightest local constraint.
-//   2. box-average — soften abrupt transitions.
+//   1. min-filter â€” never exceed the tightest local constraint.
+//   2. box-average â€” soften abrupt transitions.
 function smoothDepthProfile(depths, winHalf = 4) {
   const n   = depths.length;
   const idx = k => ((k % n) + n) % n;
@@ -1614,188 +2267,104 @@ function arcLengthRemap(depths, fromPts, toPts) {
   });
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
+// â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
-// Trace selected contours with the taper bit, applying adaptive Z (corner relief)
-// so the bit lifts in narrow features where the taper body would otherwise gouge
-// the opposite wall.  Formula: maxDepth = (r_inscribed - tipRadius) / tan(halfAngle)
+// Trace selected contours with the taper bit.
 //
-// cutSide 'outside': tip is offset outward by depth × tan(halfAngle) so the taper
-// wall intersects the profile edge exactly at the top surface.
-// Corner-relief taper contour pass.
+// Uses roundedOffsetPolyline (jtRound) for the base trace path so concave
+// sections never produce miter spikes.  Sharp corners from the original letter
+// are restored by corner-sharpening ramp moves: at each convex turn in the
+// rounded path the bit ramps to the original sharp corner (P + bisector Ã— bitRadius)
+// at topZ, then returns to the arc at floorZ.  This produces the same "spider leg"
+// corner geometry as Fusion 360 V-carve.
 //
-// At every convex polygon corner (interior angle < 180°) the bit ramps out
-// along the outward angle bisector while rising from floor to surface, then
-// retraces back to full depth.  This creates the correct taper-wall geometry
-// at inside corners so a pocket and plug cut from the same profile mate.
+// Pocket (inside): offset inward by bitRadius so the taper flank at the surface
+//   follows the letter boundary.
+// Plug (outside):  offset outward by depthÃ—tan(halfAngle) so the taper flank at
+//   the surface aligns with the profile boundary â€” mating walls result.
 //
-// Formula:  tan(φ) = sin(α) / tan(θ)
-//   φ = ramp angle from horizontal
-//   α = half the interior corner angle
-//   θ = bit half-angle (tcRad)
-//   ramp distance = depth * tan(θ) / sin(α)
-//
-// Concave arc sections whose radius is smaller than the bit's taper footprint
-// (bitRadius = tipRadius + depth×tanAlpha) are handled separately: Z is lifted
-// so the bit's contact radius at the surface matches the arc radius:
-//   Z = topZ − (arcRadius − tipRadius) / tanAlpha
-// The local arc radius is estimated from the circumradius of consecutive
-// tessellated triplets; large smooth curves have circumradius >> bitRadius and
-// are left at full depth unchanged.
-//
-// MIN_CORNER_TURN guards the bisector ramp so it fires only at genuine polygon
-// corners (single vertex with a large turn) and not at the fine steps of a
-// tessellated smooth arc.
-//
-// For an outside (plug) cut the trace path is pre-offset inward by
-// depth*tan(θ) so the taper body at the surface aligns with the profile
-// boundary — identical ramp geometry then produces mating walls.
-//
-// tipRadius: tip flat radius (0 for a pointed V-bit).
-// sharpCornerAngle: only interior angles strictly below this value (degrees)
-//   trigger the bisector ramp.  180° = all convex corners (Fusion default);
-//   lower values (e.g. 170°) suppress ramps at near-straight tessellation joints.
+// MIN_CORNER_TURN prevents gentle tessellation arc steps (â‰¤12Â°) from triggering
+// spurious corner ramps while still catching genuine letter corners.
 function buildTaperTrace(entities, topZ, depth, safeZ, feedRate, plungeRate, tcRad, cutSide, tipRadius = 0, sharpCornerAngle = 180, leadInStyle = 'plunge', leadInRampAngle = 3, leadInArcRadius = 0, prebuiltProfiles = null) {
   const moves     = [];
   const tanAlpha  = Math.tan(tcRad);
   const floorZ    = topZ - depth;
   const bitRadius = tipRadius + depth * tanAlpha;
-  // offsetPolyline negates delta before Clipper, so positive = contract inward, negative = expand outward.
-  // Pocket: inset tool centre by bitRadius (positive = Clipper shrinks CCW polygon inward)
-  //   so the cutting flank at the surface follows the polygon, not the tool centre.
-  // Plug:   negative (Clipper expands outward) so the tool is outside the polygon.
   const traceOffset = cutSide === 'outside' ? -(depth * tanAlpha) : bitRadius;
+  const isOutside   = cutSide === 'outside';
 
-  // Convert the user-facing interior-angle threshold to a minimum exterior turn.
-  // e.g. sharpCornerAngle=170° → only turns >10° trigger a ramp.
-  // Floor at 12° so arc tessellation vertices (72-pt circles = 5°/step,
-  // 36-pt arcs = 10°/step) never trigger corner ramps regardless of sharpCornerAngle.
+  // Floor at 12Â° so arc tessellation steps never trigger corner ramps.
   const MIN_CORNER_TURN = Math.max(12 * Math.PI / 180, (180 - sharpCornerAngle) * Math.PI / 180);
 
-  const isOutside = cutSide === 'outside';
   const profiles = prebuiltProfiles ?? buildPocketProfiles(entities);
-
-  // Identify the outermost profile. Ring-boss counters (nested inside the outer profile)
-  // get a flipped trace offset so the taper approaches from inside the hole. Separate
-  // bosses (two circles apart) are NOT nested and are traced from the outside like the
-  // outer profile — their offset must not be flipped.
   const outerProfileRef = profiles.length > 1
     ? [...profiles].sort((a, b) => Math.abs(polygonArea(b)) - Math.abs(polygonArea(a)))[0]
     : profiles[0];
   const outerProfileCCW = isClockwise(outerProfileRef) ? [...outerProfileRef].reverse() : outerProfileRef;
 
   for (const rawProfile of profiles) {
-    // Normalise winding to CCW before offsetting.  mirrorEntitiesX Y-flips the
-    // polygon, reversing its winding to CW.  Clipper's ClipperOffset treats CW
-    // paths as holes and applies the delta in the opposite direction, so a CW
-    // input to offsetPolyline contracts where it should expand (and vice-versa),
-    // placing the trace path on the wrong side of the profile.  Normalising
-    // first ensures Clipper always sees a CCW outer boundary.
     const rawStripped = stripClose([...rawProfile]);
     if (rawStripped.length < 3) continue;
     const rawCCW = isClockwise(rawStripped) ? [...rawStripped].reverse() : rawStripped;
 
-    // Detect ring-boss counter: an inner profile whose midpoint lies inside the outer profile.
-    // Separate bosses (two circles apart) fail this test and use the standard outward offset.
     const isInnerProfile = profiles.length > 1 && rawProfile !== outerProfileRef;
     const testPt = rawCCW[Math.floor(rawCCW.length / 2)];
     const isNestedInner = isInnerProfile && isOutside && !!testPt && pointInPolygon(testPt, outerProfileCCW);
-
-    // Ring-boss counters: flip offset so the taper approaches from inside the hole.
-    // All other profiles (outer profile + separate bosses): standard outward offset.
     const profileTraceOffset = isNestedInner ? -traceOffset : traceOffset;
 
-    const offsetResult = profileTraceOffset !== 0
-      ? offsetPolyline(rawCCW, profileTraceOffset, true)[0]
-      : null;
-    // Nested ring-boss counters: if the inward offset collapses (hole too small for the taper),
-    // skip rather than fall back to the raw boundary — the boundary fallback would trace the
-    // boss ring wall and cut into the boss material.
-    // All other profiles: fall back to rawCCW so the trace is never lost.
-    const traceRaw = offsetResult ?? (isNestedInner ? null : rawCCW);
-    if (!traceRaw || traceRaw.length < 2) continue;
-    const ptsRaw = stripClose([...traceRaw]);
-    if (ptsRaw.length < 3) continue;
-    // offsetPolyline always returns CCW; the isClockwise guard is a safety net.
-    const pts = isClockwise(ptsRaw) ? [...ptsRaw].reverse() : ptsRaw;
-    const n   = pts.length;
+    const rawOffsets = roundedOffsetPolyline(rawCCW, profileTraceOffset, true);
+    const tracePolygons = (rawOffsets ?? []).filter(r => r?.length >= 3);
 
-    // Pre-compute per-vertex Z.  Tight arc vertices whose circumradius R < bitRadius
-    // get lifted: Z = topZ − (R − tipRadius) / tanAlpha.
-    // For pocket (inside cut) we lift at concave vertices (cross < 0).
-    // For plug  (outside cut) we lift at convex vertices (cross > 0) because the
-    // bit is on the outside and those arcs bulge toward it.
-    // arcCross > 0 means "needs the lift check"; we compute R = la*lb*lac/(2*arcCross).
-    const zAtPt = pts.map((P, i) => {
-      if (tanAlpha < 1e-10) return floorZ;
-      const Pprv = pts[(i - 1 + n) % n];
-      const Pnxt = pts[(i + 1) % n];
-      const ax = P.x - Pprv.x, ay = P.y - Pprv.y;
-      const bx = Pnxt.x - P.x, by = Pnxt.y - P.y;
-      const cross    = ax * by - ay * bx;
-      const arcCross = isOutside ? cross : -cross;   // positive = candidate for lift
-      if (arcCross <= 0) return floorZ;
-      const la  = Math.hypot(ax, ay);
-      const lb  = Math.hypot(bx, by);
-      if (la < 1e-10 || lb < 1e-10) return floorZ;
-      const lac = Math.hypot(ax + bx, ay + by);
-      const R   = (la * lb * lac) / (2 * arcCross);
-      if (!isFinite(R) || R >= bitRadius) return floorZ;
-      const liftDepth = Math.max(0, (R - tipRadius) / tanAlpha);
-      return topZ - liftDepth;
-    });
+    for (const traceRaw of tracePolygons) {
+      const ptsRaw = stripClose([...traceRaw]);
+      if (ptsRaw.length < 3) continue;
+      const pts = isClockwise(ptsRaw) ? [...ptsRaw].reverse() : ptsRaw;
+      const n   = pts.length;
 
-    const arcR = leadInArcRadius || Math.max(0.5, tipRadius || 1);
-    moves.push(...buildLeadIn(pts, topZ, zAtPt[0], safeZ, leadInStyle, leadInRampAngle, arcR, feedRate, plungeRate, cutSide));
+      const arcR = leadInArcRadius || Math.max(0.5, tipRadius || 1);
+      moves.push(...buildLeadIn(pts, topZ, floorZ, safeZ, leadInStyle, leadInRampAngle, arcR, feedRate, plungeRate, cutSide));
 
-    for (let i = 0; i < n; i++) {
-      const P    = pts[i];
-      const Pnxt = pts[(i + 1) % n];
-      const Pprv = pts[(i - 1 + n) % n];
+      // Start at i=1; lead-in already landed at pts[0].  Wrap back to pts[0] at i=n.
+      for (let i = 1; i <= n; i++) {
+        const P    = pts[i % n];
+        const Pprv = pts[(i - 1 + n) % n];
+        const Pnxt = pts[(i + 1) % n];
 
-      const ax = P.x - Pprv.x, ay = P.y - Pprv.y;
-      const bx = Pnxt.x - P.x, by = Pnxt.y - P.y;
-      const la = Math.hypot(ax, ay);
-      const lb = Math.hypot(bx, by);
+        moves.push({ type: 'feed', x: P.x, y: P.y, z: floorZ, f: feedRate });
 
-      if (la > 1e-10 && lb > 1e-10 && tanAlpha > 1e-10) {
-        const ux1 = ax / la, uy1 = ay / la;
-        const ux2 = bx / lb, uy2 = by / lb;
-        const cross       = ux1 * uy2 - uy1 * ux2;   // normalised; >0 = convex (CCW)
-        // Pocket (inside):  ramp at convex corners  (cross > 0, bit crowds outside the turn)
-        // Plug   (outside): ramp at concave corners (cross < 0, bit crowds inside the turn)
-        const cornerCross = isOutside ? -cross : cross;
+        const ax = P.x - Pprv.x, ay = P.y - Pprv.y;
+        const bx = Pnxt.x - P.x, by = Pnxt.y - P.y;
+        const la = Math.hypot(ax, ay), lb = Math.hypot(bx, by);
 
-        if (cornerCross > 1e-6) {
-          const turnAngle = Math.atan2(cornerCross, ux1 * ux2 + uy1 * uy2);
-          // Guard: only ramp at genuine polygon corners, not arc tessellation steps.
-          if (turnAngle > MIN_CORNER_TURN) {
-            const alpha    = (Math.PI - turnAngle) / 2;
-            const sinAlpha = Math.sin(alpha);
-            if (sinAlpha > 1e-6) {
-              const rampDist = (depth * tanAlpha) / sinAlpha;
-              // Pocket: outward bisector (rightNormal) pushes ramp away from CCW interior.
-              // Plug:   inward bisector (leftNormal = negate rightNormal) pushes into stock.
+        if (la > 1e-10 && lb > 1e-10) {
+          const ux1 = ax / la, uy1 = ay / la;
+          const ux2 = bx / lb, uy2 = by / lb;
+          const cross       = ux1 * uy2 - uy1 * ux2;
+          const cornerCross = isOutside ? -cross : cross;
+
+          if (cornerCross > 1e-6) {
+            const turnAngle = Math.atan2(cornerCross, ux1 * ux2 + uy1 * uy2);
+            if (turnAngle > MIN_CORNER_TURN) {
+              // Reconstruct the original sharp corner: the rounded arc passes through P
+              // at distance bitRadius from the original polygon corner.  Moving bitRadius
+              // along the outward bisector from P arrives at the original corner vertex.
               const s  = isOutside ? -1 : 1;
               const rx = s * (uy1 + uy2);
               const ry = s * (-ux1 - ux2);
               const rl = Math.hypot(rx, ry);
               if (rl > 1e-10) {
-                const rampX = P.x + (rx / rl) * rampDist;
-                const rampY = P.y + (ry / rl) * rampDist;
-                moves.push({ type: 'feed', x: rampX, y: rampY, z: topZ,   f: feedRate });
-                moves.push({ type: 'feed', x: P.x,   y: P.y,   z: floorZ, f: feedRate });
+                const cornerX = P.x + (rx / rl) * bitRadius;
+                const cornerY = P.y + (ry / rl) * bitRadius;
+                moves.push({ type: 'feed', x: cornerX, y: cornerY, z: topZ,   f: feedRate });
+                moves.push({ type: 'feed', x: P.x,     y: P.y,     z: floorZ, f: feedRate });
               }
             }
           }
         }
       }
 
-      // Advance to next vertex; use pre-computed Z (lifted for tight concave arcs).
-      moves.push({ type: 'feed', x: Pnxt.x, y: Pnxt.y, z: zAtPt[(i + 1) % n], f: feedRate });
+      moves.push({ type: 'rapid', x: pts[0].x, y: pts[0].y, z: safeZ });
     }
-
-    moves.push({ type: 'rapid', x: pts[0].x, y: pts[0].y, z: safeZ });
   }
   return moves;
 }
@@ -1803,79 +2372,105 @@ function buildTaperTrace(entities, topZ, depth, safeZ, feedRate, plungeRate, tcR
 // Generic concentric pocket-clearing pass.
 // Works for both V-bit cleanup (small toolR, single Z pass) and endmill passes.
 //
-//   toolR       — effective cutting radius for stepover / offset generation
-//   depthPerPass — Z step between levels (pass full depth for single-level)
-//   wallStock   — explicit standoff added on top of the taper geometry clearance
-//   taperRad    — half-angle (rad) of the wall that defines clearance geometry
+//   toolR       â€” effective cutting radius for stepover / offset generation
+//   depthPerPass â€” Z step between levels (pass full depth for single-level)
+//   wallStock   â€” explicit standoff added on top of the taper geometry clearance
+//   taperRad    â€” half-angle (rad) of the wall that defines clearance geometry
 function buildPocketClearing(entities, topZ, depth, safeZ, toolR, depthPerPass, wallStock, feedRate, plungeRate, taperRad, passLabel, warnings, prevToolR = 0, stockBound = null, leadInStyle = 'plunge', leadInArcRadius = 0, prebuiltProfiles = null) {
   const moves     = [];
   const wallLeave = depth * Math.tan(taperRad) + wallStock;
   const inset     = toolR + wallLeave;
   const zPasses   = buildZPasses(topZ, depth, depthPerPass);
 
-  // Profile extraction: chain individual LINE/ARC segments when selected
-  // instead of a closed polyline, same logic as generatePocket.
   const profiles = prebuiltProfiles ?? buildPocketProfiles(entities);
   if (!profiles.length) return moves;
 
-  profiles.sort((a, b) => polygonArea(b) - polygonArea(a));
-  const islandProfiles = profiles.slice(1);
+  // Sort largest-first so the containment check finds immediate parents correctly.
+  profiles.sort((a, b) => Math.abs(polygonArea(b)) - Math.abs(polygonArea(a)));
 
-  // Normalise to CCW so a positive offset shrinks inward (generatePocketOffsets
-  // does the same internally; doing it here keeps offsetPolyline correct too).
-  const outerProfile = isClockwise(profiles[0]) ? [...profiles[0]].reverse() : profiles[0];
+  // Normalise all profiles to CCW so positive offsets consistently shrink inward.
+  const ccwProfiles = profiles.map(p => isClockwise(p) ? [...p].reverse() : p);
 
-  // Use toolR for the outer boundary inset — identical to generatePocket.
-  // Using the full (toolR + wallLeave) inset in a single offsetPolyline call
-  // creates large spikes at concave arc junctions in complex shapes; toolR
-  // keeps the offset small and spike-free.  Island exclusion zones still use
-  // the full inset so the endmill stays clear of inner taper walls.
-  const boundary = offsetPolyline(outerProfile, toolR, true)[0];
-  if (!boundary || boundary.length < 4 || polygonArea(boundary) < toolR * toolR * Math.PI * 0.25) {
-    warnings.push(`${passLabel}: contour too small for ⌀${(toolR * 2).toFixed(2)}mm tool`);
-    return moves;
-  }
-
-  const islandExclusions = islandProfiles.map(island => {
-    const ccw      = isClockwise(island) ? [...island].reverse() : island;
-    const expanded = offsetPolyline(ccw, -inset, true)[0];
-    return (expanded && expanded.length >= 3) ? expanded : ccw;
+  // Build a containment tree: for each profile find its immediate parent (the smallest
+  // enclosing profile), or -1 if it is a root (top-level, not inside anything).
+  // Multiple separate letters (e.g. "C" and "L") both appear as roots and each gets
+  // its own independent clearing. A hole inside "O" appears as a child and becomes an
+  // island exclusion for its parent letter.
+  const parents = ccwProfiles.map((prof, i) => {
+    const testPt = prof[Math.floor(prof.length / 2)];
+    if (!testPt) return -1;
+    let parentIdx = -1;
+    for (let j = 0; j < ccwProfiles.length; j++) {
+      if (j === i) continue;
+      if (pointInPolygon(testPt, ccwProfiles[j])) {
+        if (parentIdx === -1 ||
+            Math.abs(polygonArea(ccwProfiles[j])) < Math.abs(polygonArea(ccwProfiles[parentIdx]))) {
+          parentIdx = j;
+        }
+      }
+    }
+    return parentIdx;
   });
 
-  if (islandExclusions.length > 0) warnNarrowGaps(islandExclusions, boundary, toolR, warnings);
-  const clearPasses = prevToolR > 0
-    ? generateRestMachiningPasses(outerProfile, toolR, prevToolR, 0.45, islandExclusions)
-    : generatePocketOffsets(boundary, toolR, 0.45, islandExclusions);
-  if (!clearPasses.length) {
-    if (islandExclusions.length === 0 && prevToolR === 0) {
-      warnings.push(`${passLabel}: no clearing passes — contour too small after wall clearance`);
+  const rootIndices = ccwProfiles.map((_, i) => i).filter(i => parents[i] === -1);
+
+  for (const rootIdx of rootIndices) {
+    const outerProfile = ccwProfiles[rootIdx];
+
+    // Direct children: profiles whose immediate parent is this root become island exclusions.
+    const islandProfiles = ccwProfiles.filter((_, i) => parents[i] === rootIdx);
+
+    // Clearing runs BEFORE the taper trace, so the endmill cuts into clean stock and
+    // can safely reach the profile edge (toolR boundary = edge touches the profile).
+    // Island exclusion zones use the full inset so the endmill stays clear of any
+    // inner taper walls left by a prior island-trace pass.
+    const boundary = offsetPolyline(outerProfile, toolR, true)[0];
+    if (!boundary || boundary.length < 4 || polygonArea(boundary) < toolR * toolR * Math.PI * 0.25) {
+      warnings.push(`${passLabel}: contour too small for âŒ€${(toolR * 2).toFixed(2)}mm tool`);
+      continue;
     }
-    return moves;
+
+    const islandExclusions = islandProfiles.map(island => {
+      const expanded = offsetPolyline(island, -inset, true)[0];
+      return (expanded && expanded.length >= 3) ? expanded : island;
+    });
+
+    if (islandExclusions.length > 0) warnNarrowGaps(islandExclusions, boundary, toolR, warnings);
+    const clearPasses = prevToolR > 0
+      ? generateRestMachiningPasses(outerProfile, toolR, prevToolR, 0.45, islandExclusions)
+      : generatePocketOffsets(boundary, toolR, 0.45, islandExclusions);
+    if (!clearPasses.length) {
+      if (islandExclusions.length === 0 && prevToolR === 0) {
+        warnings.push(`${passLabel}: no clearing passes â€” contour too small after wall clearance`);
+      }
+      continue;
+    }
+
+    const helixR = leadInArcRadius || toolR * 0.5;
+    moves.push(...buildLeadIn(clearPasses[0], topZ, zPasses[0], safeZ, leadInStyle, 3, helixR, feedRate, plungeRate, 'inside'));
+
+    const hasIslands = islandExclusions.length > 0;
+    let lastClearX = null, lastClearY = null;
+    for (const z of zPasses) {
+      for (const pass of clearPasses) {
+        if (!pass || pass.length < 2) continue;
+        if (hasIslands && lastClearX !== null) {
+          // Two-step retract: lift Z straight up at current XY first, then traverse at
+          // safeZ so the tool doesn't contact island walls during a diagonal rapid.
+          moves.push({ type: 'rapid', x: lastClearX, y: lastClearY, z: safeZ });
+        }
+        moves.push({ type: 'rapid', x: pass[0].x, y: pass[0].y, z: hasIslands ? safeZ : z + 0.5 });
+        moves.push({ type: 'feed',  x: pass[0].x, y: pass[0].y, z, f: plungeRate });
+        for (let i = 1; i < pass.length; i++) {
+          moves.push({ type: 'feed', x: pass[i].x, y: pass[i].y, z, f: feedRate });
+        }
+        lastClearX = pass[pass.length - 1].x;
+        lastClearY = pass[pass.length - 1].y;
+      }
+    }
+    moves.push({ type: 'rapid', x: outerProfile[0].x, y: outerProfile[0].y, z: safeZ });
   }
 
-  const helixR = leadInArcRadius || toolR * 0.5;
-  moves.push(...buildLeadIn(clearPasses[0], topZ, zPasses[0], safeZ, leadInStyle, 3, helixR, feedRate, plungeRate, 'inside'));
-
-  const hasIslands = islandExclusions.length > 0;
-  let lastClearX = null, lastClearY = null;
-  for (const z of zPasses) {
-    for (const pass of clearPasses) {
-      if (!pass || pass.length < 2) continue;
-      if (hasIslands && lastClearX !== null) {
-        // Two-step retract: lift Z straight up at current XY first, then traverse at
-        // safeZ so the tool doesn't contact island walls during a diagonal rapid.
-        moves.push({ type: 'rapid', x: lastClearX, y: lastClearY, z: safeZ });
-      }
-      moves.push({ type: 'rapid', x: pass[0].x, y: pass[0].y, z: hasIslands ? safeZ : z + 0.5 });
-      moves.push({ type: 'feed',  x: pass[0].x, y: pass[0].y, z, f: plungeRate });
-      for (let i = 1; i < pass.length; i++) {
-        moves.push({ type: 'feed', x: pass[i].x, y: pass[i].y, z, f: feedRate });
-      }
-      lastClearX = pass[pass.length - 1].x;
-      lastClearY = pass[pass.length - 1].y;
-    }
-  }
-  moves.push({ type: 'rapid', x: outerProfile[0].x, y: outerProfile[0].y, z: safeZ });
   return moves;
 }
 
@@ -1883,7 +2478,7 @@ function buildPocketClearing(entities, topZ, depth, safeZ, toolR, depthPerPass, 
 // Expands rings outward from the plug profile and clips each to the stock boundary,
 // matching the 2D Pocket outside-boss approach. generatePocketOffsets is NOT used
 // here because its island exclusion relies on a vertex-in-polygon check that fails
-// when a large rectangular ring surrounds a central exclusion zone — the ring corners
+// when a large rectangular ring surrounds a central exclusion zone â€” the ring corners
 // stay outside the zone even when the ring sides pass through it.
 //
 // Same parameter signature as buildPocketClearing so buildTaperedPasses can
@@ -1902,7 +2497,7 @@ function buildPlugClearing(entities, topZ, depth, safeZ, toolR, depthPerPass, wa
   const outerProfile = isClockwise(profiles[0]) ? [...profiles[0]].reverse() : profiles[0];
 
   // Clip boundary: stock rect (preferred) or entity bounds + margin (fallback when
-  // no stock is configured). The stock boundary is used as-is for clipping — the
+  // no stock is configured). The stock boundary is used as-is for clipping â€” the
   // tool-centre-to-edge offset is already baked into `outset` on the inner side.
   let clipBound = stockBound;
   if (!clipBound) {
@@ -1966,7 +2561,7 @@ function buildPlugClearing(entities, topZ, depth, safeZ, toolR, depthPerPass, wa
   // an island exclusion zone. This handles both topologies without any topology detection
   // in the clearing loop:
   //   - Separate bosses (two circles apart): clearing fills the stock area, stops near
-  //     each boss independently — neither boss is cut through.
+  //     each boss independently â€” neither boss is cut through.
   //   - Ring bosses (letter with counter): clearing stops outside the outer ring; the
   //     interior hole is pocket-cleared separately below.
   const inset = toolR + wallLeave;
@@ -2024,10 +2619,10 @@ function buildPlugClearing(entities, topZ, depth, safeZ, toolR, depthPerPass, wa
   return moves;
 }
 
-// ── Helpers ───────────────────────────────────────────────────────────────────
+// â”€â”€ Helpers â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 // Warn when pre-expanded island exclusion zones overlap each other (gap between the raw
-// island boundaries is less than twice the expansion amount — i.e. less than tool diameter
+// island boundaries is less than twice the expansion amount â€” i.e. less than tool diameter
 // plus any wall-leave) or when an exclusion zone overflows the pocket/stock boundary
 // (island too close to the outer wall).  One warning is emitted and the function returns
 // so the array stays concise.  Uses pointInPolygon for quick vertex-in-polygon tests which
@@ -2040,7 +2635,7 @@ function warnNarrowGaps(exclusionZones, boundary, toolR, warnings) {
     for (let j = i + 1; j < exclusionZones.length; j++) {
       const a = exclusionZones[i], b = exclusionZones[j];
       if (a.some(pt => pointInPolygon(pt, b)) || b.some(pt => pointInPolygon(pt, a))) {
-        warnings.push(`Gap between islands too small for ø${dia} mm tool — some areas will not be machined. Use a smaller tool or increase spacing.`);
+        warnings.push(`Gap between islands too small for Ã¸${dia}â€¯mm tool â€” some areas will not be machined. Use a smaller tool or increase spacing.`);
         return;
       }
     }
@@ -2049,7 +2644,7 @@ function warnNarrowGaps(exclusionZones, boundary, toolR, warnings) {
   if (boundary) {
     for (const excl of exclusionZones) {
       if (excl.some(pt => !pointInPolygon(pt, boundary))) {
-        warnings.push(`Island too close to pocket wall for ø${dia} mm tool — some areas will not be machined. Use a smaller tool or increase spacing.`);
+        warnings.push(`Island too close to pocket wall for Ã¸${dia}â€¯mm tool â€” some areas will not be machined. Use a smaller tool or increase spacing.`);
         return;
       }
     }
@@ -2086,7 +2681,7 @@ function buildRampEntry(profile, topZ, targetZ, rampAngleDeg, feedRate, plungeRa
   return moves;
 }
 
-// Quarter-circle tangential arc lead-in.  The tool approaches pts[0] along a 90° arc
+// Quarter-circle tangential arc lead-in.  The tool approaches pts[0] along a 90Â° arc
 // that is tangent to the contour entry direction at pts[0].
 // cutSide 'inside' : arc center is to the left of T  (CCW sweep, approach from interior)
 // cutSide 'outside': arc center is to the right of T (CW  sweep, approach from exterior)
@@ -2104,7 +2699,7 @@ function buildArcLeadIn(pts, targetZ, arcRadius, feedRate, safeZ, cutSide = 'out
   const cx = P.x + s * ty * R;
   const cy = P.y - s * tx * R;
 
-  // Arc start A = center - R*T (90° before P in travel direction).
+  // Arc start A = center - R*T (90Â° before P in travel direction).
   // Verified: at i=SEGS the tessellation lands exactly on P for both cut sides.
   const ax = cx - tx * R;
   const ay = cy - ty * R;
@@ -2205,13 +2800,35 @@ function chainSegments(entities) {
 
   const segs = entities
     .filter(e => e.type === 'line' || e.type === 'arc')
-    .map(e => ({ pts: entityToProfile(e), used: false }))
+    .map(e => ({ pts: entityToProfile(e), entity: e, used: false }))
     .filter(s => s.pts && s.pts.length >= 2);
 
   if (!segs.length) return null;
 
   const chain = [...segs[0].pts];
   segs[0].used = true;
+
+  // arcEvents records tangent info for arc-entity endpoints so the corner
+  // detector gets the true tangent direction rather than a short first chord.
+  // { idx: chainIndex, key: '_arcTangentOut'|'_arcTangentIn', dx, dy }
+  const arcEvents = [];
+
+  function recordArcTangents(entity, startIdx, endIdx, reversed) {
+    if (entity.type !== 'arc') return;
+    const sA = entity.startAngle; // radians
+    const eA = entity.endAngle;   // radians
+    // CCW tangent at a given angle: rotate the radius vector 90° CCW → (-sin, cos).
+    // Reversed arc travels CW, so negate: (sin, -cos).
+    if (!reversed) {
+      arcEvents.push({ idx: startIdx, key: '_arcTangentOut', dx: -Math.sin(sA), dy:  Math.cos(sA) });
+      arcEvents.push({ idx: endIdx,   key: '_arcTangentIn',  dx: -Math.sin(eA), dy:  Math.cos(eA) });
+    } else {
+      arcEvents.push({ idx: startIdx, key: '_arcTangentOut', dx:  Math.sin(eA), dy: -Math.cos(eA) });
+      arcEvents.push({ idx: endIdx,   key: '_arcTangentIn',  dx:  Math.sin(sA), dy: -Math.cos(sA) });
+    }
+  }
+
+  recordArcTangents(segs[0].entity, 0, chain.length - 1, false);
 
   for (let pass = 0; pass < segs.length; pass++) {
     const tail = chain[chain.length - 1];
@@ -2220,22 +2837,37 @@ function chainSegments(entities) {
       if (seg.used) continue;
       const head = seg.pts[0];
       const foot = seg.pts[seg.pts.length - 1];
+      const junctionIdx = chain.length - 1;
       if (ptDist(tail, head) <= SNAP) {
         chain.push(...seg.pts.slice(1));
-        seg.used = true; found = true; break;
+        seg.used = true; found = true;
+        recordArcTangents(seg.entity, junctionIdx, chain.length - 1, false);
+        break;
       }
       if (ptDist(tail, foot) <= SNAP) {
         chain.push(...[...seg.pts].reverse().slice(1));
-        seg.used = true; found = true; break;
+        seg.used = true; found = true;
+        recordArcTangents(seg.entity, junctionIdx, chain.length - 1, true);
+        break;
       }
     }
     if (!found) break;
   }
 
   // Drop duplicate closing point if chain loops back to start
-  const closeDist = chain.length > 1 ? ptDist(chain[0], chain[chain.length - 1]) : Infinity;
+  const origLen = chain.length;
+  const closeDist = origLen > 1 ? ptDist(chain[0], chain[origLen - 1]) : Infinity;
   const isClosed = closeDist <= SNAP;
   if (isClosed) chain.pop();
+
+  // Apply arc tangent events. Events for the removed closing point move to index 0.
+  for (const ev of arcEvents) {
+    let idx = ev.idx;
+    if (isClosed && idx === origLen - 1) idx = 0;
+    if (idx >= chain.length) continue;
+    chain[idx] = { ...chain[idx], [ev.key]: { dx: ev.dx, dy: ev.dy } };
+  }
+
   return chain.length >= 3 ? chain : null;
 }
 
@@ -2301,7 +2933,7 @@ function getEntityBounds(entities) {
   return { minX: isFinite(minX) ? minX : 0, minY: isFinite(minY) ? minY : 0, maxX: isFinite(maxX) ? maxX : 100, maxY: isFinite(maxY) ? maxY : 100 };
 }
 
-// ── Dogbone Fillets ──────────────────────────────────────────────────────────
+// â”€â”€ Dogbone Fillets â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 // Returns all concave (interior) corners of the selected closed geometry.
 // Each corner is { x, y, bisX, bisY } where bisX/bisY is the unit vector
@@ -2386,7 +3018,7 @@ function generateDogbone(op, entities) {
   return { moves, warnings, candidateCorners, contours };
 }
 
-// ── Text Engraving ─────────────────────────────────────────────────────────────
+// â”€â”€ Text Engraving â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 function generateText(op) {
   const moves = [], warnings = [];
@@ -2395,7 +3027,7 @@ function generateText(op) {
   if (!p.textContoursRel?.length) {
     return {
       moves: [],
-      warnings: ['No text geometry — click "Generate Geometry" in the Text Engraving params'],
+      warnings: ['No text geometry â€” click "Generate Geometry" in the Text Engraving params'],
       contours: [],
     };
   }
@@ -2429,14 +3061,14 @@ function generateText(op) {
       // Normalise outer to CCW (positive offset = shrink inward)
       const outerCCW = isClockwise(outer) ? [...outer].reverse() : outer;
 
-      // Inset outer by toolR → tool-centre travel boundary
+      // Inset outer by toolR â†’ tool-centre travel boundary
       const boundary = offsetPolyline(outerCCW, toolR, true)[0];
       if (!boundary || boundary.length < 3) {
         warnings.push('Letter too small for this tool diameter');
         continue;
       }
 
-      // Expand each hole outward by toolR → exclusion zone for tool centre
+      // Expand each hole outward by toolR â†’ exclusion zone for tool centre
       const islandExclusions = sorted.slice(1)
         .map(h => {
           const hCCW = isClockwise(h) ? [...h].reverse() : h;
@@ -2498,11 +3130,11 @@ function generateText(op) {
   return { moves, warnings, contours: allContours };
 }
 
-// ── 3D Raster (STL surface — ball-nose drop cutter) ──────────────────────────
+// â”€â”€ 3D Raster (STL surface â€” ball-nose drop cutter) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 // For a ball-nose cutter of radius R at (cx, cy), every heightmap cell
 // (px, py, h) within lateral distance d < R forces the ball centre up to at
-// least h + sqrt(R²-d²).  The max over all such cells, minus R, gives the
+// least h + sqrt(RÂ²-dÂ²).  The max over all such cells, minus R, gives the
 // gouge-free tool-tip Z.  When R=0 this degenerates to a nearest-cell lookup.
 function dropCutterZ(cx, cy, toolRadius, heights, gridW, gridH, minX, maxX, minY, maxY) {
   const dxCell = (maxX - minX) / (gridW - 1);
@@ -2556,7 +3188,7 @@ function dropCutterZ(cx, cy, toolRadius, heights, gridW, gridH, minX, maxX, minY
 }
 
 // Boustrophedon raster in one axis.
-// axis='x' → lines run along X, stepping in Y; axis='y' → lines along Y, stepping in X.
+// axis='x' â†’ lines run along X, stepping in Y; axis='y' â†’ lines along Y, stepping in X.
 function rasterLines(heightmap, rParams, axis) {
   const { heights, gridW, gridH, minX, maxX, minY, maxY } = heightmap;
   const toolRadius = (rParams.toolDiameter ?? 6.35) / 2;
@@ -2623,7 +3255,7 @@ function rasterLines(heightmap, rParams, axis) {
 // Generate a 3D raster toolpath over a pre-computed STL heightmap.
 // Supports optional rough pass (large stepover + Z allowance) followed by
 // finish pass (tight stepover following the actual surface).
-// direction: 'x' | 'y' | 'both' (crosshatch — runs both axes in sequence)
+// direction: 'x' | 'y' | 'both' (crosshatch â€” runs both axes in sequence)
 export function generateSTLRaster(heightmap, params) {
   const moves = [];
 

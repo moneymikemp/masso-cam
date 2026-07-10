@@ -1,6 +1,6 @@
 import React, { useState, useEffect } from 'react';
 import { useApp, getDefaultParams } from '../../store/AppContext';
-import { generateToolpath, computeVCarveMedialAxis } from '../../cam/toolpath';
+import { generateToolpath, computeVCarveMedialAxis, computeCornerLiftPolylines } from '../../cam/toolpath';
 import OperationParams from './OperationParams';
 
 const OP_TYPES = [
@@ -19,6 +19,8 @@ const OP_TYPES = [
   { type: 'taperedpocket', label: 'Tapered Pocket', icon: '◈', desc: 'V-bit profile + endmill cleanup — pocket half' },
   { type: 'taperedplug',   label: 'Tapered Plug',   icon: '◇', desc: 'V-bit profile + endmill cleanup — plug half, fit raised' },
   { type: 'vcarve',        label: 'V-Carve',        icon: '◆', desc: 'Variable-depth V-bit carving for closed shapes' },
+  { type: 'vcarve2',       label: 'V-Carve 2 (Exp)', icon: '◆', desc: 'Experimental: directional Z filter + rib suppression' },
+  { type: 'cornerlift',    label: 'Corner Lift (Diag)', icon: '▲', desc: 'Diagnostic: bisector walk from sharp corners — validate V-carve terminal geometry' },
   { type: 'dogbone',       label: 'Dogbone Fillets', icon: '⊕', desc: 'Drill internal corners for square-fit pockets' },
   { type: 'text',          label: 'Text Engraving',  icon: 'T',  desc: 'Engrave, outline, or pocket lettering' },
   { type: 'stlraster',     label: '3D Raster (STL)', icon: '▦',  desc: 'Ball-nose raster over loaded STL model' },
@@ -143,10 +145,16 @@ export default function OperationsPanel() {
       setShowSkeleton(false);
       dispatch({ type: 'SET_MEDIAL_AXIS', payload: null });
     } else {
-      const result = computeVCarveMedialAxis(op, entities);
-      if (result.polylines.length > 0) {
+      let polylines;
+      if (op.type === 'cornerlift') {
+        polylines = computeCornerLiftPolylines(op, entities);
+      } else {
+        const result = computeVCarveMedialAxis(op, entities);
+        polylines = result.polylines;
+      }
+      if (polylines.length > 0) {
         setShowSkeleton(true);
-        dispatch({ type: 'SET_MEDIAL_AXIS', payload: result.polylines });
+        dispatch({ type: 'SET_MEDIAL_AXIS', payload: polylines });
       }
     }
   }
@@ -239,7 +247,7 @@ export default function OperationsPanel() {
                 ← Assign {selectedEntityIds.length} selected
               </button>
             )}
-            {selectedOp.type === 'vcarve' && (
+            {(selectedOp.type === 'vcarve' || selectedOp.type === 'vcarve2' || selectedOp.type === 'cornerlift') && (
               <button
                 style={{ ...S.calcBtn, background: showSkeleton ? '#2a1a5a' : '#2a2a5a', color: showSkeleton ? '#cc44ff' : '#8888ff', borderColor: showSkeleton ? '#9933ff' : '#3a3aaa' }}
                 onClick={() => toggleSkeleton(selectedOp)}

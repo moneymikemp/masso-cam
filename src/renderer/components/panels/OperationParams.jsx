@@ -958,8 +958,8 @@ export default function OperationParams({ op, tools, operations = [], onChange }
         </>;
       })()}
 
-      {/* ── V-Carve ── */}
-      {op.type === 'vcarve' && <>
+      {/* ── V-Carve / V-Carve 2 ── */}
+      {(op.type === 'vcarve' || op.type === 'vcarve2') && <>
         {toolSelect}
         <div style={S.section}>V-Bit Geometry</div>
         <Field label="Half Angle" unit="°" tip="Half the included angle of the V-bit. A 60° V-bit has a 30° half angle. Determines how deep the tool cuts for a given groove width.">
@@ -982,6 +982,44 @@ export default function OperationParams({ op, tools, operations = [], onChange }
           Flat depth = min cut at shape edges (0 = pointed intersection at boundary).
         </div>
         <Field label="Top of Stock" unit={distUnit} tip="Z position of the workpiece surface. Usually 0.">
+          <NumInput value={toDisp(p.topZ ?? 0)} onChange={v => set('topZ', toMM(v))} step={isInch ? 0.02 : 0.5} />
+        </Field>
+        {commonSpeeds}
+        {op.type === 'vcarve2' && <>
+          <div style={S.section}>Step-Down Passes</div>
+          <Field label="Step Down" unit={distUnit} tip="Depth increment per pass. Set to 0 to cut full depth in one pass. When > 0, makes multiple passes at increasing depths until max depth is reached — useful for hard materials.">
+            <NumInput value={toDisp(p.stepDown ?? 0)} onChange={v => set('stepDown', toMM(v))} min={0} step={isInch ? 0.02 : 0.5} />
+          </Field>
+          <div style={S.section}>Heightmap (Drop-Cutter)</div>
+          <Field label="Status" tip="Sample the STL in the 3D view first: click '⬇ Sample Heights' in the top-right HUD. Once sampled, the drop-cutter uses the 3D surface to prevent the tool from spiking through the stock.">
+            <span style={{ ...S.input, fontSize: 10, color: state.stlHeightmap ? '#88ff88' : '#ff8844' }}>
+              {state.stlHeightmap
+                ? `${state.stlHeightmap.gridW}×${state.stlHeightmap.gridH} — ready`
+                : 'Not sampled — click ⬇ Sample Heights in 3D view'}
+            </span>
+          </Field>
+        </>}
+      </>}
+
+      {/* ── Corner Lift (Diagnostic) ── */}
+      {op.type === 'cornerlift' && <>
+        {toolSelect}
+        <div style={S.section}>Corner Detection</div>
+        <Field label="Corner Angle" unit="°" tip="Interior wedge angle threshold. Vertices where both edges meet at less than this angle are treated as sharp corners that need a lift path.">
+          <NumInput value={p.cornerAngle ?? 120} onChange={v => set('cornerAngle', v)} min={10} max={170} step={5} />
+        </Field>
+        <div style={S.section}>V-Bit Geometry</div>
+        <Field label="Half Angle" unit="°" tip="Half the included angle of the V-bit (e.g. 15° for a 30° V-bit).">
+          <NumInput value={p.halfAngle ?? 15} onChange={v => set('halfAngle', v)} min={1} max={60} step={0.5} />
+        </Field>
+        <Field label="Tip Diameter" unit={distUnit} tip="Diameter of the V-bit tip. 0 = sharp point.">
+          <NumInput value={toDisp(p.tipDiameter ?? 0)} onChange={v => set('tipDiameter', toMM(v))} min={0} step={isInch ? 0.001 : 0.01} />
+        </Field>
+        <div style={S.section}>Depth</div>
+        <Field label="Max Depth" unit={distUnit} tip="Stop walking inward once this depth is reached.">
+          <NumInput value={toDisp(p.maxDepth ?? 15)} onChange={v => set('maxDepth', toMM(v))} min={isInch ? 0.004 : 0.1} step={dStep} />
+        </Field>
+        <Field label="Top of Stock" unit={distUnit} tip="Z position of the workpiece surface.">
           <NumInput value={toDisp(p.topZ ?? 0)} onChange={v => set('topZ', toMM(v))} step={isInch ? 0.02 : 0.5} />
         </Field>
         {commonSpeeds}

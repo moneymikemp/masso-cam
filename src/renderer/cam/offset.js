@@ -93,8 +93,8 @@ export function intersectPolygons(ptsList) {
 // positive distance = shrink inward; negative = expand outward.
 // Returns result polygons (CCW, no closing point) sorted by area descending.
 // Concave shapes may split into >1 polygon when inset far enough.
-function clipperClosedOffset(points, distance) {
-  const co = new ClipperLib.ClipperOffset();
+function clipperClosedOffset(points, distance, miterLimit = 10.0) {
+  const co = new ClipperLib.ClipperOffset(miterLimit, 0.25 * SCALE);
   co.AddPath(toClipper(points), ClipperLib.JoinType.jtMiter, ClipperLib.EndType.etClosedPolygon);
   const solution = new ClipperLib.Paths();
   co.Execute(solution, -distance * SCALE);
@@ -123,14 +123,14 @@ function clipperClosedOffsetRound(points, distance) {
 // For closed paths, returns an array of result polygons (usually one, but may be
 // more when a concave shape splits). Callers that handle one polygon use [0].
 // For open paths, returns a single offset path.
-export function offsetPolyline(points, distance, closed = true) {
+export function offsetPolyline(points, distance, closed = true, miterLimit = 10.0) {
   if (!points || points.length < 2) return [points || []];
   if (!closed) return [simpleOpenOffset(points, distance)];
 
   const pts = stripClose([...points]);
   if (pts.length < 3) return [pts];
 
-  const results = clipperClosedOffset(pts, distance);
+  const results = clipperClosedOffset(pts, distance, miterLimit);
   if (!results.length) return [[]];
 
   // Add closing point to each result to match the pre-existing API contract.

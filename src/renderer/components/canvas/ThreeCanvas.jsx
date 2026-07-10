@@ -28,6 +28,113 @@ const OP_PALETTE = [
 
 // ── Geometry builders ────────────────────────────────────────────────────────
 
+// Push arc segments for a bulge-encoded polyline edge into verts array.
+// bulge = tan(θ/4), positive = CCW, negative = CW (DXF convention).
+function pushBulgeArc(verts, x1, y1, x2, y2, bulge, Z) {
+  const dx = x2 - x1, dy = y2 - y1;
+  const c = Math.sqrt(dx * dx + dy * dy);
+  if (c < 1e-9) return;
+  const absB  = Math.abs(bulge);
+  const theta = 4 * Math.atan(absB);                   // total included angle
+  const r     = c / (2 * Math.sin(theta / 2));
+  const d     = r * Math.cos(theta / 2);               // negative for major arcs
+  const alpha = Math.atan2(dy, dx);
+  const perpA = alpha + (bulge > 0 ? Math.PI / 2 : -Math.PI / 2);
+  const cx    = (x1 + x2) / 2 + d * Math.cos(perpA);
+  const cy    = (y1 + y2) / 2 + d * Math.sin(perpA);
+  const sa    = Math.atan2(y1 - cy, x1 - cx);
+  let   ea    = Math.atan2(y2 - cy, x2 - cx);
+  if (bulge > 0 && ea < sa) ea += Math.PI * 2;
+  if (bulge < 0 && ea > sa) ea -= Math.PI * 2;
+  const steps = Math.max(4, Math.ceil(Math.abs(ea - sa) / (Math.PI * 2) * 96));
+  for (let i = 0; i < steps; i++) {
+    const a0 = sa + (i / steps) * (ea - sa), a1 = sa + ((i + 1) / steps) * (ea - sa);
+    verts.push(wx(cx + Math.cos(a0) * r), wy(Z), wz(cy + Math.sin(a0) * r),
+               wx(cx + Math.cos(a1) * r), wy(Z), wz(cy + Math.sin(a1) * r));
+  }
+}
+
+function buildEntityLines(entities, topZ) {
+  if (!entities?.length) return null;
+  const verts = [];
+  const Z    = topZ + 0.05;
+  const SEGS = 96;
+
+  for (const e of entities) {
+    switch (e.type) {
+      case 'line':
+        verts.push(wx(e.start.x), wy(Z), wz(e.start.y),
+                   wx(e.end.x),   wy(Z), wz(e.end.y));
+        break;
+
+      case 'circle':
+        for (let i = 0; i < SEGS; i++) {
+          const a0 = (i / SEGS) * Math.PI * 2, a1 = ((i + 1) / SEGS) * Math.PI * 2;
+          verts.push(wx(e.center.x + Math.cos(a0) * e.radius), wy(Z), wz(e.center.y + Math.sin(a0) * e.radius),
+                     wx(e.center.x + Math.cos(a1) * e.radius), wy(Z), wz(e.center.y + Math.sin(a1) * e.radius));
+        }
+        break;
+
+      case 'arc': {
+        let sa = e.startAngle ?? 0, ea = e.endAngle ?? Math.PI * 2;
+        if (ea < sa) ea += Math.PI * 2;
+        const steps = Math.max(4, Math.ceil(((ea - sa) / (Math.PI * 2)) * SEGS));
+        for (let i = 0; i < steps; i++) {
+          const a0 = sa + (i / steps) * (ea - sa), a1 = sa + ((i + 1) / steps) * (ea - sa);
+          verts.push(wx(e.center.x + Math.cos(a0) * e.radius), wy(Z), wz(e.center.y + Math.sin(a0) * e.radius),
+                     wx(e.center.x + Math.cos(a1) * e.radius), wy(Z), wz(e.center.y + Math.sin(a1) * e.radius));
+        }
+        break;
+      }
+
+      case 'polyline': {
+        const vts = e.vertices || [];
+        for (let i = 0; i < vts.length - 1; i++) {
+          const v1 = vts[i], v2 = vts[i + 1];
+          const b  = v1.bulge ?? 0;
+          if (Math.abs(b) < 1e-6)
+            verts.push(wx(v1.x), wy(Z), wz(v1.y), wx(v2.x), wy(Z), wz(v2.y));
+          else
+            pushBulgeArc(verts, v1.x, v1.y, v2.x, v2.y, b, Z);
+        }
+        if (e.closed && vts.length > 1) {
+          const last = vts[vts.length - 1], first = vts[0];
+          const b = last.bulge ?? 0;
+          if (Math.abs(b) < 1e-6)
+            verts.push(wx(last.x), wy(Z), wz(last.y), wx(first.x), wy(Z), wz(first.y));
+          else
+            pushBulgeArc(verts, last.x, last.y, first.x, first.y, b, Z);
+        }
+        break;
+      }
+
+      case 'ellipse': {
+        const rot = e.rotation ?? 0, cosR = Math.cos(rot), sinR = Math.sin(rot);
+        for (let i = 0; i < SEGS; i++) {
+          const a0 = (i / SEGS) * Math.PI * 2, a1 = ((i + 1) / SEGS) * Math.PI * 2;
+          const lx0 = e.rx * Math.cos(a0), ly0 = e.ry * Math.sin(a0);
+          const lx1 = e.rx * Math.cos(a1), ly1 = e.ry * Math.sin(a1);
+          verts.push(wx(e.center.x + lx0 * cosR - ly0 * sinR), wy(Z), wz(e.center.y + lx0 * sinR + ly0 * cosR),
+                     wx(e.center.x + lx1 * cosR - ly1 * sinR), wy(Z), wz(e.center.y + lx1 * sinR + ly1 * cosR));
+        }
+        break;
+      }
+
+      default: break;
+    }
+  }
+
+  if (verts.length < 6) return null;
+  const geo = new THREE.BufferGeometry();
+  geo.setAttribute('position', new THREE.Float32BufferAttribute(verts, 3));
+  const lines = new THREE.LineSegments(
+    geo,
+    new THREE.LineBasicMaterial({ color: 0x2255aa, opacity: 0.55, transparent: true }),
+  );
+  lines.userData.managed = true;
+  return lines;
+}
+
 function buildStockMesh(stockConfig) {
   const { width, length, thickness, topZ, datum,
           stockOriginX: ox = 0, stockOriginY: oy = 0 } = stockConfig;
@@ -242,7 +349,8 @@ const BTN_ACTIVE = { ...BTN, background: '#1a1a48', borderColor: '#5555cc', colo
 
 export default function ThreeCanvas() {
   const { state, dispatch } = useApp();
-  const { operations, stockConfig, showToolpaths, showRapids, zSliderPos } = state;
+  const { operations: allOperations, stockConfig, showToolpaths, showRapids, zSliderPos, entities, activeWorkspaceId } = state;
+  const operations = allOperations.filter(op => !op.workspaceId || op.workspaceId === activeWorkspaceId);
 
   const mountRef    = useRef(null);
   const rendererRef = useRef(null);
@@ -452,6 +560,9 @@ export default function ThreeCanvas() {
     const stockResult = buildStockMesh(stockConfig);
     if (stockResult) { scene.add(stockResult.group); firstBounds = stockResult.bounds; }
 
+    const entityLines = buildEntityLines(entities, stockConfig.topZ ?? 0);
+    if (entityLines) scene.add(entityLines);
+
     if (showToolpaths) {
       buildToolpathLines(operations, showRapids, zSliderPos).forEach(l => scene.add(l));
     }
@@ -479,7 +590,7 @@ export default function ThreeCanvas() {
       fittedRef.current = true;
       fitCamera(firstBounds);
     }
-  }, [operations, stockConfig, showToolpaths, showRapids, zSliderPos, fitCamera]);
+  }, [operations, stockConfig, showToolpaths, showRapids, zSliderPos, entities, activeWorkspaceId, fitCamera]);
 
   // Simulation controls
   const handlePlayPause = () => {
