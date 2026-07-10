@@ -1371,6 +1371,7 @@ function generateVCarve2(op, entities, context = {}) {
     for (let k = 0; k < numSamples; k++) {
       arcPositions.push((k + 0.5) / numSamples * totalLen);
     }
+    const hardCorners = []; // arc-length positions of sharp boundary corners (≤120°)
     for (let i = 0; i < nb; i++) {
       const prv = boundary[(i - 1 + nb) % nb], cur = boundary[i], nxt = boundary[(i + 1) % nb];
       const ax = prv.x - cur.x, ay = prv.y - cur.y;
@@ -1380,6 +1381,7 @@ function generateVCarve2(op, entities, context = {}) {
       const angleDeg = Math.acos(Math.max(-1, Math.min(1, (ax * bx + ay * by) / (la * lb)))) * 180 / Math.PI;
       if (angleDeg > 120) continue; // only dense-sample near genuinely sharp corners
       const pos = cumLen[i];
+      hardCorners.push(pos); // record for Step 4 path-break detection
       for (const d of [0.005, 0.01, 0.02, 0.03, 0.05, 0.08, 0.12, 0.2, 0.35, 0.5]) {
         if (pos - d > 0)        arcPositions.push(pos - d);
         if (pos + d < totalLen) arcPositions.push(pos + d);
@@ -1471,13 +1473,24 @@ function generateVCarve2(op, entities, context = {}) {
     // inward ray was cast; sorting by s makes the toolpath trace the contour in
     // boundary order.  Depth rises naturally at every serif corner tip as the
     // local half-width → 0.  No proximity graph or branch pruning needed.
+    //
+    // Break condition: XY distance jump OR the two consecutive s-positions straddle
+    // a sharp boundary corner.  The corner check stops the spine at true terminal
+    // end-walls (e.g. isthmus junctions) even when XY candidates stay close.
+    // The seam case (corner at s≈0 or s≈totalLen) is handled by the s0 > s1 branch.
+    const crossesHardCorner = (s0, s1) => {
+      if (s0 <= s1) return hardCorners.some(h => h > s0 && h < s1);
+      return hardCorners.some(h => h > s0 || h < s1); // wrap-around seam
+    };
+
     deduped.sort((a, b) => a.s - b.s);
     const ordered = [];
     for (let i = 0; i < deduped.length; i++) {
       const pt = { ...deduped[i] };
       if (i > 0) {
         const prev = ordered[ordered.length - 1];
-        if (Math.hypot(pt.x - prev.x, pt.y - prev.y) > sampleStep * 4) pt.breakPath = true;
+        const xyJump = Math.hypot(pt.x - prev.x, pt.y - prev.y) > sampleStep * 4;
+        if (xyJump || crossesHardCorner(prev.s, pt.s)) pt.breakPath = true;
       }
       ordered.push(pt);
     }
