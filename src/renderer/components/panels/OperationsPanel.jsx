@@ -20,6 +20,7 @@ const OP_TYPES = [
   { type: 'taperedplug',   label: 'Tapered Plug',   icon: '◇', desc: 'V-bit profile + endmill cleanup — plug half, fit raised' },
   { type: 'vcarve',        label: 'V-Carve',        icon: '◆', desc: 'Variable-depth V-bit carving for closed shapes' },
   { type: 'vcarve2',       label: 'V-Carve 2 (Exp)', icon: '◆', desc: 'Experimental: directional Z filter + rib suppression' },
+  { type: 'vcarve3',       label: 'V-Carve 3 (Exp)', icon: '◆', desc: 'Experimental: wall-contact trace via inscribed-circle radius, islands as walls' },
   { type: 'cornerlift',    label: 'Corner Lift (Diag)', icon: '▲', desc: 'Diagnostic: bisector walk from sharp corners — validate V-carve terminal geometry' },
   { type: 'dogbone',       label: 'Dogbone Fillets', icon: '⊕', desc: 'Drill internal corners for square-fit pockets' },
   { type: 'text',          label: 'Text Engraving',  icon: 'T',  desc: 'Engrave, outline, or pocket lettering' },
@@ -247,7 +248,7 @@ export default function OperationsPanel() {
                 ← Assign {selectedEntityIds.length} selected
               </button>
             )}
-            {(selectedOp.type === 'vcarve' || selectedOp.type === 'vcarve2' || selectedOp.type === 'cornerlift') && (
+            {(selectedOp.type === 'vcarve' || selectedOp.type === 'vcarve2' || selectedOp.type === 'vcarve3' || selectedOp.type === 'cornerlift') && (
               <button
                 style={{ ...S.calcBtn, background: showSkeleton ? '#2a1a5a' : '#2a2a5a', color: showSkeleton ? '#cc44ff' : '#8888ff', borderColor: showSkeleton ? '#9933ff' : '#3a3aaa' }}
                 onClick={() => toggleSkeleton(selectedOp)}

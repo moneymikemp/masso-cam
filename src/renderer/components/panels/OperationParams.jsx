@@ -958,8 +958,8 @@ export default function OperationParams({ op, tools, operations = [], onChange }
         </>;
       })()}
 
-      {/* ── V-Carve / V-Carve 2 ── */}
-      {(op.type === 'vcarve' || op.type === 'vcarve2') && <>
+      {/* ── V-Carve / V-Carve 2 / V-Carve 3 ── */}
+      {(op.type === 'vcarve' || op.type === 'vcarve2' || op.type === 'vcarve3') && <>
         {toolSelect}
         <div style={S.section}>V-Bit Geometry</div>
         <Field label="Half Angle" unit="°" tip="Half the included angle of the V-bit. A 60° V-bit has a 30° half angle. Determines how deep the tool cuts for a given groove width.">
@@ -998,6 +998,15 @@ export default function OperationParams({ op, tools, operations = [], onChange }
                 : 'Not sampled — click ⬇ Sample Heights in 3D view'}
             </span>
           </Field>
+        </>}
+        {op.type === 'vcarve3' && <>
+          <div style={S.section}>Corner Relief</div>
+          <Field label="Sharp Corner Angle" unit="°" tip="Interior angles sharper than this threshold get an explicit corner-relief move (rise to the reconstructed vertex at Z=0) instead of just rounding through the trace. 180° = every non-straight corner gets relief. Typical: 90–150°.">
+            <NumInput value={p.sharpCornerAngle ?? 180} onChange={v => set('sharpCornerAngle', v)} min={90} max={180} step={1} />
+          </Field>
+          <div style={{ fontSize: 9, color: '#555577', paddingBottom: 3, lineHeight: 1.4 }}>
+            Experimental: traces at a per-point offset equal to the true local inscribed-circle radius (capped by max depth), rather than a medial-axis centerline. Islands (if selected) act as real walls.
+          </div>
         </>}
       </>}
 

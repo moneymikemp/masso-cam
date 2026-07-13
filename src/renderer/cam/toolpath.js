@@ -111,6 +111,7 @@ export function generateToolpath(operation, entities, context = {}) {
     case 'taperedplug':   return generateTaperedPlug(operation, entities, context);
     case 'vcarve':        return generateVCarve(operation, entities, context);
     case 'vcarve2':       return generateVCarve2(operation, entities, context);
+    case 'vcarve3':       return generateVCarve3(operation, entities, context);
     case 'cornerlift':    return generateCornerLift(operation, entities, context);
     case 'dogbone':       return generateDogbone(operation, entities);
     case 'text':          return generateText(operation, entities);
@@ -1347,9 +1348,20 @@ function generateVCarve2(op, entities, context = {}) {
     const nb = boundary.length;
     if (nb < 3) continue;
 
-    let cx = 0, cy = 0;
-    for (const v of boundary) { cx += v.x; cy += v.y; }
-    cx /= nb; cy /= nb;
+    // Even-odd point-in-polygon test against this profile's boundary — used both
+    // to determine which side of a boundary sample is "into the material" (see
+    // Step 1 below) and to validate each candidate's final position.
+    const ptInPoly = (tx, ty) => {
+      let inside = false;
+      for (let i = 0; i < nb; i++) {
+        const ci = boundary[i], di = boundary[(i + 1) % nb];
+        if ((ci.y > ty) !== (di.y > ty)) {
+          const xc = ci.x + (ty - ci.y) / (di.y - ci.y) * (di.x - ci.x);
+          if (tx < xc) inside = !inside;
+        }
+      }
+      return inside;
+    };
 
     const cumLen = [0];
     for (let i = 0; i < nb; i++) {
@@ -1387,6 +1399,32 @@ function generateVCarve2(op, entities, context = {}) {
         if (pos + d < totalLen) arcPositions.push(pos + d);
       }
     }
+    console.log('[vcarve2 hardCorners]', `profile#${_pi} count=${hardCorners.length} totalLen=${totalLen.toFixed(2)}`,
+      hardCorners.map(h => h.toFixed(3)).join(', '));
+
+    // Merge corners that are close together in arc-length. A single sharp
+    // transition (e.g. the neck into an attached tab) is often represented by
+    // several tightly-clustered polyline vertices, each independently flagged
+    // as its own corner above. Without merging, each one forces its own break
+    // in Step 4, chopping what should be one clean transition into a string
+    // of near-empty stub segments — confirmed on a real "C" test shape:
+    // segments of length 1-4 producing isolated full-depth plunge stabs.
+    //
+    // Chain-linked clustering: compare each candidate to the PREVIOUS RAW
+    // corner (hardCorners[i-1]), not the last accepted representative.
+    // Comparing against the representative caused a cluster whose consecutive
+    // gaps (2.473/2.964mm) were each under threshold to fail merging because
+    // the first-to-last span (5.437mm) exceeded it — verified against real
+    // hardCorners data [14.047, 16.520, 19.484] from the "C" test.
+    hardCorners.sort((a, b) => a - b);
+    const CORNER_MERGE_DIST = 3.5; // mm of arc-length; clears largest real gap (2.964mm) with margin
+    const mergedCorners = [];
+    for (let i = 0; i < hardCorners.length; i++) {
+      const c = hardCorners[i];
+      if (i > 0 && c - hardCorners[i - 1] < CORNER_MERGE_DIST) continue; // still in current cluster
+      mergedCorners.push(c); // first corner of a new cluster — use as its representative
+    }
+    console.log('[vcarve2 mergedCorners]', `count=${mergedCorners.length}`, mergedCorners.map(h => h.toFixed(3)).join(', '));
 
     const candidates = [];
     for (const s of arcPositions) {
@@ -1400,9 +1438,18 @@ function generateVCarve2(op, entities, context = {}) {
       const el = segLen || 1;
       const ex = (B.x - A.x) / el, ey = (B.y - A.y) / el;
       const lx = -ey, ly = ex;
-      const inward = (lx * (cx - px) + ly * (cy - py)) >= 0;
-      const nx = inward ? lx : ey;
-      const ny = inward ? ly : -ex;
+      // Which side is "into the material"? The centroid dot-product heuristic
+      // (lx,ly toward polygon centroid = inward) only holds for convex shapes.
+      // A "C" has its centroid in the open bite — genuinely outside the material
+      // for a large stretch of the boundary — so that heuristic silently picked
+      // the wrong direction, the ray found no useful wall, and every resulting
+      // candidate failed the inside-polygon check and got dropped.
+      // (Confirmed: raw candidates covered only s=[0,106.3] of a 186.17mm boundary.)
+      // Test the actual local direction instead with a tiny probe.
+      const probeD = Math.max(1e-3, sampleStep * 0.05);
+      const inward = ptInPoly(px + lx * probeD, py + ly * probeD);
+      const nx = inward ? lx : -lx;
+      const ny = inward ? ly : -ly;
 
       let bestT = Infinity;
       for (let i = 0; i < nb; i++) {
@@ -1416,15 +1463,7 @@ function generateVCarve2(op, entities, context = {}) {
       const mx = px + nx * halfW;
       const my = py + ny * halfW;
 
-      let inside = false;
-      for (let i = 0; i < nb; i++) {
-        const ci = boundary[i], di = boundary[(i + 1) % nb];
-        if ((ci.y > my) !== (di.y > my)) {
-          const xc = ci.x + (my - ci.y) / (di.y - ci.y) * (di.x - ci.x);
-          if (mx < xc) inside = !inside;
-        }
-      }
-      if (!inside) continue;
+      if (!ptInPoly(mx, my)) continue;
 
       const depth = Math.min(maxDepth, Math.max(0, (halfW - tipRadius) / tanAngle));
       candidates.push({ x: mx, y: my, z: topZ - depth, w: bestT, s });
@@ -1436,6 +1475,13 @@ function generateVCarve2(op, entities, context = {}) {
     const medianW = sorted[Math.floor(sorted.length / 2)].w;
     const filtered = candidates.filter(c => c.w <= medianW * 2.2);
     if (filtered.length < 2) continue;
+
+    console.log('[vcarve2 candidate-coverage]',
+      'raw:', candidates.length,
+      'filtered:', filtered.length,
+      'raw s-range:', Math.min(...candidates.map(c=>c.s)).toFixed(1), '-', Math.max(...candidates.map(c=>c.s)).toFixed(1),
+      'filtered s-range:', filtered.length ? Math.min(...filtered.map(c=>c.s)).toFixed(1)+'-'+Math.max(...filtered.map(c=>c.s)).toFixed(1) : 'n/a'
+    );
 
     // Diagnostic A: does the raw skeleton contain near-zero MIC points at all?
     const minWFiltered = Math.min(...filtered.map(p => p.w));
@@ -1479,8 +1525,8 @@ function generateVCarve2(op, entities, context = {}) {
     // end-walls (e.g. isthmus junctions) even when XY candidates stay close.
     // The seam case (corner at s≈0 or s≈totalLen) is handled by the s0 > s1 branch.
     const crossesHardCorner = (s0, s1) => {
-      if (s0 <= s1) return hardCorners.some(h => h > s0 && h < s1);
-      return hardCorners.some(h => h > s0 || h < s1); // wrap-around seam
+      if (s0 <= s1) return mergedCorners.some(h => h > s0 && h < s1);
+      return mergedCorners.some(h => h > s0 || h < s1); // wrap-around seam
     };
 
     deduped.sort((a, b) => a.s - b.s);
@@ -1565,7 +1611,20 @@ function generateVCarve2(op, entities, context = {}) {
 
     for (const seg of segsToEmit) {
       const smooth = rdp(seg, 0.03);
-      if (smooth.length < 1) continue;
+
+      // A 1-2 point path can't represent a real cut — it's either a fragment
+      // left over from two breaks landing close together, or a longer raw
+      // segment that RDP collapsed down to just its endpoints because the
+      // intermediate points were nearly collinear. Checking seg.length alone
+      // BEFORE RDP isn't enough: a 4-point raw segment collapsed to 2 points
+      // post-RDP and got emitted as a bare plunge straight to -maxDepth with
+      // no lead-in (confirmed on real "C" test data). Check post-RDP length.
+      if (smooth.length < 3) {
+        if (smooth.length > 0) {
+          warnings.push(`V-Carve 2: skipped a ${smooth.length}-point fragment near (${smooth[0].x.toFixed(1)}, ${smooth[0].y.toFixed(1)}) — too short to be a real cut, likely two breaks landing close together`);
+        }
+        continue;
+      }
 
       // Diagnostic: last-5 MIC/Z values to confirm the tip is rising.
       const tail = smooth.slice(-Math.min(5, smooth.length));
@@ -1582,6 +1641,255 @@ function generateVCarve2(op, entities, context = {}) {
     }
   }
 
+  // TEMP DIAGNOSTIC — remove once isthmus break is confirmed
+  console.log('[vcarve2 moves dump]', moves.map(m =>
+    `${m.type[0].toUpperCase()}${m.type === 'rapid' ? 'R' : 'F'} ` +
+    `${m.x != null ? m.x.toFixed(2) : '_'},${m.y != null ? m.y.toFixed(2) : '_'},${m.z != null ? m.z.toFixed(2) : '_'}`
+  ).join(' | '));
+
+  return { moves, warnings };
+}
+
+// ── V-Carve 3: wall-contact / flat-bottom-convergence V-carve ──────────────
+//
+// Unlike vcarve/vcarve2 (which trace a medial-axis centerline inferred via
+// ray-casting or graph pruning), this traces a per-point-varying offset from
+// the ORIGINAL wall itself:
+//
+//   For each boundary point B(s), compute the true local inscribed-circle
+//   radius r(s) — the Apollonius solve already used by computeContourLocalWidths,
+//   generalized here to check against every selected profile's segments, not
+//   just the walking profile's own. This means islands (e.g. the counter of an
+//   "O" or "e", if selected) act as real walls for the outer boundary and vice
+//   versa, exactly like two facing walls of the same stroke.
+//
+//   Toolpath point = B(s) + normal(s) * min(r(s), maxBitRadius),
+//   Z = topZ - min(maxDepth, (r(s) - tipRadius) / tanHalfAngle).
+//
+//   Where r(s) is small (near a real corner or narrow channel), the offset
+//   IS r(s) — the tool stays in contact with the wall, diving in as the
+//   channel narrows, naturally reaching Z=topZ exactly at true zero-width
+//   points (no separate bisector-rise heuristic needed).
+//
+//   Where r(s) is large (channel wide enough that maxDepth is reached before
+//   the opposite wall), the offset clamps to maxBitRadius — the tool rides
+//   along THIS wall at a fixed radius and fixed depth.
+//
+// sharpCornerAngle (default 180): below this interior angle, insert an
+// explicit corner-relief move (rise to the original vertex at topZ) so
+// genuinely sharp corners get a clean point. Same convention as buildTaperTrace.
+//
+// NOT YET VALIDATED against the real pipeline or a live DXF — the core math
+// has been checked against synthetic polygons in isolation only.
+
+function computeMultiProfileLocalWidths(ccwProfiles) {
+  // Flat list of every segment across every profile, tagged with which
+  // profile/vertex it belongs to (so a walking profile skips only its OWN
+  // two adjacent segments — another profile's segments always count as walls).
+  const allSegs = [];
+  ccwProfiles.forEach((pr, profIdx) => {
+    const n = pr.length;
+    for (let i = 0; i < n; i++) {
+      const a = pr[i], b = pr[(i + 1) % n];
+      const ex = b.x - a.x, ey = b.y - a.y;
+      const el = Math.hypot(ex, ey);
+      if (el < 1e-10) continue;
+      allSegs.push({ profIdx, vIdx: i, ax: a.x, ay: a.y, bx: b.x, by: b.y, ex, ey, el, njx: -ey / el, njy: ex / el });
+    }
+  });
+
+  return ccwProfiles.map((pts, profIdx) => {
+    const n = pts.length;
+    const out = new Array(n).fill(Infinity);
+
+    for (let i = 0; i < n; i++) {
+      const prev = pts[(i - 1 + n) % n], curr = pts[i], next = pts[(i + 1) % n];
+      const t1x = curr.x - prev.x, t1y = curr.y - prev.y;
+      const t2x = next.x - curr.x, t2y = next.y - curr.y;
+      const l1 = Math.hypot(t1x, t1y) || 1, l2 = Math.hypot(t2x, t2y) || 1;
+      const tx = t1x / l1 + t2x / l2, ty = t1y / l1 + t2y / l2;
+      const tl = Math.hypot(tx, ty) || 1;
+      const nPx = -ty / tl, nPy = tx / tl; // inward normal, CCW polygon
+
+      let rMin = Infinity;
+      for (const seg of allSegs) {
+        if (seg.profIdx === profIdx && (seg.vIdx === i || seg.vIdx === (i - 1 + n) % n)) continue;
+
+        const lp = seg.njx * (curr.x - seg.ax) + seg.njy * (curr.y - seg.ay);
+        if (lp <= 0) continue; // curr outside this half-plane
+
+        const dot = nPx * seg.njx + nPy * seg.njy;
+        const denom = 1 - dot;
+        if (denom > 1e-6) {
+          const r = lp / denom;
+          if (r > 0 && r < rMin) {
+            const qx = curr.x + r * nPx, qy = curr.y + r * nPy;
+            const tpx = qx - r * seg.njx, tpy = qy - r * seg.njy;
+            const s = ((tpx - seg.ax) * seg.ex + (tpy - seg.ay) * seg.ey) / (seg.el * seg.el);
+            if (s >= 0 && s <= 1) rMin = r;
+          }
+        }
+      }
+
+      // Endpoint distance checks (Apollonius vs. endpoint circles).
+      for (const [vx, vy] of [[curr.x - prev.x, curr.y - prev.y], [curr.x - next.x, curr.y - next.y]]) {
+        const dotV = vx * nPx + vy * nPy;
+        if (dotV < -1e-10) {
+          const r = (vx * vx + vy * vy) / (-2 * dotV);
+          if (r > 0 && r < rMin) rMin = r;
+        }
+      }
+
+      out[i] = rMin;
+    }
+    return out;
+  });
+}
+
+function generateVCarve3(op, entities, context = {}) {
+  const p = op.params;
+  const moves = [], warnings = [];
+  if (!op.selectedIds?.length) return { moves, warnings: ['Select entities before calculating V-Carve 3'] };
+  const selected = getSelectedEntities(entities, op.selectedIds);
+  if (!selected.length) return { moves, warnings: ['No entities found for selected IDs'] };
+
+  const topZ            = p.topZ ?? 0;
+  const maxDepth        = Math.abs(p.maxDepth ?? 15);
+  const halfAngleDeg    = Math.max(1, Math.min(89, p.halfAngle ?? 15));
+  const tanAngle        = Math.tan(halfAngleDeg * Math.PI / 180);
+  const tipRadius       = (p.tipDiameter ?? 0) / 2;
+  const safeZ           = p.safeZ ?? 25;
+  const feedRate        = p.feedRate ?? 1500;
+  const plungeRate      = p.plungeRate ?? 500;
+  const sharpCornerAngle = p.sharpCornerAngle ?? 180;
+
+  const toolDiameter       = p.toolDiameter || (tipRadius * 2) || 6.35;
+  const toolMaxRadius      = toolDiameter / 2;
+  const depthAtFullDiameter = Math.max(0, (toolMaxRadius - tipRadius) / tanAngle);
+  const effectiveMaxDepth  = Math.min(maxDepth, depthAtFullDiameter);
+  if (effectiveMaxDepth < maxDepth - 1e-6) {
+    warnings.push(`V-Carve 3: requested Max Depth ${maxDepth.toFixed(2)}mm exceeds what a ⌀${toolDiameter.toFixed(2)}mm ${halfAngleDeg}° V-bit can reach before hitting full diameter (${effectiveMaxDepth.toFixed(2)}mm) — capped to the tool's actual limit.`);
+  }
+  const maxBitRadius    = tipRadius + effectiveMaxDepth * tanAngle;
+
+  const rawProfiles = buildPocketProfiles(selected);
+  if (!rawProfiles.length) return { moves, warnings: ['No closed profiles found for V-Carve 3'] };
+
+  const ccwProfiles = rawProfiles
+    .map(pr => stripClose([...pr]))
+    .filter(pr => pr.length >= 3)
+    .map(pr => isClockwise(pr) ? [...pr].reverse() : pr);
+
+  if (!ccwProfiles.length) { warnings.push('V-Carve 3: no valid closed profiles'); return { moves, warnings }; }
+
+  const radiiPerProfile = computeMultiProfileLocalWidths(ccwProfiles);
+
+  for (let profIdx = 0; profIdx < ccwProfiles.length; profIdx++) {
+    const pts = ccwProfiles[profIdx];
+    const rawRadii = radiiPerProfile[profIdx];
+    // Smooth the raw per-vertex radii before using them. A naive per-vertex
+    // inward-normal + Apollonius solve can be noisy vertex-to-vertex on
+    // real-world tessellated data; at a multi-mm offset distance (maxBitRadius
+    // here can be several mm depending on maxDepth/halfAngle), even small
+    // per-vertex noise translates into a visible positional zigzag along the
+    // trace. smoothDepthProfile (min-filter + box-average) is already used
+    // elsewhere in this file for exactly this kind of circular-array noise.
+    const n0 = rawRadii.length;
+    const radii = n0 > 9 ? smoothDepthProfile(rawRadii, 4) : rawRadii;
+    const n = pts.length;
+    if (n < 3) continue;
+
+    // Adaptive corner-relief threshold. buildTaperTrace's fixed 12° floor assumes
+    // fresh, fine, known-density arc tessellation — but this function walks the raw
+    // boundary from buildPocketProfiles, whose tessellation density depends entirely
+    // on the source DXF/font pipeline and can be coarser than 12°/vertex. A fixed
+    // floor misfires on every ordinary arc vertex, producing spurious corner-relief
+    // spikes along smooth curves. Instead, measure this profile's own typical
+    // per-vertex turn angle (90th percentile) and require a genuine corner to clear
+    // it by 3x — real corners clear typical arc-tessellation noise by 5-10x.
+    let noiseFloor = 0;
+    {
+      const turns = [];
+      for (let i = 0; i < n; i++) {
+        const prev = pts[(i - 1 + n) % n], curr = pts[i], next = pts[(i + 1) % n];
+        const ax = curr.x - prev.x, ay = curr.y - prev.y;
+        const bx = next.x - curr.x, by = next.y - curr.y;
+        const la = Math.hypot(ax, ay), lb = Math.hypot(bx, by);
+        if (la < 1e-9 || lb < 1e-9) continue;
+        const cross = (ax / la) * (by / lb) - (ay / la) * (bx / lb);
+        const dot   = (ax / la) * (bx / lb) + (ay / la) * (by / lb);
+        turns.push(Math.abs(Math.atan2(cross, dot)));
+      }
+      turns.sort((a, b) => a - b);
+      noiseFloor = turns.length ? turns[Math.floor(turns.length * 0.9)] : 0;
+    }
+    const MIN_CORNER_TURN = Math.max(
+      noiseFloor * 3,
+      (180 - sharpCornerAngle) * Math.PI / 180,
+      3 * Math.PI / 180,
+    );
+    console.log('[vcarve3 corner-threshold]', `profile#${profIdx}`,
+      `noiseFloor=${(noiseFloor * 180 / Math.PI).toFixed(2)}°`,
+      `MIN_CORNER_TURN=${(MIN_CORNER_TURN * 180 / Math.PI).toFixed(2)}°`);
+
+    console.log('[vcarve3 radii-sample RAW]', `profile#${profIdx}`, `n=${n}`,
+      rawRadii.slice(0, Math.min(40, n)).map(r => r.toFixed(2)).join(','));
+    console.log('[vcarve3 radii-sample SMOOTHED]', `profile#${profIdx}`, `n=${n}`,
+      radii.slice(0, Math.min(40, n)).map(r => r.toFixed(2)).join(','));
+
+    // Build the offset trace point + depth for every vertex.
+    const trace = [];
+    for (let i = 0; i < n; i++) {
+      const prev = pts[(i - 1 + n) % n], curr = pts[i], next = pts[(i + 1) % n];
+      const t1x = curr.x - prev.x, t1y = curr.y - prev.y;
+      const t2x = next.x - curr.x, t2y = next.y - curr.y;
+      const l1 = Math.hypot(t1x, t1y) || 1, l2 = Math.hypot(t2x, t2y) || 1;
+      const tx = t1x / l1 + t2x / l2, ty = t1y / l1 + t2y / l2;
+      const tl = Math.hypot(tx, ty) || 1;
+      const nPx = -ty / tl, nPy = tx / tl;
+
+      const r = radii[i];
+      const offsetDist = Math.min(r, maxBitRadius);
+      const depth = Math.max(0, Math.min(effectiveMaxDepth, (r - tipRadius) / tanAngle));
+      trace.push({
+        x: curr.x + nPx * offsetDist, y: curr.y + nPy * offsetDist, z: topZ - depth,
+        vx: curr.x, vy: curr.y, nPx, nPy,
+      });
+    }
+
+    if (trace.length < 3) continue;
+
+    moves.push({ type: 'rapid', x: trace[0].x, y: trace[0].y, z: safeZ });
+    moves.push({ type: 'feed',  x: trace[0].x, y: trace[0].y, z: trace[0].z, f: plungeRate });
+
+    for (let i = 1; i <= n; i++) {
+      const P = trace[i % n], Pprv = trace[(i - 1 + n) % n];
+      moves.push({ type: 'feed', x: P.x, y: P.y, z: P.z, f: feedRate });
+
+      // Corner relief: below the sharp-corner-angle threshold, ramp up to the
+      // reconstructed original vertex at topZ, then back down to the trace.
+      // Reuses buildTaperTrace's convention so both operations feel consistent.
+      const ax = P.vx - Pprv.vx, ay = P.vy - Pprv.vy;
+      const nextV = trace[(i + 1) % n];
+      const bx = nextV.vx - P.vx, by = nextV.vy - P.vy;
+      const la = Math.hypot(ax, ay), lb = Math.hypot(bx, by);
+      if (la > 1e-10 && lb > 1e-10) {
+        const ux1 = ax / la, uy1 = ay / la, ux2 = bx / lb, uy2 = by / lb;
+        const cross = ux1 * uy2 - uy1 * ux2;
+        if (cross > 1e-6) {
+          const turnAngle = Math.atan2(cross, ux1 * ux2 + uy1 * uy2);
+          if (turnAngle > MIN_CORNER_TURN) {
+            moves.push({ type: 'feed', x: P.vx, y: P.vy, z: topZ, f: feedRate });
+            moves.push({ type: 'feed', x: P.x,  y: P.y,  z: P.z,  f: feedRate });
+          }
+        }
+      }
+    }
+
+    moves.push({ type: 'rapid', z: safeZ });
+  }
+
+  if (moves.length === 0) warnings.push('V-Carve 3: no toolpath generated — check selection and parameters');
   return { moves, warnings };
 }
 
