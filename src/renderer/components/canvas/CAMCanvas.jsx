@@ -240,7 +240,12 @@ function findSelfCrossing(v, n) {
     if (p.x < minX) minX = p.x; if (p.x > maxX) maxX = p.x;
     if (p.y < minY) minY = p.y; if (p.y > maxY) maxY = p.y;
   }
-  const threshold = Math.min(20, Math.max(0.5, Math.hypot(maxX - minX, maxY - minY) * 0.02));
+  // Widened from an initial 2%/20mm cap after finding a real font-connection pinch
+  // (O-into-C) that measured ~11.6mm against a threshold of ~10.6mm — missed by a
+  // hair. 3.5%/30mm comfortably covers both that case and the O-O pinch (~6.7mm)
+  // with margin, without ballooning to where it'd start eating genuinely separate
+  // shapes on a large drawing.
+  const threshold = Math.min(30, Math.max(5, Math.hypot(maxX - minX, maxY - minY) * 0.035));
   const minGap = Math.max(4, Math.floor(n * 0.1));
   let best = null, bestD = threshold;
   for (let i = 0; i < n; i++) {
@@ -309,10 +314,24 @@ function doTrimPolyline(target, clickPt, others) {
   // point even without help from another entity (see below).
   if (hits.length === 0 && !target.closed) return null;
 
+  const sortedHits = hits.sort((p, q) => p - q);
   let lo = null, hi = null;
-  for (const u of hits.sort((p, q) => p - q)) {
+  for (const u of sortedHits) {
     if (u < clickU - 1e-9) lo = u;
     else if (hi === null && u > clickU + 1e-9) hi = u;
+  }
+  // A closed loop's parameter space wraps: a click that falls before the smallest
+  // hit or after the largest hit still has a real bracket, just on the other side
+  // of the seam (e.g. two hits at u=163 and u=359 on a 360-segment loop still
+  // bracket a click at u=50 — lo is 359 wrapped back by one full loop). Without
+  // this, such a click wrongly looked like "no external bracket" and fell through
+  // to the self-crossing fallback below even when a perfectly good cutting line
+  // was right there.
+  // Need at least 2 distinct hits to bracket a chord out of a closed loop — a
+  // single crossing (line starts inside, ends outside) has no well-defined cut.
+  if (target.closed && sortedHits.length >= 2) {
+    if (lo === null) lo = sortedHits[sortedHits.length - 1] - n;
+    if (hi === null) hi = sortedHits[0] + n;
   }
 
   function pointAt(u) {
