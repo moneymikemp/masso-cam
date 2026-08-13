@@ -958,8 +958,8 @@ export default function OperationParams({ op, tools, operations = [], onChange }
         </>;
       })()}
 
-      {/* ── V-Carve / V-Carve 2 / V-Carve 3 ── */}
-      {(op.type === 'vcarve' || op.type === 'vcarve2' || op.type === 'vcarve3') && <>
+      {/* ── V-Carve / V-Carve 2 / V-Carve 3 / V-Carve 4 ── */}
+      {(op.type === 'vcarve' || op.type === 'vcarve2' || op.type === 'vcarve3' || op.type === 'vcarve4') && <>
         {toolSelect}
         <div style={S.section}>V-Bit Geometry</div>
         <Field label="Half Angle" unit="°" tip="Half the included angle of the V-bit. A 60° V-bit has a 30° half angle. Determines how deep the tool cuts for a given groove width.">
@@ -1006,6 +1006,21 @@ export default function OperationParams({ op, tools, operations = [], onChange }
           </Field>
           <div style={{ fontSize: 9, color: '#555577', paddingBottom: 3, lineHeight: 1.4 }}>
             Experimental: traces at a per-point offset equal to the true local inscribed-circle radius (capped by max depth), rather than a medial-axis centerline. Islands (if selected) act as real walls.
+          </div>
+        </>}
+        {op.type === 'vcarve4' && <>
+          <div style={S.section}>Smoothing</div>
+          <Field label="Smoothness" tip="Filters tessellation jitter out of both the XY path and the depth (Z). 0 = raw skeleton data, unfiltered. Higher values trade a little corner sharpness on non-tip points for a cleaner, less jittery path.">
+            <input
+              type="range" min={0} max={100} step={5}
+              value={p.smoothness ?? 50}
+              onChange={e => set('smoothness', Number(e.target.value))}
+              style={{ width: 100, cursor: 'pointer', accentColor: '#5566ff' }}
+            />
+            <span style={{ ...S.unit, minWidth: 24, textAlign: 'right' }}>{p.smoothness ?? 50}</span>
+          </Field>
+          <div style={{ fontSize: 9, color: '#555577', paddingBottom: 3, lineHeight: 1.4 }}>
+            Experimental: walks the true Voronoi medial-axis skeleton (same engine as Show Skeleton) as a single centerline, instead of offsetting each contour independently. Islands act as real walls automatically. Corner tips always extend to a true point regardless of this setting. Very wide sections (wider than the tool can reach at Max Depth) are cut at max reach along the centerline rather than following the wall — may need a separate clearing pass.
           </div>
         </>}
       </>}

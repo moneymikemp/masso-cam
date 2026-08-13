@@ -12,13 +12,15 @@ const _jspoly = window.JSPoly;
 // Uses the same JSPoly Voronoi engine as the toolpath generator, so the preview
 // exactly matches the equidistant centerline that the V-bit will follow.
 // Returns {polylines: [[{x,y},...], ...]} â€” one 2-point polyline per medial axis edge.
-export function computeVCarveMedialAxis(op, entities) {
-  if (!op.selectedIds?.length) return { polylines: [] };
-  const selected = getSelectedEntities(entities, op.selectedIds);
-  if (!selected.length) return { polylines: [] };
-
+// Builds the true medial-axis skeleton graph for a selection: one outer profile
+// treats any profile it contains as a hole (island), and JSPoly's Voronoi-based
+// construct_medial_axis computes a single unified centerline for the resulting
+// annular material region, with each node carrying the true inscribed-circle
+// radius (i.e. half the local material width) at that point.
+// Returns one Map<key, {x,y,radius,adj:[]}> per independent shape group.
+function buildMedialAxisGraph(selected) {
   const allProfiles = buildPocketProfiles(selected);
-  if (!allProfiles.length) return { polylines: [] };
+  if (!allProfiles.length) return [];
 
   allProfiles.sort((a, b) => Math.abs(polygonArea(b)) - Math.abs(polygonArea(a)));
 
@@ -33,12 +35,23 @@ export function computeVCarveMedialAxis(op, entities) {
     if (!placed) shapeGroups.push({ outer: rawProfile, holes: [] });
   }
 
-  const polylines = [];
+  // Some DXF import/join paths (arc-to-arc or line-to-arc entity chaining)
+  // leave zero-length duplicate vertices at segment boundaries — seen on a
+  // real arc-based import where 26-33% of a profile's segments were
+  // duplicates. A degenerate zero-length segment site is exactly the kind of
+  // input that corrupts a Voronoi computation (confirmed: it produced long
+  // spurious cross-shape connections in the resulting skeleton graph).
+  const dedupConsecutive = pts => pts.filter((p, i) => {
+    const prev = pts[i === 0 ? pts.length - 1 : i - 1];
+    return Math.hypot(p.x - prev.x, p.y - prev.y) > 1e-6;
+  });
+
+  const graphs = [];
 
   for (const { outer: rawOuter, holes } of shapeGroups) {
-    const outer = stripClose([...rawOuter]);
+    const outer = dedupConsecutive(stripClose([...rawOuter]));
     if (outer.length < 3) continue;
-    const jsHoles = holes.map(h => stripClose([...h]).map(v => ({ x: v.x, y: v.y })));
+    const jsHoles = holes.map(h => dedupConsecutive(stripClose([...h])).map(v => ({ x: v.x, y: v.y })));
 
     let segs;
     try {
@@ -62,7 +75,23 @@ export function computeVCarveMedialAxis(op, entities) {
       if (n0 !== n1 && !n0.adj.includes(n1)) { n0.adj.push(n1); n1.adj.push(n0); }
     }
 
-    // Prune short hair branches (same threshold as the toolpath generator)
+    // Prune short hair branches (sub-mm noise from boundary tessellation).
+    //
+    // An earlier version of this measured CUMULATIVE branch length back to
+    // the nearest junction instead of a single hop, to fix one real corner
+    // that was getting deleted via many cascading sub-1mm hops. That traded
+    // one real bug for a worse one: on real font data it also preserved a
+    // pile of tessellation-noise branches that aren't real corners at all —
+    // verified directly against the source DXF vertices, only 5 of the 15
+    // "corners" it produced were within 1mm of an actual design vertex; the
+    // other 10 were pure Voronoi noise from tessellating smooth curves (every
+    // vertex of a polygon approximating a smooth curve creates its own tiny
+    // spurious medial-axis branch, a known property of discrete medial axes).
+    // No simple per-branch metric (radius, straightness, length) cleanly told
+    // the 5 real ones apart from the 10 fake ones, so reverted to the
+    // simpler, more conservative single-hop check — it undercounts real
+    // corners (occasionally misses one on unusually coarse tessellation) but
+    // never invents ones that aren't there, which matters more.
     let anyPruned = true;
     while (anyPruned) {
       anyPruned = false;
@@ -77,6 +106,22 @@ export function computeVCarveMedialAxis(op, entities) {
       }
     }
 
+    graphs.push({ nodeMap, boundary: [outer, ...jsHoles] });
+  }
+
+  return graphs;
+}
+
+export function computeVCarveMedialAxis(op, entities) {
+  if (!op.selectedIds?.length) return { polylines: [] };
+  const selected = getSelectedEntities(entities, op.selectedIds);
+  if (!selected.length) return { polylines: [] };
+
+  const graphs = buildMedialAxisGraph(selected);
+  const polylines = [];
+  const ptKey = v => `${v.x.toFixed(4)},${v.y.toFixed(4)}`;
+
+  for (const { nodeMap } of graphs) {
     // Emit each graph edge as a 2-point polyline â€” this IS the true medial axis
     const seen = new Set();
     for (const [, node] of nodeMap) {
@@ -112,6 +157,7 @@ export function generateToolpath(operation, entities, context = {}) {
     case 'vcarve':        return generateVCarve(operation, entities, context);
     case 'vcarve2':       return generateVCarve2(operation, entities, context);
     case 'vcarve3':       return generateVCarve3(operation, entities, context);
+    case 'vcarve4':       return generateVCarve4(operation, entities, context);
     case 'cornerlift':    return generateCornerLift(operation, entities, context);
     case 'dogbone':       return generateDogbone(operation, entities);
     case 'text':          return generateText(operation, entities);
@@ -1890,6 +1936,323 @@ function generateVCarve3(op, entities, context = {}) {
   }
 
   if (moves.length === 0) warnings.push('V-Carve 3: no toolpath generated — check selection and parameters');
+  return { moves, warnings };
+}
+
+// ── vcarve4: true medial-axis skeleton V-carve ──────────────────────────────
+//
+// Unlike vcarve2/vcarve3, which each approximate the centerline by offsetting
+// one boundary profile at a time (two independent approximations that only
+// coincide where the geometry happens to make them agree — see vcarve3's
+// header comment), this walks the SAME true Voronoi medial-axis graph used by
+// the "Show Skeleton" preview (buildMedialAxisGraph / computeVCarveMedialAxis).
+// Every point on that graph already carries the correct inscribed-circle
+// radius, so there is nothing to offset — the graph IS the centerline, and
+// depth falls straight out of each node's radius.
+//
+// The graph is a tree plus, for every hole/island, exactly one independent
+// cycle (a ring's skeleton loops around the hole). It's walked as a set of
+// maximal chains between "important" nodes (degree != 2 — i.e. branch
+// junctions and corner/leaf tips), each chain emitted as one rapid-in,
+// feed-along, retract-out pass, so every edge is cut exactly once.
+//
+// Wherever the true local half-width exceeds what the tool can reach at the
+// requested Max Depth, depth is clamped (same physical limit vcarve3 uses)
+// and a single summary warning is emitted — this version does not attempt
+// vcarve3's wall-hugging fallback for those areas, so very wide sections may
+// need a separate clearing pass. Not an issue for any shape whose stroke
+// width stays under the tool's max reach (the common case for text/line art).
+function generateVCarve4(op, entities, context = {}) {
+  const p = op.params;
+  const moves = [], warnings = [];
+  if (!op.selectedIds?.length) return { moves, warnings: ['Select entities before calculating V-Carve 4'] };
+  const selected = getSelectedEntities(entities, op.selectedIds);
+  if (!selected.length) return { moves, warnings: ['No entities found for selected IDs'] };
+
+  const topZ         = p.topZ ?? 0;
+  const maxDepth      = Math.abs(p.maxDepth ?? 15);
+  const halfAngleDeg  = Math.max(1, Math.min(89, p.halfAngle ?? 15));
+  const tanAngle      = Math.tan(halfAngleDeg * Math.PI / 180);
+  const tipRadius     = (p.tipDiameter ?? 0) / 2;
+  const safeZ         = p.safeZ ?? 25;
+  const feedRate      = p.feedRate ?? 1500;
+  const plungeRate    = p.plungeRate ?? 500;
+
+  const toolDiameter        = p.toolDiameter || (tipRadius * 2) || 6.35;
+  const toolMaxRadius       = toolDiameter / 2;
+  const depthAtFullDiameter = Math.max(0, (toolMaxRadius - tipRadius) / tanAngle);
+  const effectiveMaxDepth   = Math.min(maxDepth, depthAtFullDiameter);
+  if (effectiveMaxDepth < maxDepth - 1e-6) {
+    warnings.push(`V-Carve 4: requested Max Depth ${maxDepth.toFixed(2)}mm exceeds what a ⌀${toolDiameter.toFixed(2)}mm ${halfAngleDeg}° V-bit can reach before hitting full diameter (${effectiveMaxDepth.toFixed(2)}mm) — capped to the tool's actual limit.`);
+  }
+  const maxBitRadius = tipRadius + effectiveMaxDepth * tanAngle;
+
+  // Smoothness: 0 = raw skeleton, 100 = max. Drives a moving-average window
+  // applied to BOTH the radius (Z) sequence and the XY positions themselves —
+  // both come from the same underlying tessellation jitter. This keeps point
+  // DENSITY unchanged (matches how a reference CAM engine's G-code looks —
+  // plain closely-spaced G1 moves, not fewer/coarser ones): jitter is
+  // averaged out in place rather than traded for fewer, longer facets via
+  // point decimation. RDP still runs afterward but only at a small fixed
+  // tolerance, to drop truly-redundant collinear points, not to smooth.
+  // Default 50 (winHalf=9) is the lowest setting that fully eliminates
+  // direction-flip wobble on real font/curve test data — verified by counting
+  // sign flips in consecutive turn direction along each pass.
+  const smoothness  = Math.max(0, Math.min(100, p.smoothness ?? 50));
+  const smoothWinHalf = Math.round((smoothness / 100) * 18);
+  const smoothMaxArcLen = (smoothness / 100) * 3; // mm — hard cap so the XY window can't cross a real kink in the curve
+  const RDP_CLEANUP_TOL = 0.02; // mm — fixed, just drops redundant near-collinear points
+
+  const graphs = buildMedialAxisGraph(selected);
+  if (!graphs.length) return { moves, warnings: ['V-Carve 4: no medial axis could be computed for this selection'] };
+
+  let anyClamped = false;
+  const depthFor = (node) => {
+    const r = node.radius;
+    if (r > maxBitRadius) anyClamped = true;
+    const effR = Math.min(r, maxBitRadius);
+    return topZ - Math.max(0, Math.min(effectiveMaxDepth, (effR - tipRadius) / tanAngle));
+  };
+
+  // The Voronoi medial axis stops wherever construct_medial_axis's numerics
+  // terminate — every leaf branch (a true corner tip) ends at some radius > 0,
+  // never exactly 0, so corners get cut short of the actual point by default.
+  // Extrapolate each leaf's existing radius-vs-distance trend out to where it
+  // would naturally reach tipRadius (topZ), instead of stopping where the
+  // graph data happens to stop.
+  // Non-wrapping counterpart to smoothDepthProfile, for open chains (a chain
+  // end is a real corner/junction, not a seam to blend across like a closed
+  // profile). Same min-filter-then-average design: the min pass ensures noise
+  // never smooths a radius UP (which would cut deeper than the true material
+  // allows), only down.
+  //
+  // The window SHRINKS to zero at the chain's own endpoints instead of
+  // clamping (repeating) the edge value — clamping would still let interior
+  // points pull the endpoint's smoothed value away from its original depth,
+  // and endpoints are exactly the corner/junction points that other chains
+  // reference too. A window that reaches zero at i=0/i=n-1 guarantees the
+  // endpoint value passes through completely unchanged.
+  const smoothOpenProfile = (values, winHalf) => {
+    const n = values.length;
+    const win = i => Math.min(winHalf, i, n - 1 - i);
+    const mn = values.map((_, i) => {
+      const w = win(i);
+      let m = values[i];
+      for (let k = 1; k <= w; k++) m = Math.min(m, values[i - k], values[i + k]);
+      return m;
+    });
+    return mn.map((_, i) => {
+      const w = win(i);
+      let s = 0, cnt = 0;
+      for (let k = -w; k <= w; k++) { s += mn[i + k]; cnt++; }
+      return s / cnt;
+    });
+  };
+
+  // Local quadratic fit (evaluated at the window center) for XY position,
+  // instead of a plain moving average. A flat average systematically pulls
+  // points toward the inside of any curve (proportional to window size and
+  // curvature) — a quadratic fit follows the curve's own bend instead of
+  // fighting it, so it removes tessellation jitter without dragging the path
+  // off the true centerline. Same shrinking-to-zero window at chain
+  // endpoints as smoothOpenProfile, for the same connectivity reason.
+  const smoothOpenXY = (pts, winHalf, maxArcLen) => {
+    const n = pts.length;
+    // Cumulative arc length along the chain — used as the regression variable
+    // instead of raw array index. A chain can mix long single-step edges
+    // (e.g. a straight run represented by just its two endpoints) with
+    // densely-resampled curved sections; treating "2 indices away" as equally
+    // spaced regardless of real distance let a single far-away neighbor (16mm
+    // away, 1 index away) wildly distort the quadratic fit at a nearby dense
+    // point, confirmed producing an actual backtracking loop in the output
+    // path on real font data.
+    //
+    // Arc-length weighting alone isn't enough, though: a least-squares
+    // quadratic still gives far-out points outsized leverage over the fitted
+    // curvature even when correctly weighted, which shows up as residual
+    // (smaller but still real) backtracking whenever the window spans a
+    // genuine kink in the curve. So the window is ALSO hard-capped to
+    // maxArcLen of real distance on each side — this can shrink it well
+    // below winHalf points, on purpose, whenever nearby points are sparse.
+    const cum = [0];
+    for (let i = 1; i < n; i++) cum.push(cum[i - 1] + Math.hypot(pts[i].x - pts[i - 1].x, pts[i].y - pts[i - 1].y));
+    return pts.map((_, i) => {
+      let w = Math.min(winHalf, i, n - 1 - i);
+      while (w > 0 && (cum[i] - cum[i - w] > maxArcLen || cum[i + w] - cum[i] > maxArcLen)) w--;
+      if (w === 0) return { x: pts[i].x, y: pts[i].y };
+      let sumT2 = 0, sumT4 = 0, sumX = 0, sumT2X = 0, sumY = 0, sumT2Y = 0, cnt = 0;
+      for (let k = -w; k <= w; k++) {
+        const pt = pts[i + k], t = cum[i + k] - cum[i];
+        const t2 = t * t;
+        sumT2 += t2; sumT4 += t2 * t2;
+        sumX += pt.x; sumT2X += t2 * pt.x;
+        sumY += pt.y; sumT2Y += t2 * pt.y;
+        cnt++;
+      }
+      const det = cnt * sumT4 - sumT2 * sumT2;
+      if (Math.abs(det) < 1e-9) return { x: sumX / cnt, y: sumY / cnt };
+      return {
+        x: (sumX * sumT4 - sumT2 * sumT2X) / det,
+        y: (sumY * sumT4 - sumT2 * sumT2Y) / det,
+      };
+    });
+  };
+
+  const MAX_TIP_EXTENSION = 10; // mm — sanity cap against noisy near-zero slopes
+
+  // Cast a ray from (ox,oy) in direction (ux,uy) and return the distance to
+  // the nearest intersection with any segment of `boundary` (array of
+  // point-arrays, closed polygons, no explicit closing point), or null.
+  const rayBoundaryHit = (ox, oy, ux, uy, boundary, maxT) => {
+    let best = Infinity;
+    for (const poly of boundary) {
+      const n = poly.length;
+      for (let i = 0; i < n; i++) {
+        const ax = poly[i].x, ay = poly[i].y;
+        const bx = poly[(i + 1) % n].x, by = poly[(i + 1) % n].y;
+        const ex = bx - ax, ey = by - ay;
+        const denom = ux * ey - uy * ex;
+        if (Math.abs(denom) < 1e-12) continue;
+        const fx = ax - ox, fy = ay - oy;
+        const t = (fx * ey - fy * ex) / denom;
+        const s = (fx * uy - fy * ux) / denom;
+        if (t > 1e-6 && t <= maxT && s >= -1e-6 && s <= 1 + 1e-6 && t < best) best = t;
+      }
+    }
+    return isFinite(best) ? best : null;
+  };
+
+  const extendTip = (tip, prev, boundary) => {
+    const dx = tip.x - prev.x, dy = tip.y - prev.y;
+    const segLen = Math.hypot(dx, dy);
+    if (segLen < 1e-6) return null;
+    const dRadius = prev.radius - tip.radius; // > 0 if radius is shrinking toward this tip
+    if (dRadius <= 1e-6) return null;
+    const remaining = tip.radius - tipRadius;
+    if (remaining <= 1e-6) return null;
+    const t = remaining / (dRadius / segLen);
+    if (!isFinite(t) || t <= 0 || t > MAX_TIP_EXTENSION) return null;
+    const ux = dx / segLen, uy = dy / segLen;
+    // Prefer snapping exactly to the true boundary along this same direction
+    // over the linear-extrapolation estimate — extrapolation assumes the
+    // local radius-vs-distance trend stays linear all the way to zero, which
+    // only approximately holds, leaving the tool short of (or past) the true
+    // corner vertex by anywhere up to ~1mm on real font data. The boundary
+    // itself is exact, so use it whenever a hit is found nearby.
+    const hit = boundary ? rayBoundaryHit(tip.x, tip.y, ux, uy, boundary, t * 2) : null;
+    const finalT = hit ?? t;
+    return { x: tip.x + ux * finalT, y: tip.y + uy * finalT, radius: tipRadius };
+  };
+
+  // Light XY smoothing to remove jitter inherited from boundary tessellation
+  // density, without flattening genuine curvature. Always keeps both endpoints.
+  const rdp = (pts, tol) => {
+    if (pts.length <= 2) return pts;
+    const sq = tol * tol;
+    const reduce = (a, b) => {
+      let mi = a, md = -1;
+      const dx = pts[b].x - pts[a].x, dy = pts[b].y - pts[a].y;
+      const len2 = dx * dx + dy * dy;
+      for (let i = a + 1; i < b; i++) {
+        let d;
+        if (len2 < 1e-20) {
+          d = (pts[i].x - pts[a].x) ** 2 + (pts[i].y - pts[a].y) ** 2;
+        } else {
+          const tc = Math.max(0, Math.min(1, ((pts[i].x - pts[a].x) * dx + (pts[i].y - pts[a].y) * dy) / len2));
+          d = (pts[i].x - pts[a].x - tc * dx) ** 2 + (pts[i].y - pts[a].y - tc * dy) ** 2;
+        }
+        if (d > md) { md = d; mi = i; }
+      }
+      if (md > sq) return [...reduce(a, mi), ...reduce(mi, b)];
+      return [pts[b]];
+    };
+    return [pts[0], ...reduce(0, pts.length - 1)];
+  };
+
+  for (const { nodeMap, boundary } of graphs) {
+    const nodes = [...nodeMap.values()];
+    if (!nodes.length) continue;
+
+    const idOf = new Map();
+    nodes.forEach((n, i) => idOf.set(n, i));
+    const edgeKey = (a, b) => a < b ? `${a}~${b}` : `${b}~${a}`;
+    const visited = new Set();
+
+    // Walk one maximal chain starting start->next, stopping at the next
+    // "important" node (degree != 2) or back at `start` (closes a pure cycle
+    // with no other important node on it, e.g. an island with no corners).
+    const walkChain = (start, next) => {
+      const chain = [start];
+      let prev = start, cur = next;
+      while (true) {
+        chain.push(cur);
+        visited.add(edgeKey(idOf.get(prev), idOf.get(cur)));
+        if (cur === start) break;
+        if (cur.adj.length !== 2) break;
+        const nxt = cur.adj[0] === prev ? cur.adj[1] : cur.adj[0];
+        prev = cur; cur = nxt;
+      }
+      return chain;
+    };
+
+    const emitChain = (chain) => {
+      if (chain.length < 2) return;
+      const isClosedLoop = chain[0] === chain[chain.length - 1];
+
+      // Corner extrapolation is computed from the RAW (pre-smoothing) chain —
+      // smoothing's box-average pulls a short chain's near-tip radius (and,
+      // now, position) toward its neighbors, which can flatten the "radius
+      // shrinking toward the tip" trend enough that extendTip's guard fails
+      // and the corner silently stops getting extended. Extension points are
+      // spliced in AFTER smoothing, at their exact extrapolated position.
+      let extBefore = null, extAfter = null;
+      if (!isClosedLoop && chain[0].adj.length === 1) extBefore = extendTip(chain[0], chain[1], boundary);
+      if (!isClosedLoop && chain[chain.length - 1].adj.length === 1) {
+        extAfter = extendTip(chain[chain.length - 1], chain[chain.length - 2], boundary);
+      }
+
+      let pts = chain.map(n => ({ x: n.x, y: n.y, radius: n.radius }));
+      if (smoothWinHalf > 0 && pts.length > 2 * smoothWinHalf + 1) {
+        const smoothedRadii = smoothOpenProfile(pts.map(pt => pt.radius), smoothWinHalf);
+        const smoothedXY = smoothOpenXY(pts, smoothWinHalf, smoothMaxArcLen);
+        pts = pts.map((pt, i) => ({ x: smoothedXY[i].x, y: smoothedXY[i].y, radius: smoothedRadii[i] }));
+      }
+      if (extBefore) pts.unshift(extBefore);
+      if (extAfter) pts.push(extAfter);
+
+      const smooth = rdp(pts, RDP_CLEANUP_TOL);
+      moves.push({ type: 'rapid', x: smooth[0].x, y: smooth[0].y, z: safeZ });
+      moves.push({ type: 'feed',  x: smooth[0].x, y: smooth[0].y, z: depthFor(smooth[0]), f: plungeRate });
+      for (let i = 1; i < smooth.length; i++) {
+        moves.push({ type: 'feed', x: smooth[i].x, y: smooth[i].y, z: depthFor(smooth[i]), f: feedRate });
+      }
+      moves.push({ type: 'rapid', z: safeZ });
+    };
+
+    const importantNodes = nodes.filter(n => n.adj.length !== 2);
+    const startNodes = importantNodes.length ? importantNodes : [nodes[0]];
+    for (const start of startNodes) {
+      for (const nbr of start.adj) {
+        const ek = edgeKey(idOf.get(start), idOf.get(nbr));
+        if (visited.has(ek)) continue;
+        emitChain(walkChain(start, nbr));
+      }
+    }
+    // Safety net: any edges not reachable from an important node (an isolated
+    // cycle disconnected from the rest of the graph) still need to be cut.
+    for (const n of nodes) {
+      for (const nbr of n.adj) {
+        const ek = edgeKey(idOf.get(n), idOf.get(nbr));
+        if (visited.has(ek)) continue;
+        emitChain(walkChain(n, nbr));
+      }
+    }
+  }
+
+  if (anyClamped) {
+    warnings.push('V-Carve 4: some sections are wider than the tool can fully center on at the current Max Depth — those areas were cut at max reach along the true centerline rather than following the wall; consider a separate clearing pass for those areas.');
+  }
+  if (moves.length === 0) warnings.push('V-Carve 4: no toolpath generated — check selection and parameters');
   return { moves, warnings };
 }
 

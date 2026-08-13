@@ -39,7 +39,7 @@ function hexToAci(hex) {
 
 // Flatten text operation contours into [{vertices:[{x,y,bulge}], closed}] records.
 // Prefers arc-fitted data (textArcContoursRel); falls back to line segments (textContoursRel).
-function collectTextContours(operations) {
+export function collectTextContours(operations) {
   const contours = [];
   for (const op of (operations || [])) {
     if (op.type !== 'text' || !op.enabled) continue;

@@ -11,6 +11,8 @@ import StockPanel from './components/panels/StockPanel';
 import CADPropertiesPanel from './components/panels/CADPropertiesPanel';
 import ArrayModal from './components/modals/ArrayModal';
 import { parseDxf, getBounds, circleToPoints, arcToPoints, polylineToPoints } from './dxf/parser';
+import { parseSvg } from './svg/parser';
+import { exportSvg as generateSvg } from './svg/exporter';
 import { exportDxf as generateDxf } from './dxf/exporter';
 import { generateGcode, generateGcodeByTool } from './gcode/postprocessor';
 import { offsetEntity } from './cam/offsetEngine';
@@ -234,6 +236,8 @@ export default function App() {
     return window.electron.onMenu(async (event, ...args) => {
       switch (event) {
         case 'menu-import-dxf':       importDxf(); break;
+        case 'menu-import-svg':       importSvg(); break;
+        case 'menu-export-svg':       exportSvgFile(); break;
         case 'menu-export-dxf':       exportDxfFile(); break;
         case 'menu-export-gcode':     exportGcode(); break;
         case 'menu-zoom-fit':         dispatch({ type: 'RESET_VIEWPORT' }); break;
@@ -314,6 +318,31 @@ export default function App() {
     }
   }, [dispatch]);
 
+  const importSvg = useCallback(async () => {
+    try {
+      let content;
+      if (window.electron) {
+        const result = await window.electron.openSvg();
+        if (!result) return;
+        content = result.content;
+      } else {
+        const input = document.createElement('input');
+        input.type = 'file'; input.accept = '.svg';
+        content = await new Promise((res, rej) => {
+          input.onchange = e => { const f = e.target.files[0]; if (!f) return rej(); const r = new FileReader(); r.onload = ev => res(ev.target.result); r.readAsText(f); };
+          input.click();
+        });
+      }
+      dispatch({ type: 'SET_STATUS', payload: 'Parsing SVG...' });
+      const { entities, layers } = parseSvg(content);
+      const bounds = getBounds(entities);
+      dispatch({ type: 'SET_DXF', payload: { entities, layers, bounds } });
+      dispatch({ type: 'SET_STATUS', payload: `Loaded ${entities.length} entities from ${Object.keys(layers).length} layers (SVG)` });
+    } catch (err) {
+      dispatch({ type: 'SET_STATUS', payload: 'SVG import failed: ' + err.message });
+    }
+  }, [dispatch]);
+
   const exportDxfFile = useCallback(async () => {
     if (entities.length === 0) {
       dispatch({ type: 'SET_STATUS', payload: 'No entities to export' });
@@ -334,6 +363,29 @@ export default function App() {
       a.click();
       URL.revokeObjectURL(a.href);
       dispatch({ type: 'SET_STATUS', payload: 'DXF exported' });
+    }
+  }, [entities, state.layers, operations, dispatch]);
+
+  const exportSvgFile = useCallback(async () => {
+    if (entities.length === 0) {
+      dispatch({ type: 'SET_STATUS', payload: 'No entities to export' });
+      return;
+    }
+    const svgContent = generateSvg(entities, state.layers, operations);
+    if (window.electron) {
+      const savePath = await window.electron.saveSvg('export.svg');
+      if (savePath) {
+        await window.electron.writeFile(savePath, svgContent);
+        dispatch({ type: 'SET_STATUS', payload: `SVG exported: ${savePath.split(/[\\/]/).pop()}` });
+      }
+    } else {
+      const blob = new Blob([svgContent], { type: 'image/svg+xml' });
+      const a = document.createElement('a');
+      a.href = URL.createObjectURL(blob);
+      a.download = 'export.svg';
+      a.click();
+      URL.revokeObjectURL(a.href);
+      dispatch({ type: 'SET_STATUS', payload: 'SVG exported' });
     }
   }, [entities, state.layers, operations, dispatch]);
 
@@ -730,7 +782,9 @@ export default function App() {
           {!cadMode && <>
             <div style={{ width:1, background:'#2a2a50', margin:'0 4px' }} />
             <button style={S.tbBtn} onClick={importDxf}>📐 Import DXF</button>
+            <button style={S.tbBtn} onClick={importSvg} title="Import SVG (Ctrl+Shift+V)">🖋 Import SVG</button>
             <button style={S.tbBtn} onClick={exportDxfFile} title="Export all entities as DXF (Ctrl+Shift+D)">⬡ Export DXF</button>
+            <button style={S.tbBtn} onClick={exportSvgFile} title="Export all entities as SVG (Ctrl+Shift+E)">⬡ Export SVG</button>
             <button style={S.tbBtn} onClick={exportGcode}>💾 G-code</button>
             <button style={{ ...S.tbBtn, borderColor:'#3a4a2a', color:'#99cc88' }} onClick={() => setModal('inlay-wizard')}>⬡ Inlay</button>
             <div style={{ width:1, background:'#2a2a50', margin:'0 4px' }} />

@@ -113,7 +113,9 @@ function buildMenu() {
         { label: 'Save Project As...', accelerator: 'CmdOrCtrl+Shift+S', click: () => mainWindow.webContents.send('menu-save-project-as') },
         { type: 'separator' },
         { label: 'Import DXF...', accelerator: 'CmdOrCtrl+I', click: () => mainWindow.webContents.send('menu-import-dxf') },
+        { label: 'Import SVG...', accelerator: 'CmdOrCtrl+Shift+V', click: () => mainWindow.webContents.send('menu-import-svg') },
         { label: 'Export DXF...', accelerator: 'CmdOrCtrl+Shift+D', click: () => mainWindow.webContents.send('menu-export-dxf') },
+        { label: 'Export SVG...', accelerator: 'CmdOrCtrl+Shift+E', click: () => mainWindow.webContents.send('menu-export-svg') },
         { type: 'separator' },
         { label: 'Export G-code...', accelerator: 'CmdOrCtrl+E', click: () => mainWindow.webContents.send('menu-export-gcode') },
         { type: 'separator' },
@@ -233,12 +235,35 @@ ipcMain.handle('dialog-open-dxf', async () => {
   return { path: result.filePaths[0], content };
 });
 
+ipcMain.handle('dialog-open-svg', async () => {
+  const result = await dialog.showOpenDialog(mainWindow, {
+    title: 'Import SVG File',
+    filters: [{ name: 'SVG', extensions: ['svg'] }],
+    properties: ['openFile']
+  });
+  if (result.canceled) return null;
+  const content = fs.readFileSync(result.filePaths[0], 'utf-8');
+  return { path: result.filePaths[0], content };
+});
+
 ipcMain.handle('dialog-save-dxf', async (_, defaultName) => {
   const result = await dialog.showSaveDialog(mainWindow, {
     title: 'Export DXF',
     defaultPath: defaultName || 'export.dxf',
     filters: [
       { name: 'AutoCAD DXF', extensions: ['dxf'] },
+      { name: 'All Files', extensions: ['*'] }
+    ]
+  });
+  return result.canceled ? null : result.filePath;
+});
+
+ipcMain.handle('dialog-save-svg', async (_, defaultName) => {
+  const result = await dialog.showSaveDialog(mainWindow, {
+    title: 'Export SVG',
+    defaultPath: defaultName || 'export.svg',
+    filters: [
+      { name: 'SVG', extensions: ['svg'] },
       { name: 'All Files', extensions: ['*'] }
     ]
   });

@@ -3,8 +3,10 @@ const { contextBridge, ipcRenderer } = require('electron');
 contextBridge.exposeInMainWorld('electron', {
   // File dialogs
   openDxf:   () => ipcRenderer.invoke('dialog-open-dxf'),
+  openSvg:   () => ipcRenderer.invoke('dialog-open-svg'),
   openImage: () => ipcRenderer.invoke('dialog-open-image'),
   saveDxf:   (name) => ipcRenderer.invoke('dialog-save-dxf',   name),
+  saveSvg:   (name) => ipcRenderer.invoke('dialog-save-svg',   name),
   saveGcode: (name) => ipcRenderer.invoke('dialog-save-gcode', name),
   saveGcodeInlay: (name) => ipcRenderer.invoke('dialog-save-gcode-inlay', name),
   writeFile: (path, content) => ipcRenderer.invoke('write-file', path, content),
@@ -40,11 +42,11 @@ contextBridge.exposeInMainWorld('electron', {
   onMenu: (callback) => {
     const events = [
       'menu-new-project', 'menu-open-project', 'menu-save-project', 'menu-save-project-as',
-      'menu-import-dxf', 'menu-export-gcode', 'menu-undo', 'menu-redo',
+      'menu-import-dxf', 'menu-import-svg', 'menu-export-gcode', 'menu-undo', 'menu-redo',
       'menu-select-all', 'menu-delete-selected', 'menu-zoom-fit', 'menu-zoom-in',
       'menu-zoom-out', 'menu-toggle-toolpaths', 'menu-toggle-rapids',
       'menu-machine-setup', 'menu-post-settings', 'menu-tool-library', 'menu-about',
-      'menu-inlay-wizard', 'menu-export-dxf', 'menu-import-image'
+      'menu-inlay-wizard', 'menu-export-dxf', 'menu-export-svg', 'menu-import-image'
     ];
     const handlers = {};
     for (const event of events) {

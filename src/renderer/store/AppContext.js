@@ -602,6 +602,13 @@ export function AppProvider({ children }) {
     });
   }, []);
 
+  // TEMP DEBUG — exposes live state for console inspection during vcarve2 debugging.
+  // Remove once the "e" terminal fragmentation bug is fixed.
+  useEffect(() => {
+    window.__DMDCAM_STATE__ = state;
+    window.__DMDCAM_DISPATCH__ = dispatch;
+  });
+
   const getProject = useCallback(() => ({
     entities: state.entities,
     layers: state.layers,
@@ -642,6 +649,7 @@ export function getDefaultParams(type) {
     case 'vcarve':   return { safeZ: 25, topZ: 0, feedRate: 1500, plungeRate: 300, spindleRpm: 18000, halfAngle: 15, tipDiameter: 0, maxDepth: 15, flatDepth: 0 };
     case 'vcarve2':    return { safeZ: 25, topZ: 0, feedRate: 1500, plungeRate: 300, spindleRpm: 18000, halfAngle: 15, tipDiameter: 0, maxDepth: 15, flatDepth: 0, stepDown: 0 };
     case 'vcarve3':    return { safeZ: 25, topZ: 0, feedRate: 1500, plungeRate: 300, spindleRpm: 18000, halfAngle: 15, tipDiameter: 0, maxDepth: 15, sharpCornerAngle: 180 };
+    case 'vcarve4':    return { safeZ: 25, topZ: 0, feedRate: 1500, plungeRate: 300, spindleRpm: 18000, halfAngle: 15, tipDiameter: 0, maxDepth: 15, smoothness: 50 };
     case 'cornerlift': return { safeZ: 25, topZ: 0, feedRate: 1500, plungeRate: 300, spindleRpm: 18000, halfAngle: 15, tipDiameter: 0, maxDepth: 15, cornerAngle: 110 };
     case 'thread':        return { safeZ: 25, topZ: 0, feedRate: 400, plungeRate: 200, totalDepth: 15, toolDiameter: 6.35, pitch: 1.25, internal: true, direction: 'right', spindleRpm: 1000 };
     case 'taperedpocket': return {

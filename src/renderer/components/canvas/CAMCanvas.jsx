@@ -201,8 +201,167 @@ function intersectionsOnTarget(target, other) {
   return params;
 }
 
+// Like lineLineParam, but returns both segments' interior parameters instead of
+// just the first — needed to locate a self-crossing at its two visited positions
+// along the same polyline.
+function segSegParams(p1, p2, p3, p4) {
+  const dx1 = p2.x - p1.x, dy1 = p2.y - p1.y;
+  const dx2 = p4.x - p3.x, dy2 = p4.y - p3.y;
+  const den = dx1 * dy2 - dy1 * dx2;
+  if (Math.abs(den) < 1e-10) return null;
+  const t1 = ((p3.x - p1.x) * dy2 - (p3.y - p1.y) * dx2) / den;
+  const t2 = ((p3.x - p1.x) * dy1 - (p3.y - p1.y) * dx1) / den;
+  const eps = 1e-9;
+  if (t1 < eps || t1 > 1 - eps || t2 < eps || t2 > 1 - eps) return null;
+  return { t1, t2 };
+}
+
+// Finds the first place a closed polyline's own boundary crosses itself (e.g. two
+// overlapping letterforms merged into one outline via evenodd fill) and returns
+// the two "u" positions (segmentIndex + t) at which that same point is visited.
+// Returns null if the boundary is simple (no self-crossing).
+function findSelfCrossing(v, n) {
+  for (let i = 0; i < n; i++) {
+    const a = v[i], b = v[(i + 1) % v.length];
+    for (let j = i + 2; j < n; j++) {
+      if (i === 0 && j === n - 1) continue; // adjacent segment via wraparound
+      const c = v[j], d = v[(j + 1) % v.length];
+      const r = segSegParams(a, b, c, d);
+      if (r) return { u1: i + r.t1, u2: j + r.t2 };
+    }
+  }
+  // Fallback: two letterforms that are merely TANGENT (not truly overlapping) never
+  // produce a transversal crossing above — the boundary has two separate cusp
+  // vertices a hair's breadth apart instead. Look for the closest pair of vertices
+  // that are far apart along the outline (so ordinary dense curve tessellation next
+  // to itself doesn't false-positive) but close together in space.
+  let minX = Infinity, maxX = -Infinity, minY = Infinity, maxY = -Infinity;
+  for (const p of v) {
+    if (p.x < minX) minX = p.x; if (p.x > maxX) maxX = p.x;
+    if (p.y < minY) minY = p.y; if (p.y > maxY) maxY = p.y;
+  }
+  const threshold = Math.min(20, Math.max(0.5, Math.hypot(maxX - minX, maxY - minY) * 0.02));
+  const minGap = Math.max(4, Math.floor(n * 0.1));
+  let best = null, bestD = threshold;
+  for (let i = 0; i < n; i++) {
+    for (let j = i + 1; j < n; j++) {
+      const gap = Math.min(j - i, n - (j - i));
+      if (gap < minGap) continue;
+      const d = Math.hypot(v[i].x - v[j].x, v[i].y - v[j].y);
+      if (d < bestD) { bestD = d; best = { u1: i, u2: j }; }
+    }
+  }
+  return best;
+}
+
+// Trim support for a polyline target — treats each segment as a straight chord
+// (bulge is ignored, matching how polylines are already treated when they appear
+// as the *other* entity in intersectionsOnTarget above). Segment index + local t
+// is used as a single scalar "u" along the polyline so open and closed loops can
+// share the same bracket-the-click-point logic as the line/arc/circle cases below.
+function doTrimPolyline(target, clickPt, others) {
+  const v = target.vertices;
+  const n = target.closed ? v.length : v.length - 1;
+  if (n < 1) return null;
+
+  function segAt(i) {
+    return { a: v[i % v.length], b: v[(i + 1) % v.length] };
+  }
+
+  let clickSeg = -1, clickT = 0, bestD = Infinity;
+  for (let i = 0; i < n; i++) {
+    const { a, b } = segAt(i);
+    const dx = b.x - a.x, dy = b.y - a.y;
+    const len2 = dx * dx + dy * dy;
+    if (len2 < 1e-12) continue;
+    const t = Math.max(0, Math.min(1, ((clickPt.x - a.x) * dx + (clickPt.y - a.y) * dy) / len2));
+    const d = Math.hypot(clickPt.x - (a.x + t * dx), clickPt.y - (a.y + t * dy));
+    if (d < bestD) { bestD = d; clickSeg = i; clickT = t; }
+  }
+  if (clickSeg < 0) return null;
+  const clickU = clickSeg + clickT;
+
+  const hits = [];
+  for (let i = 0; i < n; i++) {
+    const { a, b } = segAt(i);
+    for (const other of others) {
+      let ts = [];
+      if (other.type === 'line') {
+        const t = lineLineParam(a, b, other.start, other.end);
+        if (t != null) ts = [t];
+      } else if (other.type === 'circle' || other.type === 'arc') {
+        const osa = other.type === 'arc' ? other.startAngle : null;
+        const oea = other.type === 'arc' ? other.endAngle : null;
+        ts = lineCircleParams(a, b, other.center.x, other.center.y, other.radius, osa, oea);
+      } else if (other.type === 'polyline') {
+        const ov = other.vertices || [];
+        const on = other.closed ? ov.length : ov.length - 1;
+        for (let j = 0; j < on; j++) {
+          const t = lineLineParam(a, b, ov[j], ov[(j + 1) % ov.length]);
+          if (t != null) ts.push(t);
+        }
+      }
+      for (const t of ts) hits.push(i + t);
+    }
+  }
+  // An open polyline with no external cuts truly has nothing to trim. A closed one
+  // still needs to fall through — it may be splittable at a self-crossing/near-tangent
+  // point even without help from another entity (see below).
+  if (hits.length === 0 && !target.closed) return null;
+
+  let lo = null, hi = null;
+  for (const u of hits.sort((p, q) => p - q)) {
+    if (u < clickU - 1e-9) lo = u;
+    else if (hi === null && u > clickU + 1e-9) hi = u;
+  }
+
+  function pointAt(u) {
+    const len = v.length;
+    let seg = Math.floor(u);
+    const t = u - seg;
+    seg = ((seg % len) + len) % len;
+    const a = v[seg], b = v[(seg + 1) % len];
+    return { x: a.x + t * (b.x - a.x), y: a.y + t * (b.y - a.y), bulge: 0 };
+  }
+  // Walks forward through the original vertex array (with wraparound) from uStart to uEnd.
+  function sliceFrom(uStart, uEnd) {
+    const pts = [pointAt(uStart)];
+    let seg = Math.floor(uStart) + 1;
+    const lastSeg = Math.ceil(uEnd);
+    while (seg < lastSeg) { pts.push({ ...v[seg % v.length], bulge: 0 }); seg++; }
+    pts.push(pointAt(uEnd));
+    return pts;
+  }
+
+  const pieces = [];
+  if (target.closed) {
+    if (lo === null || hi === null) {
+      // No other entity brackets the click — check whether the boundary crosses
+      // itself (e.g. two touching/overlapping letterforms merged into one evenodd
+      // outline). If so, split it into its two constituent loops instead of
+      // requiring the user to draw a separate cutting line through the pinch.
+      const self = findSelfCrossing(v, n);
+      if (!self) return null;
+      const loopA = sliceFrom(self.u1, self.u2);
+      const loopB = sliceFrom(self.u2, self.u1 + n);
+      return [loopA, loopB]
+        .filter(verts => verts.length >= 3)
+        .map(verts => ({ ...target, id: uuid(), vertices: verts, closed: true }));
+    }
+    pieces.push({ ...target, id: uuid(), vertices: sliceFrom(hi, lo + n), closed: false });
+  } else {
+    if (lo === null) lo = 0;
+    if (hi === null) hi = n;
+    if (lo > 1e-6) pieces.push({ ...target, id: uuid(), vertices: sliceFrom(0, lo), closed: false });
+    if (hi < n - 1e-6) pieces.push({ ...target, id: uuid(), vertices: sliceFrom(hi, n), closed: false });
+  }
+  return pieces.filter(p => p.vertices.length >= 2);
+}
+
 // Main trim: returns replacement entities or null if not trimmable
 function doTrim(target, clickPt, others) {
+  if (target.type === 'polyline') return doTrimPolyline(target, clickPt, others);
+
   const params = [];
   for (const other of others) {
     intersectionsOnTarget(target, other).forEach(p => params.push(p));
