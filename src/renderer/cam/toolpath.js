@@ -88,15 +88,84 @@ function buildMedialAxisGraph(selected) {
     // vertex of a polygon approximating a smooth curve creates its own tiny
     // spurious medial-axis branch, a known property of discrete medial axes).
     // No simple per-branch metric (radius, straightness, length) cleanly told
-    // the 5 real ones apart from the 10 fake ones, so reverted to the
-    // simpler, more conservative single-hop check — it undercounts real
-    // corners (occasionally misses one on unusually coarse tessellation) but
-    // never invents ones that aren't there, which matters more.
+    // the 5 real ones apart from the 10 fake ones — because none of those
+    // metrics look at anything but the medial-axis branch itself. The one
+    // signal that actually distinguishes them is external to the medial axis:
+    // a real design corner is a sharp turn in the ORIGINAL boundary polygon;
+    // a tessellated smooth curve's sample vertices are each nearly straight
+    // (a circle sampled every N degrees has per-vertex turning angle of only
+    // N degrees — real corners run tens of degrees or more). So identify
+    // genuine corners directly off the boundary's own turning angles, then
+    // protect the single best-matching leaf branch for each one — however
+    // many short hops it's built from — from the cascading single-hop prune
+    // below. A first version protected EVERY leaf whose outward ray landed
+    // near a sharp vertex (many-to-one); on real dense font tessellation,
+    // several unrelated noise leaves near one genuine corner all qualified,
+    // so it over-protected. A one-to-one nearest match (each corner claims
+    // only its single closest candidate leaf) fixed that. Everything else
+    // still prunes exactly as before (conservative, single-hop).
+    const CORNER_TURN_DEG = 20;   // boundary turning angle beyond which a vertex counts as a real corner
+    const CORNER_SNAP_TOL = 1.5;  // mm — max distance for a leaf's outward ray to count as "reaching" that corner
+    const RAY_MAX = 15;           // mm — how far out to look
+
+    const sharpVertices = [];
+    for (const poly of [outer, ...jsHoles]) {
+      const n = poly.length;
+      for (let i = 0; i < n; i++) {
+        const prev = poly[(i - 1 + n) % n], cur = poly[i], next = poly[(i + 1) % n];
+        const v1x = cur.x - prev.x, v1y = cur.y - prev.y;
+        const v2x = next.x - cur.x, v2y = next.y - cur.y;
+        const len1 = Math.hypot(v1x, v1y), len2 = Math.hypot(v2x, v2y);
+        if (len1 < 1e-9 || len2 < 1e-9) continue;
+        const cos = Math.max(-1, Math.min(1, (v1x * v2x + v1y * v2y) / (len1 * len2)));
+        if (Math.acos(cos) * 180 / Math.PI > CORNER_TURN_DEG) sharpVertices.push(cur);
+      }
+    }
+
+    const protectedLeaves = new Set();
+    if (sharpVertices.length) {
+      const leafHits = [];
+      for (const [key, node] of nodeMap) {
+        if (node.adj.length !== 1) continue;
+        const nbr = node.adj[0];
+        const dx = node.x - nbr.x, dy = node.y - nbr.y;
+        const len = Math.hypot(dx, dy);
+        if (len < 1e-6) continue;
+        const ux = dx / len, uy = dy / len;
+        let bestT = Infinity, bestPt = null;
+        for (const poly of [outer, ...jsHoles]) {
+          const n = poly.length;
+          for (let i = 0; i < n; i++) {
+            const ax = poly[i].x, ay = poly[i].y, bx = poly[(i + 1) % n].x, by = poly[(i + 1) % n].y;
+            const ex = bx - ax, ey = by - ay;
+            const denom = ux * ey - uy * ex;
+            if (Math.abs(denom) < 1e-12) continue;
+            const fx = ax - node.x, fy = ay - node.y;
+            const t = (fx * ey - fy * ex) / denom;
+            const s = (fx * uy - fy * ux) / denom;
+            if (t > 1e-6 && t <= RAY_MAX && s >= -1e-6 && s <= 1 + 1e-6 && t < bestT) {
+              bestT = t; bestPt = { x: node.x + ux * t, y: node.y + uy * t };
+            }
+          }
+        }
+        if (bestPt) leafHits.push({ key, pt: bestPt });
+      }
+      for (const v of sharpVertices) {
+        let bestKey = null, bestD = CORNER_SNAP_TOL;
+        for (const { key, pt } of leafHits) {
+          const d = Math.hypot(pt.x - v.x, pt.y - v.y);
+          if (d < bestD) { bestD = d; bestKey = key; }
+        }
+        if (bestKey) protectedLeaves.add(bestKey);
+      }
+    }
+
     let anyPruned = true;
     while (anyPruned) {
       anyPruned = false;
       for (const [key, node] of [...nodeMap]) {
         if (node.adj.length !== 1) continue;
+        if (protectedLeaves.has(key)) continue;
         const nbr = node.adj[0];
         if (Math.hypot(node.x - nbr.x, node.y - nbr.y) < 1.5) {
           nbr.adj = nbr.adj.filter(n => n !== node);
@@ -2080,20 +2149,28 @@ function generateVCarve4(op, entities, context = {}) {
       let w = Math.min(winHalf, i, n - 1 - i);
       while (w > 0 && (cum[i] - cum[i - w] > maxArcLen || cum[i + w] - cum[i] > maxArcLen)) w--;
       if (w === 0) return { x: pts[i].x, y: pts[i].y };
-      let sumT2 = 0, sumT4 = 0, sumX = 0, sumT2X = 0, sumY = 0, sumT2Y = 0, cnt = 0;
+      // Full 3-parameter local quadratic fit x(t) = a + b*t + c*t² (evaluated
+      // at t=0, i.e. just solving for `a`), not just a + c*t². The even-only
+      // version omitted the linear term, which implicitly assumes the window
+      // is symmetric in real arc-length on both sides of the center point —
+      // false for most real tessellation, where left/right neighbor spacing
+      // differs. That bias could push the fitted point past its own
+      // neighbors, producing a sharp spike-and-reverse in the path (confirmed
+      // via real DXF data: 14 near-exact direction reversals with the
+      // even-only fit, zero with this one).
+      let S0=0,S1=0,S2=0,S3=0,S4=0, Sx=0,Stx=0,St2x=0, Sy=0,Sty=0,St2y=0;
       for (let k = -w; k <= w; k++) {
         const pt = pts[i + k], t = cum[i + k] - cum[i];
-        const t2 = t * t;
-        sumT2 += t2; sumT4 += t2 * t2;
-        sumX += pt.x; sumT2X += t2 * pt.x;
-        sumY += pt.y; sumT2Y += t2 * pt.y;
-        cnt++;
+        const t2 = t*t, t3 = t2*t, t4 = t2*t2;
+        S0++; S1 += t; S2 += t2; S3 += t3; S4 += t4;
+        Sx += pt.x; Stx += t*pt.x; St2x += t2*pt.x;
+        Sy += pt.y; Sty += t*pt.y; St2y += t2*pt.y;
       }
-      const det = cnt * sumT4 - sumT2 * sumT2;
-      if (Math.abs(det) < 1e-9) return { x: sumX / cnt, y: sumY / cnt };
+      const D = S0*(S2*S4-S3*S3) - S1*(S1*S4-S3*S2) + S2*(S1*S3-S2*S2);
+      if (Math.abs(D) < 1e-9) return { x: Sx/S0, y: Sy/S0 };
       return {
-        x: (sumX * sumT4 - sumT2 * sumT2X) / det,
-        y: (sumY * sumT4 - sumT2 * sumT2Y) / det,
+        x: (Sx*(S2*S4-S3*S3) - S1*(Stx*S4-S3*St2x) + S2*(Stx*S3-S2*St2x)) / D,
+        y: (Sy*(S2*S4-S3*S3) - S1*(Sty*S4-S3*St2y) + S2*(Sty*S3-S2*St2y)) / D,
       };
     });
   };
@@ -2195,8 +2272,12 @@ function generateVCarve4(op, entities, context = {}) {
       return chain;
     };
 
-    const emitChain = (chain) => {
-      if (chain.length < 2) return;
+    // Smooths+extends a raw chain into final cut points, without emitting any
+    // moves — move emission is handled separately below so consecutive chains
+    // that share an endpoint (a junction) can be cut back-to-back instead of
+    // each doing its own retract-to-safeZ/re-plunge cycle.
+    const prepareChain = (chain) => {
+      if (chain.length < 2) return null;
       const isClosedLoop = chain[0] === chain[chain.length - 1];
 
       // Corner extrapolation is computed from the RAW (pre-smoothing) chain —
@@ -2212,30 +2293,35 @@ function generateVCarve4(op, entities, context = {}) {
       }
 
       let pts = chain.map(n => ({ x: n.x, y: n.y, radius: n.radius }));
-      if (smoothWinHalf > 0 && pts.length > 2 * smoothWinHalf + 1) {
-        const smoothedRadii = smoothOpenProfile(pts.map(pt => pt.radius), smoothWinHalf);
-        const smoothedXY = smoothOpenXY(pts, smoothWinHalf, smoothMaxArcLen);
+      // Adaptive window: most corner/serif leaf branches are far shorter than
+      // 2*smoothWinHalf+1 points, which used to skip smoothing on them
+      // entirely. Scale the window down to whatever the branch can support
+      // (min 1 point either side) instead of an all-or-nothing cutoff — the
+      // window still shrinks to zero exactly at the chain's own endpoints
+      // (see smoothOpenProfile/smoothOpenXY), so corner tips and junction
+      // points stay untouched either way.
+      const effectiveWin = Math.min(smoothWinHalf, Math.floor((pts.length - 1) / 2));
+      if (effectiveWin >= 1) {
+        const smoothedRadii = smoothOpenProfile(pts.map(pt => pt.radius), effectiveWin);
+        const smoothedXY = smoothOpenXY(pts, effectiveWin, smoothMaxArcLen);
         pts = pts.map((pt, i) => ({ x: smoothedXY[i].x, y: smoothedXY[i].y, radius: smoothedRadii[i] }));
       }
       if (extBefore) pts.unshift(extBefore);
       if (extAfter) pts.push(extAfter);
 
       const smooth = rdp(pts, RDP_CLEANUP_TOL);
-      moves.push({ type: 'rapid', x: smooth[0].x, y: smooth[0].y, z: safeZ });
-      moves.push({ type: 'feed',  x: smooth[0].x, y: smooth[0].y, z: depthFor(smooth[0]), f: plungeRate });
-      for (let i = 1; i < smooth.length; i++) {
-        moves.push({ type: 'feed', x: smooth[i].x, y: smooth[i].y, z: depthFor(smooth[i]), f: feedRate });
-      }
-      moves.push({ type: 'rapid', z: safeZ });
+      return { points: smooth, startPt: smooth[0], endPt: smooth[smooth.length - 1] };
     };
 
+    const preparedPaths = [];
     const importantNodes = nodes.filter(n => n.adj.length !== 2);
     const startNodes = importantNodes.length ? importantNodes : [nodes[0]];
     for (const start of startNodes) {
       for (const nbr of start.adj) {
         const ek = edgeKey(idOf.get(start), idOf.get(nbr));
         if (visited.has(ek)) continue;
-        emitChain(walkChain(start, nbr));
+        const path = prepareChain(walkChain(start, nbr));
+        if (path) preparedPaths.push(path);
       }
     }
     // Safety net: any edges not reachable from an important node (an isolated
@@ -2244,9 +2330,72 @@ function generateVCarve4(op, entities, context = {}) {
       for (const nbr of n.adj) {
         const ek = edgeKey(idOf.get(n), idOf.get(nbr));
         if (visited.has(ek)) continue;
-        emitChain(walkChain(n, nbr));
+        const path = prepareChain(walkChain(n, nbr));
+        if (path) preparedPaths.push(path);
       }
     }
+
+    // Emit moves, chaining directly from one branch into the next whenever the
+    // tool is already sitting at the shared junction point instead of always
+    // retracting to safeZ and re-plunging — a degree-3+ junction (a serif "Y",
+    // a letter like E/T/K) previously did a full retract/plunge cycle for
+    // every incident branch even though the tool never actually left that XY.
+    const remaining = new Set(preparedPaths);
+    let currentPos = null; // { x, y, z }
+    const TOUCH_TOL = 1e-3; // mm — endpoints of chains sharing a graph node are exact, not approximate
+
+    while (remaining.size > 0) {
+      let nextPath = null, reverse = false;
+      if (currentPos) {
+        for (const path of remaining) {
+          if (Math.hypot(path.startPt.x - currentPos.x, path.startPt.y - currentPos.y) < TOUCH_TOL) {
+            nextPath = path; reverse = false; break;
+          }
+          if (Math.hypot(path.endPt.x - currentPos.x, path.endPt.y - currentPos.y) < TOUCH_TOL) {
+            nextPath = path; reverse = true; break;
+          }
+        }
+      }
+
+      if (!nextPath) {
+        if (currentPos) moves.push({ type: 'rapid', z: safeZ });
+        currentPos = null;
+        // No continuation from here — jump to whichever remaining path starts
+        // closest to the current tool position (minimizes rapid travel), or
+        // just the first one if the tool hasn't moved yet.
+        if (moves.length === 0) {
+          nextPath = preparedPaths[0];
+        } else {
+          const last = moves[moves.length - 1];
+          let bestD = Infinity;
+          for (const path of remaining) {
+            const d = Math.hypot(path.startPt.x - (last.x ?? 0), path.startPt.y - (last.y ?? 0));
+            if (d < bestD) { bestD = d; nextPath = path; reverse = false; }
+          }
+        }
+      }
+
+      remaining.delete(nextPath);
+      const pts = reverse ? [...nextPath.points].reverse() : nextPath.points;
+      const startZ = depthFor(pts[0]);
+
+      if (!currentPos) {
+        moves.push({ type: 'rapid', x: pts[0].x, y: pts[0].y, z: safeZ });
+        moves.push({ type: 'feed',  x: pts[0].x, y: pts[0].y, z: startZ, f: plungeRate });
+      } else if (Math.abs(currentPos.z - startZ) > 1e-4) {
+        // Same XY as where the previous branch ended (verified by TOUCH_TOL
+        // above) — just a Z transition if the two chains' shared junction
+        // node somehow resolved to slightly different depths.
+        moves.push({ type: 'feed', x: pts[0].x, y: pts[0].y, z: startZ, f: feedRate });
+      }
+
+      for (let i = 1; i < pts.length; i++) {
+        moves.push({ type: 'feed', x: pts[i].x, y: pts[i].y, z: depthFor(pts[i]), f: feedRate });
+      }
+      const lastPt = pts[pts.length - 1];
+      currentPos = { x: lastPt.x, y: lastPt.y, z: depthFor(lastPt) };
+    }
+    if (currentPos) moves.push({ type: 'rapid', z: safeZ });
   }
 
   if (anyClamped) {
