@@ -3,6 +3,11 @@ import { useApp, getDefaultParams } from '../../store/AppContext';
 import { generateToolpath, computeVCarveMedialAxis, computeCornerLiftPolylines } from '../../cam/toolpath';
 import OperationParams from './OperationParams';
 
+// The PLASMA screen's operation list — CAM's router operations don't show there, and Plasma Cut doesn't show on CAM.
+const PLASMA_OP_TYPES = [
+  { type: 'plasma', label: 'Plasma Cut', icon: '⚡', desc: 'Torch profile — holes first, kerf offset, lead-ins' },
+];
+
 const OP_TYPES = [
   { type: 'contour',  label: '2D Contour',          icon: '⬡', desc: 'Profile cut, inside/outside/on' },
   { type: 'pocket',   label: '2D Pocket',            icon: '◻', desc: 'Pocket clearing with finish pass' },
@@ -60,7 +65,8 @@ const S = {
 export default function OperationsPanel() {
   const { state, dispatch } = useApp();
   const { operations: allOperations, selectedOperationId, entities, tools, selectedEntityIds, activeWorkspaceId } = state;
-  const operations = allOperations.filter(op => (op.workspaceId ?? 'default') === activeWorkspaceId);
+  const plasmaMode = !!state.plasmaMode;
+  const operations = allOperations.filter(op => (op.workspaceId ?? 'default') === activeWorkspaceId && (op.type === 'plasma') === plasmaMode);
   const [showAddMenu, setShowAddMenu] = useState(false);
   const [showSkeleton, setShowSkeleton] = useState(false);
 
@@ -73,7 +79,7 @@ export default function OperationsPanel() {
   const selectedOp = operations.find(o => o.id === selectedOperationId);
 
   function addOperation(type) {
-    const info = OP_TYPES.find(t => t.type === type);
+    const info = [...OP_TYPES, ...PLASMA_OP_TYPES].find(t => t.type === type);
     dispatch({
       type: 'ADD_OPERATION',
       payload: {
@@ -117,7 +123,9 @@ export default function OperationsPanel() {
     } else {
       resolvedStepover = opStepover ?? toolDbStepover;
     }
-    const entitiesToUse = op.selectedIds?.length > 0
+    // Plasma Cut gets the whole drawing: it adds the holes and nested parts
+    // inside the selected shapes itself (see plasmaShapes in toolpath.js).
+    const entitiesToUse = op.selectedIds?.length > 0 && op.type !== 'plasma'
       ? entities.filter(e => op.selectedIds.includes(e.id))
       : entities;
     const injectedParams = { ...op.params, toolDiameter };
@@ -192,24 +200,24 @@ export default function OperationsPanel() {
   return (
     <div style={S.panel}>
       <div style={S.header}>
-        <span style={S.headerTitle}>Operations</span>
+        <span style={S.headerTitle}>{plasmaMode ? 'Plasma Cuts' : 'Operations'}</span>
         <div style={{ display: 'flex', gap: 4 }}>
           {operations.length > 0 && (
             <button style={{ ...S.calcBtn, fontSize: 9 }} onClick={calculateAll} title="Recalculate all">⟳ All</button>
           )}
-          <button style={S.addBtn} onClick={() => setShowAddMenu(true)} title="Add operation">+</button>
+          <button style={S.addBtn} onClick={() => (plasmaMode ? addOperation('plasma') : setShowAddMenu(true))} title={plasmaMode ? 'Add a Plasma Cut for the selected shapes' : 'Add operation'}>+</button>
         </div>
       </div>
 
       <div style={S.opList}>
         {operations.length === 0 && (
           <div style={S.noOps}>
-            <div style={{ fontSize: 24, marginBottom: 6 }}>⚙️</div>
-            No operations yet.<br />Click + to add one.
+            <div style={{ fontSize: 24, marginBottom: 6 }}>{plasmaMode ? '⚡' : '⚙️'}</div>
+            {plasmaMode ? <>No plasma cuts yet.<br />Select a part's shapes, then click +.</> : <>No operations yet.<br />Click + to add one.</>}
           </div>
         )}
         {operations.map((op, i) => {
-          const info = OP_TYPES.find(t => t.type === op.type);
+          const info = [...OP_TYPES, ...PLASMA_OP_TYPES].find(t => t.type === op.type);
           const isSelected = op.id === selectedOperationId;
           return (
             <div key={op.id}>

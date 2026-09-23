@@ -15,6 +15,9 @@ import { parseSvg } from './svg/parser';
 import { exportSvg as generateSvg } from './svg/exporter';
 import { exportDxf as generateDxf } from './dxf/exporter';
 import { generateGcode, generateGcodeByTool } from './gcode/postprocessor';
+import { generateForPP } from './gcode/postProcessors';
+import { materialTagLine } from './plasma/plasmaMaterials';
+import PlasmaMaterialsModal from './components/modals/PlasmaMaterialsModal';
 import { offsetEntity } from './cam/offsetEngine';
 import { roundedOffsetPolyline, isClockwise, stripClose, pointInPolygon, unionPolygons } from './cam/offset';
 import { mirrorEntitiesX, mirrorEntitiesY } from './cam/toolpath';
@@ -163,6 +166,7 @@ export default function App() {
   const { state, dispatch, getProject } = useApp();
   const { activePanelTab, statusMessage, selectedEntityIds, entities, operations, postConfig, activeTool, cadMode, refImage, workspaces, activeWorkspaceId } = state;
   const isInch = postConfig.units === 'inch';
+  const plasmaMode = !!state.plasmaMode;
   const MM_PER_INCH = 25.4;
   const [modal, setModal] = useState(null); // 'profiles' | 'tool-library' | 'about' | 'inlay-wizard'
   const [view3d, setView3d] = useState(false);
@@ -409,8 +413,40 @@ export default function App() {
     });
   }
 
+  // PLASMA screen export: every calculated Plasma Cut into one program for
+  // DMD-C3 Plasma Control (the dmdPlasma post), tagged with its material.
+  const exportPlasmaGcode = useCallback(async () => {
+    const ops = operations.filter(op => op.type === 'plasma' && op.enabled && op.toolpath?.moves?.length > 0);
+    if (ops.length === 0) {
+      dispatch({ type: 'SET_STATUS', payload: 'Calculate the plasma cuts first (⟳ on each, or ⟳ All)' });
+      return;
+    }
+    const first = ops[0].params || {};
+    const mixed = ops.some(op => Math.abs((op.params?.kerf ?? 0) - (first.kerf ?? 0)) > 1e-6);
+    const cfg = {
+      postProcessor: 'dmdPlasma',
+      units: postConfig.units === 'mm' ? 'mm' : 'inch',
+      lineNumbering: false,
+      stockOriginX: state.stockConfig.stockOriginX ?? 0,
+      stockOriginY: state.stockConfig.stockOriginY ?? 0,
+      // One material per program; cuts with different kerfs can't share a tag.
+      plasmaMaterialTag: mixed ? null : materialTagLine({ materialId: first.materialId, thicknessId: first.thicknessId, name: first.materialName, kerfMm: first.kerf ?? 0 }),
+    };
+    const gcode = generateForPP('dmdPlasma', ops, cfg);
+    dispatch({ type: 'SET_GCODE', payload: gcode });
+    dispatch({ type: 'SET_PANEL_TAB', payload: 'gcode' });
+    if (window.electron) {
+      const path = await window.electron.saveGcode('plasma.nc');
+      if (path) {
+        await window.electron.writeFile(path, gcode);
+        dispatch({ type: 'SET_STATUS', payload: `Exported: ${path.split(/[\\/]/).pop()}${mixed ? ' — cuts have different kerfs, so no material tag was written' : ''}` });
+      }
+    }
+  }, [operations, postConfig, state.stockConfig, dispatch]);
+
   const exportGcode = useCallback(async () => {
-    const enabled = operations.filter(op => op.enabled && op.toolpath?.moves?.length > 0);
+    // Router/mill operations only — Plasma Cuts are posted from the PLASMA screen.
+    const enabled = operations.filter(op => op.type !== 'plasma' && op.enabled && op.toolpath?.moves?.length > 0);
     if (enabled.length === 0) {
       dispatch({ type: 'SET_STATUS', payload: 'Calculate operations first' });
       dispatch({ type: 'SET_PANEL_TAB', payload: 'gcode' });
@@ -674,6 +710,7 @@ export default function App() {
     <div style={S.app}>
       {/* Modals */}
       {modal === 'profiles' && <MachineProfilesModal onClose={() => setModal(null)} />}
+      {modal === 'plasma-materials' && <PlasmaMaterialsModal isInch={isInch} onClose={() => setModal(null)} onSaved={() => dispatch({ type: 'PLASMA_MATERIALS_SAVED' })} />}
       {modal === 'about' && <AboutModal onClose={() => setModal(null)} />}
       {modal === 'tool-library' && <ToolLibraryModal onClose={() => setModal(null)} />}
       {showArrayModal && selectedEntityIds.length > 0 && (
@@ -729,12 +766,16 @@ export default function App() {
       {/* Top Toolbar */}
       <div style={S.topbar}>
         <img src={`${process.env.PUBLIC_URL}/dmdcam-logo.png`} alt="DMDCAM" style={{ height:22, objectFit:'contain', marginRight:4, flexShrink:0 }} />
-        {/* CAD / CAM mode toggle */}
-        <button
-          title="Toggle CAD / CAM mode"
-          style={{ ...S.tbBtn, ...(cadMode ? { background:'#1a2a3a', border:'1px solid #4488cc', color:'#88ccff', fontWeight:700 } : { border:'1px solid #2a4a2a', color:'#88aa88' }) }}
-          onClick={() => dispatch({ type: 'TOGGLE_CAD_MODE' })}
-        >{cadMode ? '✏ CAD' : '⚙ CAM'}</button>
+        {/* Screen: CAD (drawing) | CAM (router operations) | PLASMA (plasma cuts + post) */}
+        {[['cad', '✏ CAD', '#4488cc', '#88ccff'], ['cam', '⚙ CAM', '#44aa44', '#99dd99'], ['plasma', '⚡ PLASMA', '#cc8833', '#ffbb66']].map(([key, label, border, color]) => {
+          const active = key === 'cad' ? cadMode : key === 'plasma' ? (!cadMode && plasmaMode) : (!cadMode && !plasmaMode);
+          return (
+            <button key={key} title={key === 'plasma' ? 'Plasma cuts and the DMD-C3 Plasma post' : key === 'cam' ? 'Router / mill operations' : 'Drawing tools'}
+              style={{ ...S.tbBtn, ...(active ? { background:'#1a2233', border:`1px solid ${border}`, color, fontWeight:700 } : { color:'#777799' }) }}
+              onClick={() => dispatch({ type: 'SET_SCREEN', payload: key })}
+            >{label}</button>
+          );
+        })}
         <div style={{ width:1, background:'#2a2a50', margin:'0 4px' }} />
         <div style={{ display:'flex', gap:4, flex:1, overflow:'hidden' }}>
           {/* CAD-mode-only tools */}
@@ -778,8 +819,20 @@ export default function App() {
             </>}
           </>}
 
+          {/* PLASMA-screen tools */}
+          {!cadMode && plasmaMode && <>
+            <div style={{ width:1, background:'#2a2a50', margin:'0 4px' }} />
+            <button style={S.tbBtn} onClick={importDxf}>📐 Import DXF</button>
+            <button style={S.tbBtn} onClick={importSvg} title="Import SVG (Ctrl+Shift+V)">🖋 Import SVG</button>
+            <button style={{ ...S.tbBtn, borderColor:'#5a4a2a', color:'#ffbb66' }} onClick={() => setModal('plasma-materials')} title="Kerf, cut feed and lead-in per material and thickness">⚡ Materials</button>
+            <button style={{ ...S.tbBtn, borderColor:'#5a4a2a', color:'#ffbb66' }} onClick={exportPlasmaGcode} title="Post all calculated plasma cuts for DMD-C3 Plasma Control (FluidNC)">💾 Plasma G-code <span style={S.unitBadge}>{unitsLabel}</span></button>
+            <div style={{ width:1, background:'#2a2a50', margin:'0 4px' }} />
+            <button style={{ ...S.tbBtn, ...(state.showToolpaths ? S.tbBtnActive : {}) }} onClick={() => dispatch({ type: 'TOGGLE_TOOLPATHS' })}>⬡ Paths</button>
+            <button style={{ ...S.tbBtn, ...(state.showRapids ? S.tbBtnActive : {}) }} onClick={() => dispatch({ type: 'TOGGLE_RAPIDS' })}>↗ Rapids</button>
+          </>}
+
           {/* CAM-mode-only tools */}
-          {!cadMode && <>
+          {!cadMode && !plasmaMode && <>
             <div style={{ width:1, background:'#2a2a50', margin:'0 4px' }} />
             <button style={S.tbBtn} onClick={importDxf}>📐 Import DXF</button>
             <button style={S.tbBtn} onClick={importSvg} title="Import SVG (Ctrl+Shift+V)">🖋 Import SVG</button>

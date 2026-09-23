@@ -1,6 +1,7 @@
 import React, { useState, useEffect } from 'react';
 import { useApp } from '../../store/AppContext';
 import { loadFontFromArrayBuffer, textToGlyphContours, textToArcPolylines, getTextBounds } from '../../cam/textEngine';
+import { loadPlasmaMaterials, findThickness, paramsFromThickness } from '../../plasma/plasmaMaterials';
 
 const S = {
   form: { padding: '6px 8px', fontSize: 11 },
@@ -115,6 +116,13 @@ export default function OperationParams({ op, tools, operations = [], onChange }
   const { state, dispatch } = useApp();
   const isInch = state.postConfig?.units === 'inch';
   const p = op.params || {};
+
+  // ── Plasma Cut: material library ───────────────────────────────────────────
+  const [plasmaLib, setPlasmaLib] = useState(null);
+  useEffect(() => {
+    if (op.type !== 'plasma') return;
+    loadPlasmaMaterials().then(setPlasmaLib);
+  }, [op.type, state.plasmaMaterialsVersion]);
 
   // ── Text Engraving: font list state ────────────────────────────────────────
   const [fontList, setFontList] = useState([]);
@@ -267,6 +275,47 @@ export default function OperationParams({ op, tools, operations = [], onChange }
       <Field label="Name" tip="Label for this operation; appears in the operations list and G-code header comments.">
         <input style={S.input} type="text" value={op.name} onChange={e => setName(e.target.value)} />
       </Field>
+
+      {/* ── Plasma Cut ── */}
+      {op.type === 'plasma' && (() => {
+        const lib = plasmaLib || [];
+        const material = lib.find(m => m.id === p.materialId);
+        const pick = (materialId, thicknessId) => {
+          const found = findThickness(lib, materialId, thicknessId);
+          if (!found) return;
+          onChange({ params: { ...p, materialId, thicknessId, materialName: `${found.material.name} ${found.thickness.label}`, ...paramsFromThickness(found.thickness) } });
+        };
+        return <>
+          <div style={S.section}>Material</div>
+          <Field label="Material" tip="From the plasma material library (⚡ Materials on the PLASMA toolbar). Picking one fills in kerf, feed and lead-in below; the program is tagged with it so DMD-C3 Plasma Control picks the same material.">
+            <Sel value={p.materialId || ''} onChange={v => { const m = lib.find(x => x.id === v); if (m?.thicknesses[0]) pick(v, m.thicknesses[0].id); }}
+              options={[['', '—'], ...lib.map(m => [m.id, m.name])]} />
+          </Field>
+          <Field label="Thickness">
+            <Sel value={p.thicknessId || ''} onChange={v => pick(p.materialId, v)}
+              options={[['', '—'], ...(material?.thicknesses || []).map(t => [t.id, t.label])]} />
+          </Field>
+          <div style={S.section}>Cut</div>
+          <Field label="Kerf" unit={distUnit} tip="Width of the cut. Outlines are offset out by half of it and holes in by half, so parts come out to size.">
+            <NumInput value={toDisp(p.kerf ?? 1.143)} onChange={v => set('kerf', toMM(v))} min={0} step={isInch ? 0.001 : 0.02} />
+          </Field>
+          <Field label="Cut Feed" unit={feedUnit} tip="Torch travel speed while cutting.">
+            <NumInput value={isInch ? +((p.feedRate ?? 3556) / MM_PER_INCH).toFixed(1) : Math.round(p.feedRate ?? 3556)} onChange={v => set('feedRate', toMM(v))} step={isInch ? 5 : 100} min={1} />
+          </Field>
+          <div style={S.section}>Lead-in</div>
+          <Field label="Style" tip="How the cut starts: the torch pierces off the part (in the scrap) and runs onto the path.\nArc: smooth quarter-circle — the usual choice.\nLine: straight in, square to the path — for tight spots.\nNone: pierce right on the path.">
+            <Sel value={p.leadInStyle || 'arc'} onChange={v => set('leadInStyle', v)} options={[['arc', 'Arc'], ['line', 'Line'], ['none', 'None']]} />
+          </Field>
+          {(p.leadInStyle || 'arc') !== 'none' && (
+            <Field label="Lead-in Length" unit={distUnit} tip="How far off the path the pierce is. Shortened automatically for holes too small to fit it.">
+              <NumInput value={toDisp(p.leadInLength ?? 3.556)} onChange={v => set('leadInLength', toMM(v))} min={0} step={dStep} />
+            </Field>
+          )}
+          <Field label="Overcut" unit={distUnit} tip="How far past the start point the torch keeps cutting before it turns off — closes the cut cleanly. 0 = stop at the start point.">
+            <NumInput value={toDisp(p.overcut ?? 0)} onChange={v => set('overcut', toMM(v))} min={0} step={dStep} />
+          </Field>
+        </>;
+      })()}
 
       {/* ── Contour ── */}
       {op.type === 'contour' && <>

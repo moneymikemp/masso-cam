@@ -2,6 +2,7 @@
 
 import { offsetPolyline, roundedOffsetPolyline, generatePocketOffsets, generateRestMachiningPasses, generateRasterPasses, polygonArea, isClockwise, clipPolygonToRegion, stripClose, pointInPolygon, differencePolygons, unionPolygons, intersectPolygons } from './offset.js';
 import { circleToPoints, arcToPoints, polylineToPoints } from '../dxf/parser.js';
+import { generatePlasma, chainPieces } from './plasmaToolpath.js';
 // jspoly loaded as a global via public/index.html <script> tag (webpack can't bundle it â€” it has internal requires).
 // In browser context the IIFE sets window.JSPoly (uppercase); module.exports.jspoly only exists in Node.
 const _jspoly = window.JSPoly;
@@ -210,6 +211,7 @@ export function generateToolpath(operation, entities, context = {}) {
   const { type } = operation;
   switch (type) {
     case 'contour':   return generateContour(operation, entities);
+    case 'plasma':    return generatePlasma(operation, plasmaShapes(entities, operation.selectedIds));
     case 'pocket':    return generatePocket(operation, entities, context);
     case 'adaptive':  return generateAdaptive(operation, entities, context);
     case 'face':      return generateFace(operation, entities);
@@ -3617,6 +3619,30 @@ function isEntityClosed(entity) {
   if (entity.type === 'polyline') return entity.closed;
   if (entity.type === 'ellipse') return true;
   return false;
+}
+
+// Plasma Cut's shapes: closed entities as they are, loose lines/arcs joined
+// into loops. A selection also takes in everything inside a selected closed
+// shape — its holes, and parts nested in them — so selecting a part's
+// outline cuts the whole part. Nothing selected = the whole drawing.
+function plasmaShapes(entities, ids) {
+  const toShapes = ents => {
+    const shapes = [];
+    const pieces = [];
+    for (const e of ents) {
+      const pts = entityToProfile(e);
+      if (!pts || pts.length < 2) continue;
+      if (isEntityClosed(e)) shapes.push({ profile: pts, closed: true, ids: [e.id] });
+      else pieces.push({ pts, ids: [e.id] });
+    }
+    return [...shapes, ...chainPieces(pieces)];
+  };
+  const all = toShapes(entities);
+  if (!ids || ids.length === 0) return all;
+  const selected = toShapes(entities.filter(e => ids.includes(e.id)));
+  const loops = selected.filter(s => s.closed);
+  const inside = all.filter(s => !s.ids.every(id => ids.includes(id)) && loops.some(l => pointInPolygon(s.profile[0], l.profile)));
+  return [...selected, ...inside];
 }
 
 function getSelectedEntities(entities, ids) {

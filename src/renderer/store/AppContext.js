@@ -151,6 +151,8 @@ const initialState = {
   activeTool: 'select',  // 'select' | 'line' | 'circle' | 'arc' | 'rect'
   gridSnap: false,
   cadMode: false,
+  // PLASMA screen: its own operations (Plasma Cut) and post, kept apart from CAM's router operations.
+  plasmaMode: false,
 
   // Z-depth slider (0 = show all, 1..N = show passes up to index N-1)
   zSliderPos: 0,
@@ -430,7 +432,9 @@ function reducer(state, action) {
     // Drawing tools
     case 'SET_ACTIVE_TOOL': return { ...state, activeTool: action.payload };
     case 'TOGGLE_GRID_SNAP':  return { ...state, gridSnap: !state.gridSnap };
-    case 'TOGGLE_CAD_MODE':   return { ...state, cadMode: !state.cadMode };
+    case 'TOGGLE_CAD_MODE':   return { ...state, cadMode: !state.cadMode, plasmaMode: false };
+    case 'PLASMA_MATERIALS_SAVED': return { ...state, plasmaMaterialsVersion: (state.plasmaMaterialsVersion || 0) + 1 };
+    case 'SET_SCREEN':        return { ...state, cadMode: action.payload === 'cad', plasmaMode: action.payload === 'plasma' };
     case 'SET_REF_IMAGE':     return { ...state, refImage: action.payload };
     case 'UPDATE_REF_IMAGE':  return { ...state, refImage: state.refImage ? { ...state.refImage, ...action.payload } : null };
     case 'SET_PREVIEW_ENTITIES': return { ...state, previewEntities: action.payload || [] };
@@ -635,6 +639,8 @@ export function useApp() {
 export function getDefaultParams(type) {
   const base = { safeZ: 25, topZ: 0, feedRate: 1500, plungeRate: 500, spindleRpm: 18000, totalDepth: 10, depthPerPass: 3 };
   switch (type) {
+    // Plasma Cut: mm / mm-per-min; defaults are Mild Steel 1/8" from the plasma material library.
+    case 'plasma':   return { materialId: 'mild-steel', thicknessId: '1-8', materialName: 'Mild Steel 1/8"', kerf: 1.143, feedRate: 3556, leadInStyle: 'arc', leadInLength: 3.556, overcut: 0 };
     case 'contour':  return { ...base, toolDiameter: 6.35, cutSide: 'outside', stockToLeave: 0, leadInStyle: 'ramp', rampAngle: 3, leadInArcRadius: null, rampEntry: true, tabs: false, tabMode: 'auto', tabHeight: 1.5, tabWidth: 6, tabCount: 4, tabPositions: [], tabProfile: 'flat', finishPass: false, finishStockToLeave: 0 };
     case 'pocket':   return { ...base, toolDiameter: 6.35, stepover: 0.45, leadInStyle: 'plunge', rampAngle: 3, finishPass: true, finishAllowance: 0.2, startFromCenter: false };
     case 'adaptive': return { ...base, toolDiameter: 6.35, stepover: 0.35, optimalLoad: 0.3, leadInStyle: 'ramp', rampAngle: 2, depthPerPass: 5 };

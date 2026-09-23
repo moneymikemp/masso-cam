@@ -80,6 +80,11 @@ export function coreGenerate(operations, cfg, hooks) {
         }
         case 'dwell':
           emit(`${n()}G4 P${move.p}`); break;
+        // Plasma: torch on/off around each cut (only the plasma post defines these).
+        case 'torch_on':
+          emitAll(hooks.torchOn?.(ctx)); modalG = null; break;
+        case 'torch_off':
+          emitAll(hooks.torchOff?.(ctx)); modalG = null; break;
         default: break;
       }
     }
@@ -92,7 +97,7 @@ export function coreGenerate(operations, cfg, hooks) {
 
     emit('');
     emit(`(--- ${op.name} [${op.type}] ---)`);
-    emit(`; ${params?.climb === false ? 'Conventional' : 'Climb'}`);
+    if (op.type !== 'plasma') emit(`; ${params?.climb === false ? 'Conventional' : 'Climb'}`);
     if (tool) emit(`(Tool: ${tool.name} dia=${tool.diameter}mm)`);
     if (toolpath.warnings?.length) {
       toolpath.warnings.forEach(w => emit(`(WARNING: ${w})`));
@@ -107,7 +112,7 @@ export function coreGenerate(operations, cfg, hooks) {
     }
 
     const rpm = params?.spindleRpm || tool?.feeds?.[0]?.spindle_rpm || 18000;
-    if (rpm !== currentSpindle) {
+    if (op.type !== 'plasma' && rpm !== currentSpindle) {
       emitAll(hooks.spindleOn(rpm, ctx));
       currentSpindle = rpm;
     }
@@ -444,6 +449,47 @@ const mach4Hooks    = makeMach3Variant('Mach4');
 const uccncHooks    = makeMach3Variant('UCCNC');
 const centroidHooks = makeMach3Variant('Centroid CNC12');
 
+// ── DMD-C3 Plasma (FluidNC) ───────────────────────────────────────────────────
+// For the DMD-C3 Plasma Control app, which runs programs on a FluidNC board
+// and fills in each pierce (touch-off, pierce height, delay, cut height)
+// from its own Material Library. So this post writes only the path:
+// - M3 / M5 around each cut (torch on/off), no S word
+// - no tool changes, spindle speeds, coolant, Z moves or G28
+// - the "(DMD-C3 material: …)" tag, so the Plasma app picks the material
+//   and warns if a different one's kerf doesn't match the path
+// Used from the PLASMA screen only (not listed in Machine Profiles).
+
+const dmdPlasmaHooks = {
+  programStart: ({ cfg, n }) => {
+    const ls = [
+      `(DMDCAM - DMD-C3 Plasma FluidNC - Generated ${new Date().toLocaleString()})`,
+    ];
+    if (cfg.plasmaMaterialTag) ls.push(cfg.plasmaMaterialTag);
+    ls.push(
+      `(Units: ${cfg.units === 'mm' ? 'mm' : 'inch'})`,
+      '',
+      `${n()}${cfg.units === 'mm' ? 'G21' : 'G20'}`,
+      `${n()}G90 G17 G94`,
+      `${n()}M5`,
+    );
+    if (cfg.programHeader) { ls.push(''); cfg.programHeader.split('\n').forEach(l => ls.push(l)); }
+    return ls;
+  },
+  toolChange: () => [],
+  spindleOn: () => [],
+  coolantOn: () => [],
+  subPassChange: () => [],
+  torchOn: ({ n }) => [`${n()}M3`],
+  torchOff: ({ n }) => [`${n()}M5`],
+  programEnd: (ctx) => {
+    const { n } = ctx;
+    const ls = [`${n()}M5`];
+    pushFooter(ls, ctx);
+    ls.push(`${n()}M30`);
+    return ls;
+  },
+};
+
 // ── Post-Processor Registry ───────────────────────────────────────────────────
 
 export const POST_PROCESSORS = {
@@ -513,9 +559,19 @@ export const POST_PROCESSORS = {
     settingsSpec: COMMON_SPEC,
     hooks: centroidHooks,
   },
+  dmdPlasma: {
+    id: 'dmdPlasma',
+    label: 'DMD-C3 Plasma (FluidNC)',
+    description: 'DMD-C3 Plasma Control on FluidNC — torch M3/M5 only; the app adds pierce heights and delays',
+    plasmaOnly: true,
+    defaultSettings: { ...COMMON_DEFAULTS, lineNumbering: false, units: 'inch' },
+    settingsSpec: [SPEC_UNITS, SPEC_HEADER, SPEC_FOOTER],
+    hooks: dmdPlasmaHooks,
+  },
 };
 
-export const PP_LIST = Object.values(POST_PROCESSORS);
+// Machine Profiles lists router/mill posts; the plasma post is the PLASMA screen's own.
+export const PP_LIST = Object.values(POST_PROCESSORS).filter(pp => !pp.plasmaOnly);
 
 // Dispatch to the correct post-processor by ID.
 export function generateForPP(ppId, operations, cfg) {
