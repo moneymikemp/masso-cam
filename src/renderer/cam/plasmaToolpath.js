@@ -18,8 +18,16 @@
 //  - Order: deepest first (holes before the outline around them; a part
 //    inside a hole before that hole), nearest next within the same depth.
 //  - Open shapes are cut on the line, as drawn.
+//  - Scrap narrower than the kerf (a slot between two letters, a pinch in a
+//    cut-out, a thin notch into an outline) is cut down its centerline,
+//    spliced into the shape's cut — see narrowSlots.js.
+//  - Outlines start at the middle of their longest straight run, unless the
+//    outline entity carries a `leadAt` point (set by Nest → Apply): then they
+//    start at the nearest point to it, so the lead-in lands where the nester
+//    left room for it.
 
-import { offsetPolyline, isClockwise, pointInPolygon, stripClose } from './offset.js';
+import { offsetPolyline, isClockwise, pointInPolygon, stripClose, polygonArea } from './offset.js';
+import { narrowCenterlines, spliceSlots } from './narrowSlots.js';
 
 function dist(a, b) {
   return Math.hypot(a.x - b.x, a.y - b.y);
@@ -44,6 +52,43 @@ function startOnLongestSegment(loop) {
   const a = loop[best], b = loop[(best + 1) % loop.length];
   const mid = { x: (a.x + b.x) / 2, y: (a.y + b.y) / 2 };
   return [mid, ...loop.slice(best + 1), ...loop.slice(0, best + 1)];
+}
+
+/** Starts a closed loop (no closing point) at the point on it nearest to `pt`. */
+function startNearest(loop, pt) {
+  let best = 0, bestD = Infinity, bestP = loop[0];
+  for (let i = 0; i < loop.length; i++) {
+    const a = loop[i], b = loop[(i + 1) % loop.length];
+    const ex = b.x - a.x, ey = b.y - a.y, len2 = ex * ex + ey * ey;
+    const t = len2 > 0 ? Math.max(0, Math.min(1, ((pt.x - a.x) * ex + (pt.y - a.y) * ey) / len2)) : 0;
+    const q = { x: a.x + t * ex, y: a.y + t * ey };
+    const d = dist(q, pt);
+    if (d < bestD) { bestD = d; best = i; bestP = q; }
+  }
+  const next = loop.slice(best + 1).concat(loop.slice(0, best + 1));
+  // Don't double a vertex when the nearest point is one.
+  if (dist(bestP, next[0]) < 1e-6) return next;
+  if (dist(bestP, next[next.length - 1]) < 1e-6) return [next[next.length - 1], ...next.slice(0, -1)];
+  return [bestP, ...next];
+}
+
+/**
+ * The kerf-compensated cut paths of a closed shape (CCW `loop`, no closing
+ * point), in cut direction, not yet started anywhere — biggest first. An
+ * outline gives one. A hole that's narrower than the kerf somewhere comes
+ * apart when it's offset inward, into a path per wide-enough piece; each
+ * is cut. Empty if the kerf doesn't fit at all.
+ */
+function kerfPaths(loop, isHole, kerf) {
+  let paths = [loop];
+  if (kerf > 0) {
+    paths = offsetPolyline(loop, isHole ? kerf / 2 : -kerf / 2, true)
+      .filter(r => r && r.length >= 4)
+      .map(r => stripClose(r)) // CCW
+      .sort((a, b) => polygonArea(b) - polygonArea(a));
+    if (!isHole) paths = paths.slice(0, 1);
+  }
+  return isHole ? paths : paths.map(p => [...p].reverse()); // outlines clockwise
 }
 
 /** Points `length` along a closed loop from its start (for the overcut past the start point). */
@@ -98,8 +143,18 @@ function leadIn(loop, isHole, style, length) {
  * Joins loose pieces (lines, arcs, open polylines — how many DXF parts are
  * drawn) end to end into as few paths as possible; a path whose ends meet is
  * a closed shape. pieces: [{ pts, ids }] → [{ profile, closed, ids }].
+ * Ends that meet exactly (within `snap`) are joined first; whatever is still
+ * open then gets a second pass that bridges gaps up to `gapSnap` (0.25 mm,
+ * about 0.01") — real DXFs often leave hairline gaps in an outline.
  */
-export function chainPieces(pieces, snap = 0.01) {
+export function chainPieces(pieces, snap = 0.01, gapSnap = 0.25) {
+  const first = chainOnce(pieces, snap);
+  const open = first.filter(c => !c.closed);
+  if (!open.length || gapSnap <= snap) return first;
+  return [...first.filter(c => c.closed), ...chainOnce(open.map(c => ({ pts: c.profile, ids: c.ids })), gapSnap)];
+}
+
+function chainOnce(pieces, snap) {
   const left = pieces.filter(p => p.pts && p.pts.length >= 2).map(p => ({ ...p, used: false }));
   const out = [];
   for (const seed of left) {
@@ -151,7 +206,7 @@ export function generatePlasma(op, shapes) {
       let loop = stripClose([...s.profile]);
       if (loop.length < 3) continue;
       if (isClockwise(loop)) loop = [...loop].reverse();
-      closed.push({ loop });
+      closed.push({ loop, leadAt: s.leadAt });
     } else {
       open.push({ pts: s.profile });
     }
@@ -166,20 +221,24 @@ export function generatePlasma(op, shapes) {
 
   // Kerf offset and cut direction.
   const cuts = [];
+  let splitHoles = 0, slotCount = 0;
   for (const c of closed) {
-    let path = c.loop;
-    if (kerf > 0) {
-      const res = offsetPolyline(c.loop, c.isHole ? kerf / 2 : -kerf / 2, true);
-      const off = res[0] && res[0].length >= 4 ? stripClose(res[0]) : null;
-      if (!off) {
-        warnings.push(`A ${c.isHole ? 'hole' : 'shape'} is too small for a ${kerf.toFixed(2)} mm kerf — skipped.`);
-        continue;
-      }
-      path = off; // CCW
+    // Start each loop first, so the narrow-slot spurs spliced in after never hold the lead-in.
+    const started = kerfPaths(c.loop, c.isHole, kerf).map(path => (c.leadAt && !c.isHole ? startNearest(path, c.leadAt) : startOnLongestSegment(path)));
+    const { loops, open: slotLines, slots } = kerf > 0
+      ? spliceSlots(started, narrowCenterlines(c.loop, c.isHole, kerf), kerf)
+      : { loops: started, open: [], slots: 0 };
+    slotCount += slots;
+    if (!loops.length && !slotLines.length) {
+      warnings.push(`A ${c.isHole ? 'hole' : 'shape'} is too small for a ${kerf.toFixed(2)} mm kerf — skipped.`);
+      continue;
     }
-    if (!c.isHole) path = [...path].reverse(); // outlines clockwise
-    cuts.push({ kind: c.isHole ? 'hole' : 'outline', depth: c.depth, loop: startOnLongestSegment(path) });
+    if (loops.length > 1) splitHoles++;
+    for (const loop of loops) cuts.push({ kind: c.isHole ? 'hole' : 'outline', depth: c.depth, loop });
+    for (const pts of slotLines) cuts.push({ kind: 'open', depth: c.depth, pts });
   }
+  if (slotCount) warnings.push(`${slotCount} spot${slotCount === 1 ? '' : 's'} narrower than the kerf cut down the centerline — the walls there are cut back slightly.`);
+  if (splitHoles) warnings.push(`${splitHoles} hole${splitHoles === 1 ? ' is' : 's are'} still in separate pieces — narrower than half the kerf somewhere, too thin to cut through.`);
   for (const o of open) cuts.push({ kind: 'open', depth: Infinity, pts: o.pts });
 
   // Deepest first, nearest next within a depth.
@@ -227,4 +286,37 @@ export function generatePlasma(op, shapes) {
   if (skippedLeads) warnings.push(`${skippedLeads} cut${skippedLeads === 1 ? '' : 's'} too small for a lead-in — pierced on the path.`);
 
   return { moves, warnings, contours };
+}
+
+/**
+ * The outside cut of a part outline as a Plasma Cut with these params makes
+ * it (no leadAt yet): where it starts and the lead-in's path from the pierce,
+ * arcs as points. For the nester, which keeps room for it. outline: closed
+ * points, no closing point. params: { kerf, leadInStyle, leadInLength } (mm).
+ * Returns { start, pierce, leadPts } or null if the kerf doesn't fit.
+ */
+export function outsideLead(outline, params = {}) {
+  let loop = stripClose([...outline]);
+  if (loop.length < 3) return null;
+  if (isClockwise(loop)) loop = [...loop].reverse();
+  const [path] = kerfPaths(loop, false, Math.max(0, params.kerf ?? 1.143));
+  if (!path) return null;
+  const cut = startOnLongestSegment(path);
+  const style = params.leadInStyle === 'line' ? 'line' : params.leadInStyle === 'none' ? 'none' : 'arc';
+  const lead = style === 'none' ? null : leadIn(cut, false, style, Math.max(0, params.leadInLength ?? 3.556));
+  const start = cut[0];
+  if (!lead) return { start, pierce: start, leadPts: [start] };
+  if (lead.move.type === 'feed') return { start, pierce: lead.pierce, leadPts: [lead.pierce, start] };
+  // Arc: counter-clockwise from the pierce to the start around C = pierce + (i, j).
+  const C = { x: lead.pierce.x + lead.move.i, y: lead.pierce.y + lead.move.j };
+  const R = dist(C, start);
+  const a0 = Math.atan2(lead.pierce.y - C.y, lead.pierce.x - C.x);
+  let a1 = Math.atan2(start.y - C.y, start.x - C.x);
+  while (a1 < a0) a1 += 2 * Math.PI;
+  const n = 8;
+  const leadPts = Array.from({ length: n + 1 }, (_, k) => {
+    const a = a0 + ((a1 - a0) * k) / n;
+    return { x: C.x + R * Math.cos(a), y: C.y + R * Math.sin(a) };
+  });
+  return { start, pierce: lead.pierce, leadPts };
 }

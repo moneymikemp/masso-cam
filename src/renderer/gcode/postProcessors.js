@@ -29,7 +29,14 @@ export function coreGenerate(operations, cfg, hooks) {
   function fmtX(v) { return fmt(v - sox); }
   function fmtY(v) { return fmt(v - soy); }
 
-  const ctx = { cfg, n, fmt, fmtF };
+  // pos/traveled (mm, world) and state are for posts that need them (CommandCNC
+  // touch-off spacing, end-of-cut extension); op is the operation being posted.
+  const ctx = { cfg, n, fmt, fmtF, fmtX, fmtY, pos: { x: 0, y: 0 }, traveled: 0, state: {}, op: null };
+  function moveTo(move) {
+    const x = move.x ?? ctx.pos.x, y = move.y ?? ctx.pos.y;
+    ctx.traveled += Math.hypot(x - ctx.pos.x, y - ctx.pos.y);
+    ctx.pos = { x, y };
+  }
 
   function emit(l) { lines.push(l); }
   function emitAll(arr) { if (arr?.length) arr.forEach(l => emit(l)); }
@@ -38,7 +45,9 @@ export function coreGenerate(operations, cfg, hooks) {
 
   function emitMoves(moves) {
     modalG = null; currentFeed = 0;
-    for (const move of moves) {
+    for (let mi = 0; mi < moves.length; mi++) {
+      const move = moves[mi];
+      if (move.x !== undefined || move.y !== undefined) moveTo(move);
       switch (move.type) {
         case 'rapid': {
           const p = ['G0'];
@@ -65,7 +74,7 @@ export function coreGenerate(operations, cfg, hooks) {
           if (move.z !== undefined) p.push(`Z${fmt(move.z)}`);
           if (move.i !== undefined) p.push(`I${fmt(move.i)}`);
           if (move.j !== undefined) p.push(`J${fmt(move.j)}`);
-          if (move.f !== undefined) p.push(`F${fmtF(move.f)}`);
+          if (move.f !== undefined) { p.push(`F${fmtF(move.f)}`); currentFeed = move.f; }
           emit(`${n()}${p.join(' ')}`); modalG = 'G2'; break;
         }
         case 'arc_ccw': {
@@ -75,16 +84,27 @@ export function coreGenerate(operations, cfg, hooks) {
           if (move.z !== undefined) p.push(`Z${fmt(move.z)}`);
           if (move.i !== undefined) p.push(`I${fmt(move.i)}`);
           if (move.j !== undefined) p.push(`J${fmt(move.j)}`);
-          if (move.f !== undefined) p.push(`F${fmtF(move.f)}`);
+          if (move.f !== undefined) { p.push(`F${fmtF(move.f)}`); currentFeed = move.f; }
           emit(`${n()}${p.join(' ')}`); modalG = 'G3'; break;
         }
         case 'dwell':
           emit(`${n()}G4 P${move.p}`); break;
-        // Plasma: torch on/off around each cut (only the plasma post defines these).
-        case 'torch_on':
-          emitAll(hooks.torchOn?.(ctx)); modalG = null; break;
+        // Plasma: torch on/off around each cut (only the plasma posts define
+        // these). torchOn also gets the cut's length, up to its torch_off.
+        // The hooks may move Z with their own feed, so G1 and F go out again.
+        case 'torch_on': {
+          let cutLength = 0, at = { ...ctx.pos };
+          for (let k = mi + 1; k < moves.length && moves[k].type !== 'torch_off'; k++) {
+            const m = moves[k];
+            if (m.x === undefined && m.y === undefined) continue;
+            const to = { x: m.x ?? at.x, y: m.y ?? at.y };
+            cutLength += Math.hypot(to.x - at.x, to.y - at.y);
+            at = to;
+          }
+          emitAll(hooks.torchOn?.(ctx, { cutLength })); modalG = null; currentFeed = 0; break;
+        }
         case 'torch_off':
-          emitAll(hooks.torchOff?.(ctx)); modalG = null; break;
+          emitAll(hooks.torchOff?.(ctx)); modalG = null; currentFeed = 0; break;
         default: break;
       }
     }
@@ -95,8 +115,10 @@ export function coreGenerate(operations, cfg, hooks) {
     const { toolpath, tool, params } = op;
     if (!toolpath?.moves?.length) continue;
 
+    ctx.op = op;
     emit('');
     emit(`(--- ${op.name} [${op.type}] ---)`);
+    emitAll(hooks.opStart?.(op, ctx));
     if (op.type !== 'plasma') emit(`; ${params?.climb === false ? 'Conventional' : 'Climb'}`);
     if (tool) emit(`(Tool: ${tool.name} dia=${tool.diameter}mm)`);
     if (toolpath.warnings?.length) {
@@ -490,8 +512,143 @@ const dmdPlasmaHooks = {
   },
 };
 
-// ── Post-Processor Registry ───────────────────────────────────────────────────
+// ── CandCNC CommandCNC plasma (LinuxCNC + DTHC IV) ────────────────────────────
+// Follows CandCNC's SheetCam post "CandCNCPlasmaLLCNC" rev 30B: DTHC values
+// set with M68 E0 Q<code><value> (3 = volts, 4 = amps, 8 = air psi, 5 = THC
+// delay ×10, 1 = soft-pierce amps, 10/20 = THC off/on, 80/89 = AutoSet
+// on/off, 900 = global THC on), M67 E0 Q20/Q10 to switch the THC with
+// motion, and CommandCNC's o<touchoff>/o<endcut> subroutines. Kerf is
+// already in the path (G40). Per-cut values (op._cut: pierceHeight,
+// cutHeight, pierceDelay, volts, amps — mm/s/V/A) come from the material
+// library; the rest are machine settings (lengths in mm).
 
+const cncNote = cfg => (code, note) => (cfg.comments ? `${code}  (${note})` : code);
+
+const commandCncHooks = {
+  programStart: ({ cfg, fmt, state }) => {
+    const c = cncNote(cfg);
+    state.setup = null;
+    state.touchedAt = null;
+    const ls = [`(DMDCAM - CandCNC CommandCNC Plasma - Generated ${new Date().toLocaleString()})`];
+    if (cfg.plasmaMaterialName) ls.push(`(Material: ${cfg.plasmaMaterialName.replace(/[()]/g, '').replace(/\s+/g, ' ').trim()})`);
+    ls.push(
+      cfg.units === 'mm' ? 'G21 (Units: Metric)' : 'G20 (Units: Inches)',
+      'F10.0',
+      'G90 G40',
+      c(`G64 P${fmt(0.254)} Q${fmt(0.0254)}`, 'path blending tolerances'),
+      c('M68 E0 Q10', 'DTHC is OFF'),
+    );
+    if (cfg.programHeader) { ls.push(''); cfg.programHeader.split('\n').forEach(l => ls.push(l)); }
+    ls.push(`G0 Z${fmt(cncRapidZ(cfg))}`);
+    return ls;
+  },
+  // Per operation: THC reset, the material's DTHC values when they change
+  // (with the optional check-settings pause), and AutoSet.
+  opStart: (op, { cfg, state }) => {
+    const c = cncNote(cfg);
+    const cut = op._cut || {};
+    const ls = [c('M68 E0 Q900', 'Reset global DTHC to ON'), 'G4 P0.1'];
+    const setup = JSON.stringify([cut.volts, cut.amps, cfg.rs485, cfg.airPressure, cfg.dthcDelay]);
+    if (setup !== state.setup) {
+      state.setup = setup;
+      if (cut.volts > 0) ls.push(c(`M68 E0 Q3${Math.round(cut.volts)}`, `Preset Volts set to ${Math.round(cut.volts)} Volts`), 'G4 P.1');
+      else ls.push('(No Preset Volts)');
+      if (cfg.rs485) {
+        if (cut.amps > 0) ls.push(c(`M68 E0 Q4${Math.round(cut.amps)}`, `Preset Amps set to ${Math.round(cut.amps)} Amps`), 'G4 P.1');
+        if (cfg.airPressure > 0) ls.push(c(`M68 E0 Q8${Math.round(cfg.airPressure)}`, `Air pressure set to ${Math.round(cfg.airPressure)} PSI`), 'G4 P.1');
+        else ls.push('(Default Air Pressure)');
+      }
+      if (cfg.dthcDelay > 0) ls.push(c(`M68 E0 Q5${String(Math.round(cfg.dthcDelay * 10)).padStart(2, '0')}`, `DTHC Delay set to ${cfg.dthcDelay} Seconds`), 'G4 P.1');
+      ls.push(c('M68 E0 Q10', 'DTHC is OFF'), 'G4 P.1');
+      if (cfg.pauseAfterSetup) ls.push('(MSG, Check the DTHC settings loaded from the G-code - change anything before you press RESUME)', 'M1');
+    }
+    ls.push(cfg.autoSet ? c('M68 E0 Q80', 'Auto Preset is active') : c('M68 E0 Q89', 'Auto Preset is not active'), 'G4 P0.1');
+    return ls;
+  },
+  toolChange: () => [],
+  spindleOn: () => [],
+  coolantOn: () => [],
+  subPassChange: () => [],
+  torchOn: ({ cfg, fmt, fmtF, state, traveled, op }, { cutLength }) => {
+    const c = cncNote(cfg);
+    const cut = op?._cut || {};
+    const ls = [];
+    const due = state.touchedAt === null || cfg.touchOffMode !== 'distance' || traveled - state.touchedAt >= (cfg.touchOffDistance || 0);
+    if (due) {
+      state.touchedAt = traveled;
+      ls.push(`G0 Z${fmt(cncPlungeSafety(cfg))}`, c('o<touchoff> call', 'Touch off from CommandCNC'));
+    }
+    let plunge = cfg.plungeRate || 762;
+    if (cfg.rs485 && cfg.softPierce > 0 && cfg.softPierce < 100) {
+      ls.push(c(`M68 E0 Q1${Math.round(cfg.softPierce / 10)}`, 'Set pierce AMPS'), 'G4 P.1');
+      plunge *= cfg.softPierce / 100;
+    }
+    ls.push(c(`G0 Z${fmt(cut.pierceHeight ?? 3.81)}`, 'Z move to pierce height'), 'M3 S100');
+    if (cut.pierceDelay > 0) ls.push(`G4 P${+cut.pierceDelay.toFixed(3)}`);
+    ls.push(c(`G1 Z${fmt(cut.cutHeight ?? 1.524)} F${fmtF(plunge)}`, 'Z move to cut height'));
+    ls.push(cutLength > (cfg.minDthcLength || 0) ? c('M67 E0 Q20', 'Auto DTHC is ON') : c('M67 E0 Q10', 'Auto DTHC OFF min cut'));
+    return ls;
+  },
+  torchOff: ({ cfg, fmt, fmtX, fmtY, pos }) => {
+    const c = cncNote(cfg);
+    return [
+      c(`G0 X${fmtX(pos.x + 0.0254)} Y${fmtY(pos.y + 0.0254)}`, 'Add tiny extension'),
+      'M5',
+      c('o<endcut> call', 'Sync Z from the DTHC'),
+      `G0 Z${fmt(cncRapidZ(cfg))}`,
+    ];
+  },
+  programEnd: (ctx) => {
+    const { cfg, fmt } = ctx;
+    const c = cncNote(cfg);
+    const ls = [
+      `G0 Z${fmt(cncRapidZ(cfg))}`,
+      c('G0 X0 Y0', 'End of job'),
+      c('M68 E0 Q900', 'Reset global DTHC to ON'), 'G4 P0.1',
+      c('M68 E0 Q80', 'Auto Preset is active'), 'G4 P0.1',
+      c('M68 E0 Q10', 'DTHC is off'), 'G4 P0.2',
+      'M5', 'M65 P4', 'M9',
+    ];
+    pushFooter(ls, ctx);
+    ls.push('M30');
+    return ls;
+  },
+};
+
+// Same rules as the CandCNC post: touch-off starts at least 0.375" up, and
+// rapids must clear it (else twice it).
+function cncPlungeSafety(cfg) { return Math.max(9.525, cfg.plungeSafety || 0); }
+function cncRapidZ(cfg) { const p = cncPlungeSafety(cfg); return (cfg.rapidHeight || 0) > p ? cfg.rapidHeight : p * 2; }
+
+// Plasma settings lengths are mm ('length' fields show in the app's units).
+const CNC_SPEC = [
+  SPEC_UNITS,
+  { key:'rapidHeight',      label:'Rapid Height',             type:'length', note:'Z for moves between cuts, above the plate' },
+  { key:'plungeSafety',     label:'Touch-off Start Height',   type:'length', note:'Rapid down to here before probing (0.375" minimum)' },
+  { key:'touchOffMode',     label:'Touch-off',                type:'select', options:[{v:'every',l:'Before every pierce'},{v:'distance',l:'After a set travel distance'}] },
+  { key:'touchOffDistance', label:'Touch-off Distance',       type:'length', showIf: s => s.touchOffMode === 'distance', note:'Travel between touch-offs' },
+  { key:'plungeRate',       label:'Plunge Rate',              type:'feed',   note:'Z speed from pierce height down to cut height' },
+  { key:'rs485',            label:'Hypertherm RS485 (TAP)',   type:'checkbox', note:'CommandCNC sets amps (and air) on the Powermax' },
+  { key:'airPressure',      label:'Air Pressure',             type:'number', unit:'psi', min:0, max:120, step:1, showIf: s => s.rs485, note:'0 = Powermax sets it' },
+  { key:'softPierce',       label:'Soft Pierce',              type:'number', unit:'%', min:30, max:100, step:10, showIf: s => s.rs485, note:'Pierce at this % of the cut amps (100 = off)' },
+  { key:'dthcDelay',        label:'DTHC Delay',               type:'number', unit:'sec', min:0, max:10, step:0.1, note:'After reaching cut height, before the THC adjusts' },
+  { key:'minDthcLength',    label:'Min Cut Length for DTHC',  type:'length', note:'Shorter cuts (small holes) run with the THC off' },
+  { key:'autoSet',          label:'AutoSet',                  type:'checkbox', note:'DTHC samples the arc voltage at the start of each cut' },
+  { key:'pauseAfterSetup',  label:'Pause to Check DTHC',      type:'checkbox', note:'M1 after the volts/amps are loaded — press Resume to cut' },
+  { key:'comments',         label:'Comments in G-code',       type:'checkbox' },
+  { key:'fileExt',          label:'File Extension',           type:'select', options:[{v:'tap',l:'.tap'},{v:'ngc',l:'.ngc'},{v:'nc',l:'.nc'}] },
+  SPEC_HEADER,
+  SPEC_FOOTER,
+];
+
+const CNC_DEFAULTS = {
+  units: 'inch', rapidHeight: 19.05, plungeSafety: 9.525, touchOffMode: 'every', touchOffDistance: 25.4,
+  plungeRate: 762, rs485: false, airPressure: 0, softPierce: 100, dthcDelay: 1, minDthcLength: 25.4,
+  autoSet: true, pauseAfterSetup: true, comments: true, fileExt: 'tap', programHeader: '', programFooter: '',
+  lineNumbering: false,
+};
+
+// ── Post-Processor Registry ───────────────────────────────────────────────────
 export const POST_PROCESSORS = {
   massoG3: {
     id: 'massoG3',
@@ -568,10 +725,20 @@ export const POST_PROCESSORS = {
     settingsSpec: [SPEC_UNITS, SPEC_HEADER, SPEC_FOOTER],
     hooks: dmdPlasmaHooks,
   },
+  commandCnc: {
+    id: 'commandCnc',
+    label: 'CandCNC CommandCNC (Plasma)',
+    description: 'CandCNC CommandCNC on LinuxCNC with DTHC IV — touch-offs, pierce heights and delays, THC codes (from CandCNC rev 30B post)',
+    plasmaOnly: true,
+    defaultSettings: CNC_DEFAULTS,
+    settingsSpec: CNC_SPEC,
+    hooks: commandCncHooks,
+  },
 };
 
-// Machine Profiles lists router/mill posts; the plasma post is the PLASMA screen's own.
+// Machine Profiles lists router/mill posts; the plasma posts are the PLASMA screen's own (⚙ Plasma Machine).
 export const PP_LIST = Object.values(POST_PROCESSORS).filter(pp => !pp.plasmaOnly);
+export const PLASMA_PP_LIST = Object.values(POST_PROCESSORS).filter(pp => pp.plasmaOnly);
 
 // Dispatch to the correct post-processor by ID.
 export function generateForPP(ppId, operations, cfg) {

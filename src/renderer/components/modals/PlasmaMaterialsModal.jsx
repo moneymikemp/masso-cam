@@ -3,7 +3,7 @@ import { DEFAULT_PLASMA_MATERIALS, loadPlasmaMaterials, savePlasmaMaterials } fr
 
 // Plasma material library editor (PLASMA screen → ⚡ Materials). Kerf, cut
 // feed and lead-in per material/thickness — what a Plasma Cut needs for its
-// path. Stored in inches (like DMD-C3 Plasma Control's library); shown in the
+// path — plus the torch values the CommandCNC post writes per cut. Stored in inches (like DMD-C3 Plasma Control's library); shown in the
 // machine profile's units. Keep ids matching the Plasma app's to have it
 // pick the material automatically.
 
@@ -11,7 +11,7 @@ const MM = 25.4;
 
 const S = {
   overlay: { position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.7)', zIndex: 1000, display: 'flex', alignItems: 'center', justifyContent: 'center' },
-  box: { background: '#1a1a38', border: '1px solid #3a3a70', borderRadius: 8, padding: '18px 20px', width: 760, maxWidth: '94vw', maxHeight: '88vh', display: 'flex', flexDirection: 'column', color: '#ccc', fontFamily: 'system-ui,sans-serif' },
+  box: { background: '#1a1a38', border: '1px solid #3a3a70', borderRadius: 8, padding: '18px 20px', width: 1180, maxWidth: '96vw', maxHeight: '88vh', display: 'flex', flexDirection: 'column', color: '#ccc', fontFamily: 'system-ui,sans-serif' },
   title: { fontSize: 15, fontWeight: 700, color: '#aaaaff', marginBottom: 12 },
   body: { display: 'grid', gridTemplateColumns: '180px 1fr', gap: 12, minHeight: 0, flex: 1 },
   list: { background: '#0d0d20', border: '1px solid #2a2a50', borderRadius: 4, overflowY: 'auto' },
@@ -116,6 +116,11 @@ export default function PlasmaMaterialsModal({ isInch, onClose, onSaved }) {
                     <th style={S.th}>Cut Feed ({isInch ? 'in/min' : 'mm/min'})</th>
                     <th style={S.th}>Lead-in ({isInch ? 'in' : 'mm'})</th>
                     <th style={S.th}>Lead Style</th>
+                    <th style={S.th} title="Cut current — sent to the Powermax over RS485 by the CommandCNC post">Amps</th>
+                    <th style={S.th} title="Arc voltage the THC holds (cut chart Voltage column)">Arc Volts</th>
+                    <th style={S.th}>Pierce Delay (s)</th>
+                    <th style={S.th}>Pierce Ht ({isInch ? 'in' : 'mm'})</th>
+                    <th style={S.th}>Cut Ht ({isInch ? 'in' : 'mm'})</th>
                     <th style={S.th} />
                   </tr>
                 </thead>
@@ -132,6 +137,11 @@ export default function PlasmaMaterialsModal({ isInch, onClose, onSaved }) {
                           <option value="line">Line</option>
                         </select>
                       </td>
+                      <td style={S.td}><Num value={t.amps ?? ''} step={5} onChange={v => setRow(t.id, 'amps', v)} /></td>
+                      <td style={S.td}><Num value={t.arcVolts ?? ''} step={1} onChange={v => setRow(t.id, 'arcVolts', v)} /></td>
+                      <td style={S.td}><Num value={t.pierceDelayS ?? ''} step={0.1} onChange={v => setRow(t.id, 'pierceDelayS', v)} /></td>
+                      <td style={S.td}><Num value={t.pierceHeightIn != null ? len(t.pierceHeightIn) : ''} step={isInch ? 0.01 : 0.2} onChange={v => setRow(t.id, 'pierceHeightIn', lenIn(v))} /></td>
+                      <td style={S.td}><Num value={t.cutHeightIn != null ? len(t.cutHeightIn) : ''} step={isInch ? 0.01 : 0.2} onChange={v => setRow(t.id, 'cutHeightIn', lenIn(v))} /></td>
                       <td style={S.td}><DeleteBtn label="Delete" onDelete={() => update(m => ({ ...m, thicknesses: m.thicknesses.filter(x => x.id !== t.id) }))} /></td>
                     </tr>
                   ))}

@@ -5,6 +5,8 @@ contextBridge.exposeInMainWorld('electron', {
   openDxf:   () => ipcRenderer.invoke('dialog-open-dxf'),
   openSvg:   () => ipcRenderer.invoke('dialog-open-svg'),
   openImage: () => ipcRenderer.invoke('dialog-open-image'),
+  openParts: () => ipcRenderer.invoke('dialog-open-parts'),
+  readPartFile: (path) => ipcRenderer.invoke('read-part-file', path),
   saveDxf:   (name) => ipcRenderer.invoke('dialog-save-dxf',   name),
   saveSvg:   (name) => ipcRenderer.invoke('dialog-save-svg',   name),
   saveGcode: (name) => ipcRenderer.invoke('dialog-save-gcode', name),

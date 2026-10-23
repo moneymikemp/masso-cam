@@ -3592,7 +3592,7 @@ function buildHelicalEntry(center, radius, topZ, targetZ, plungeRate) {
   return moves;
 }
 
-function entityToProfile(entity) {
+export function entityToProfile(entity) {
   if (!entity) return null;
   switch (entity.type) {
     case 'circle':   return circleToPoints(entity.center, entity.radius, 72);
@@ -3632,10 +3632,12 @@ function plasmaShapes(entities, ids) {
     for (const e of ents) {
       const pts = entityToProfile(e);
       if (!pts || pts.length < 2) continue;
-      if (isEntityClosed(e)) shapes.push({ profile: pts, closed: true, ids: [e.id] });
-      else pieces.push({ pts, ids: [e.id] });
+      if (isEntityClosed(e)) shapes.push({ profile: pts, closed: true, ids: [e.id], leadAt: e.leadAt });
+      else pieces.push({ pts, ids: [e.id], leadAt: e.leadAt });
     }
-    return [...shapes, ...chainPieces(pieces)];
+    // A chained outline takes the leadAt of any of its pieces.
+    const chains = chainPieces(pieces).map(c => ({ ...c, leadAt: pieces.find(p => p.leadAt && c.ids.includes(p.ids[0]))?.leadAt }));
+    return [...shapes, ...chains];
   };
   const all = toShapes(entities);
   if (!ids || ids.length === 0) return all;
@@ -3643,6 +3645,37 @@ function plasmaShapes(entities, ids) {
   const loops = selected.filter(s => s.closed);
   const inside = all.filter(s => !s.ids.every(id => ids.includes(id)) && loops.some(l => pointInPolygon(s.profile[0], l.profile)));
   return [...selected, ...inside];
+}
+
+// Parts for nesting: each outermost closed shape in the drawing is a part,
+// and every other shape inside it — holes, text, parts in its holes — goes
+// with it. With a selection, only the parts touched by it (so selecting just
+// an outline takes the whole part). Shapes outside every outline are left
+// out (`loose` counts them).
+export function nestPartsFromEntities(entities, ids) {
+  const shapes = [];
+  const pieces = [];
+  for (const e of entities) {
+    const pts = entityToProfile(e);
+    if (!pts || pts.length < 2) continue;
+    if (isEntityClosed(e)) shapes.push({ profile: pts, closed: true, ids: [e.id] });
+    else pieces.push({ pts, ids: [e.id] });
+  }
+  shapes.push(...chainPieces(pieces));
+  const closed = shapes.filter(s => s.closed).map(s => ({ ...s, loop: stripClose([...s.profile]) })).filter(s => s.loop.length >= 3);
+  const outlines = closed.filter(c => !closed.some(o => o !== c && pointInPolygon(c.loop[0], o.loop)));
+  const parts = outlines.map(o => ({ outline: o.loop, ids: [...o.ids], outlineIds: o.ids, area: polygonArea(o.loop) }));
+  const outlineIds = new Set(outlines.map(o => o.ids));
+  let loose = 0;
+  for (const s of shapes) {
+    if (outlineIds.has(s.ids)) continue;
+    const home = parts.filter(p => pointInPolygon(s.profile[0], p.outline)).sort((a, b) => a.area - b.area)[0];
+    if (home) home.ids.push(...s.ids);
+    else loose++;
+  }
+  if (!ids || !ids.length) return { parts, loose };
+  const sel = new Set(ids);
+  return { parts: parts.filter(p => p.ids.some(id => sel.has(id))), loose: 0 };
 }
 
 function getSelectedEntities(entities, ids) {

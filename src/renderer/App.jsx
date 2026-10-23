@@ -15,9 +15,12 @@ import { parseSvg } from './svg/parser';
 import { exportSvg as generateSvg } from './svg/exporter';
 import { exportDxf as generateDxf } from './dxf/exporter';
 import { generateGcode, generateGcodeByTool } from './gcode/postprocessor';
-import { generateForPP } from './gcode/postProcessors';
-import { materialTagLine } from './plasma/plasmaMaterials';
+import { generateForPP, POST_PROCESSORS } from './gcode/postProcessors';
+import { materialTagLine, loadPlasmaMaterials, loadPlasmaMachine, cutSettingsFor } from './plasma/plasmaMaterials';
 import PlasmaMaterialsModal from './components/modals/PlasmaMaterialsModal';
+import PlasmaMachineModal from './components/modals/PlasmaMachineModal';
+import PartListModal from './components/modals/PartListModal';
+import NestModal from './components/modals/NestModal';
 import { offsetEntity } from './cam/offsetEngine';
 import { roundedOffsetPolyline, isClockwise, stripClose, pointInPolygon, unionPolygons } from './cam/offset';
 import { mirrorEntitiesX, mirrorEntitiesY } from './cam/toolpath';
@@ -125,13 +128,16 @@ function AboutModal({ onClose }) {
         <img src={`${process.env.PUBLIC_URL}/dmdcam-logo.png`} alt="DMDCAM" style={{ height:80, marginBottom:12, objectFit:'contain' }} />
         <div style={{ fontSize:22, fontWeight:700, color:'#aaaaff', marginBottom:2 }}>DMDCAM</div>
         <div style={{ fontSize:11, color:'#5555aa', marginBottom:4, fontFamily:'monospace' }}>v{appVersion}</div>
-        <div style={{ fontSize:12, color:'#666688', marginBottom:16 }}>2.5D CAM for Masso G3 CNC Router</div>
+        <div style={{ fontSize:12, color:'#666688', marginBottom:16 }}>2.5D CAM for Masso G3 CNC Router · Plasma Cutting &amp; Nesting</div>
         <div style={{ fontSize:11, color:'#8888aa', lineHeight:1.8, marginBottom:16 }}>
           Operations: Contour · Pocket · Adaptive · Face<br/>
           Drill · Bore · Circular · Engrave · Trace<br/>
           Slot · Chamfer · Thread<br/><br/>
-          Post Processor: Masso G3 (Fanuc dialect)<br/>
-          DXF Import: R12 — 2024
+          Plasma: Kerf-Compensated Cuts · Lead-Ins · Centerline Slots<br/>
+          Part List Nesting · Multi-Sheet · Material Cut Charts<br/><br/>
+          Router Post: Masso G3 (Fanuc dialect)<br/>
+          Plasma Post: CommandCNC (CandCNC) · Hypertherm Powermax<br/>
+          Import: DXF R12 — 2024 · SVG
         </div>
         <div style={{ fontSize:10, color:'#444466', marginBottom:16 }}>
           Built with Electron + React<br/>
@@ -413,30 +419,71 @@ export default function App() {
     });
   }
 
-  // PLASMA screen export: every calculated Plasma Cut into one program for
-  // DMD-C3 Plasma Control (the dmdPlasma post), tagged with its material.
+  // PLASMA screen export: every calculated Plasma Cut into one program, with
+  // the post chosen in ⚙ Machine (DMD-C3 Plasma Control or CandCNC
+  // CommandCNC). Each cut gets its material's torch values (op._cut) from
+  // the material library.
   const exportPlasmaGcode = useCallback(async () => {
     const ops = operations.filter(op => op.type === 'plasma' && op.enabled && op.toolpath?.moves?.length > 0);
     if (ops.length === 0) {
       dispatch({ type: 'SET_STATUS', payload: 'Calculate the plasma cuts first (⟳ on each, or ⟳ All)' });
       return;
     }
+    const [machine, materials] = await Promise.all([loadPlasmaMachine(), loadPlasmaMaterials()]);
+    const pp = POST_PROCESSORS[machine.postProcessor] || POST_PROCESSORS.dmdPlasma;
+    const saved = machine.settings[pp.id] || {};
     const first = ops[0].params || {};
     const mixed = ops.some(op => Math.abs((op.params?.kerf ?? 0) - (first.kerf ?? 0)) > 1e-6);
     const cfg = {
-      postProcessor: 'dmdPlasma',
-      units: postConfig.units === 'mm' ? 'mm' : 'inch',
+      ...pp.defaultSettings,
+      ...saved,
+      postProcessor: pp.id,
+      units: saved.units || (postConfig.units === 'mm' ? 'mm' : 'inch'),
       lineNumbering: false,
       stockOriginX: state.stockConfig.stockOriginX ?? 0,
       stockOriginY: state.stockConfig.stockOriginY ?? 0,
       // One material per program; cuts with different kerfs can't share a tag.
       plasmaMaterialTag: mixed ? null : materialTagLine({ materialId: first.materialId, thicknessId: first.thicknessId, name: first.materialName, kerfMm: first.kerf ?? 0 }),
+      plasmaMaterialName: mixed ? null : first.materialName,
     };
-    const gcode = generateForPP('dmdPlasma', ops, cfg);
+    const posted = ops.map(op => ({ ...op, _cut: cutSettingsFor(materials, op.params) }));
+
+    // Part List sheets: one program per sheet, each with its own corner as 0,0.
+    const sheetOps = posted.filter(op => op.params?.sheet);
+    if (sheetOps.length) {
+      const bySheet = new Map();
+      for (const op of sheetOps) {
+        if (!bySheet.has(op.params.sheet.id)) bySheet.set(op.params.sheet.id, []);
+        bySheet.get(op.params.sheet.id).push(op);
+      }
+      const programs = [...bySheet.values()].map((sheetOpsOne, i) => {
+        const sh = sheetOpsOne[0].params.sheet;
+        const name = sheetOpsOne[0].params.materialName;
+        return {
+          suffix: `-sheet${i + 1}`,
+          gcode: generateForPP(pp.id, sheetOpsOne, { ...cfg, stockOriginX: sh.x, stockOriginY: sh.y, plasmaMaterialName: name, plasmaMaterialTag: null }),
+        };
+      });
+      const loose = posted.filter(op => !op.params?.sheet);
+      if (loose.length) programs.push({ suffix: '', gcode: generateForPP(pp.id, loose, cfg) });
+      dispatch({ type: 'SET_GCODE', payload: programs[0].gcode });
+      dispatch({ type: 'SET_PANEL_TAB', payload: 'gcode' });
+      if (window.electron) {
+        const base = await window.electron.saveGcodeInlay(`plasma.${cfg.fileExt || 'nc'}`);
+        if (base) {
+          const m = base.match(/^(.*?)(\.[^.\\/]+)?$/);
+          for (const p of programs) await window.electron.writeFile(`${m[1]}${p.suffix}${m[2] || `.${cfg.fileExt || 'nc'}`}`, p.gcode);
+          dispatch({ type: 'SET_STATUS', payload: `Exported ${programs.length} program${programs.length === 1 ? '' : 's'}: ${m[1].split(/[\\/]/).pop()}-sheet1…` });
+        }
+      }
+      return;
+    }
+
+    const gcode = generateForPP(pp.id, posted, cfg);
     dispatch({ type: 'SET_GCODE', payload: gcode });
     dispatch({ type: 'SET_PANEL_TAB', payload: 'gcode' });
     if (window.electron) {
-      const path = await window.electron.saveGcode('plasma.nc');
+      const path = await window.electron.saveGcode(`plasma.${cfg.fileExt || 'nc'}`);
       if (path) {
         await window.electron.writeFile(path, gcode);
         dispatch({ type: 'SET_STATUS', payload: `Exported: ${path.split(/[\\/]/).pop()}${mixed ? ' — cuts have different kerfs, so no material tag was written' : ''}` });
@@ -710,6 +757,9 @@ export default function App() {
     <div style={S.app}>
       {/* Modals */}
       {modal === 'profiles' && <MachineProfilesModal onClose={() => setModal(null)} />}
+      {modal === 'nest' && <NestModal entities={entities} operations={operations} selectedEntityIds={selectedEntityIds} isInch={isInch} dispatch={dispatch} onClose={() => setModal(null)} />}
+      {modal === 'part-list' && <PartListModal partList={state.partList} entities={entities} activeWorkspaceId={activeWorkspaceId} stockConfig={state.stockConfig} isInch={isInch} dispatch={dispatch} onClose={() => setModal(null)} />}
+      {modal === 'plasma-machine' && <PlasmaMachineModal isInch={isInch} onClose={() => setModal(null)} onSaved={() => dispatch({ type: 'SET_STATUS', payload: 'Plasma machine saved' })} />}
       {modal === 'plasma-materials' && <PlasmaMaterialsModal isInch={isInch} onClose={() => setModal(null)} onSaved={() => dispatch({ type: 'PLASMA_MATERIALS_SAVED' })} />}
       {modal === 'about' && <AboutModal onClose={() => setModal(null)} />}
       {modal === 'tool-library' && <ToolLibraryModal onClose={() => setModal(null)} />}
@@ -824,8 +874,11 @@ export default function App() {
             <div style={{ width:1, background:'#2a2a50', margin:'0 4px' }} />
             <button style={S.tbBtn} onClick={importDxf}>📐 Import DXF</button>
             <button style={S.tbBtn} onClick={importSvg} title="Import SVG (Ctrl+Shift+V)">🖋 Import SVG</button>
+            <button style={{ ...S.tbBtn, borderColor:'#5a4a2a', color:'#ffbb66' }} onClick={() => setModal('part-list')} title="Parts from DXF/SVG files with quantities and materials, nested onto as many sheets as it takes">▤ Part List</button>
+            <button style={{ ...S.tbBtn, borderColor:'#5a4a2a', color:'#ffbb66' }} onClick={() => setModal('nest')} title="Nest the selected parts (or the whole drawing) on a sheet">▦ Nest</button>
             <button style={{ ...S.tbBtn, borderColor:'#5a4a2a', color:'#ffbb66' }} onClick={() => setModal('plasma-materials')} title="Kerf, cut feed and lead-in per material and thickness">⚡ Materials</button>
-            <button style={{ ...S.tbBtn, borderColor:'#5a4a2a', color:'#ffbb66' }} onClick={exportPlasmaGcode} title="Post all calculated plasma cuts for DMD-C3 Plasma Control (FluidNC)">💾 Plasma G-code <span style={S.unitBadge}>{unitsLabel}</span></button>
+            <button style={{ ...S.tbBtn, borderColor:'#5a4a2a', color:'#ffbb66' }} onClick={() => setModal('plasma-machine')} title="Plasma post processor (DMD-C3 or CandCNC CommandCNC) and its settings">⚙ Machine</button>
+            <button style={{ ...S.tbBtn, borderColor:'#5a4a2a', color:'#ffbb66' }} onClick={exportPlasmaGcode} title="Post all calculated plasma cuts with the post set in ⚙ Machine">💾 Plasma G-code <span style={S.unitBadge}>{unitsLabel}</span></button>
             <div style={{ width:1, background:'#2a2a50', margin:'0 4px' }} />
             <button style={{ ...S.tbBtn, ...(state.showToolpaths ? S.tbBtnActive : {}) }} onClick={() => dispatch({ type: 'TOGGLE_TOOLPATHS' })}>⬡ Paths</button>
             <button style={{ ...S.tbBtn, ...(state.showRapids ? S.tbBtnActive : {}) }} onClick={() => dispatch({ type: 'TOGGLE_RAPIDS' })}>↗ Rapids</button>

@@ -3,10 +3,11 @@
 // Same ids, names and numbers as the DMD-C3 Plasma Control app's default
 // Material Library, so a posted program's material tag
 //   (DMD-C3 material: mild-steel | 1-8 | Mild Steel 1/8" | kerf 0.0450)
-// is picked automatically there (F6 → F2). Only what DMDCAM needs for the
-// path lives here — kerf, cut feed, lead-in; pierce/cut heights and pierce
-// delay stay in the Plasma app. Values are inches, like the Plasma app's
-// library; the Plasma Cut operation converts to mm.
+// is picked automatically there (F6 → F2). Kerf, cut feed and lead-in shape
+// the path. Amps, arc volts, pierce delay and pierce/cut heights are for
+// posts that put them in the program (CommandCNC); the DMD-C3 app keeps its
+// own. Values are inches, like the Plasma app's library; the Plasma Cut
+// operation converts to mm.
 
 export const DEFAULT_PLASMA_MATERIALS = [
   {
@@ -62,6 +63,38 @@ export function paramsFromThickness(thickness) {
     leadInLength: thickness.leadInLengthIn * 25.4,
     leadInStyle: thickness.leadStyle || 'arc',
   };
+}
+
+// Used when a thickness has no value of its own (Hypertherm's usual 0.15" / 0.06").
+const CUT_FALLBACK = { pierceHeightIn: 0.15, cutHeightIn: 0.06, pierceDelayS: 0.5 };
+
+/** Per-cut torch values for a Plasma Cut's material (mm, seconds, volts, amps) — what op._cut holds for the posts. */
+export function cutSettingsFor(materials, params = {}) {
+  const t = findThickness(materials, params.materialId, params.thicknessId)?.thickness || {};
+  return {
+    pierceHeight: (t.pierceHeightIn ?? CUT_FALLBACK.pierceHeightIn) * 25.4,
+    cutHeight: (t.cutHeightIn ?? CUT_FALLBACK.cutHeightIn) * 25.4,
+    pierceDelay: t.pierceDelayS ?? CUT_FALLBACK.pierceDelayS,
+    volts: t.arcVolts || 0,
+    amps: t.amps || 0,
+  };
+}
+
+const MACHINE_KEY = 'plasmaMachine';
+
+/** The PLASMA screen's machine: { postProcessor, settings: { [postId]: {...} } } (lengths mm). */
+export async function loadPlasmaMachine() {
+  try {
+    const saved = await window.electron?.storeGet?.(MACHINE_KEY);
+    if (saved && saved.postProcessor) return { settings: {}, ...saved };
+  } catch {
+    // fall through to the default
+  }
+  return { postProcessor: 'dmdPlasma', settings: {} };
+}
+
+export async function savePlasmaMachine(machine) {
+  await window.electron?.storeSet?.(MACHINE_KEY, machine);
 }
 
 /** The Plasma app's material tag line (kerf in inches) — see its shared/gcode/programMaterial.ts. */

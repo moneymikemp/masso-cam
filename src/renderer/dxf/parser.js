@@ -49,7 +49,7 @@ function readInsUnitsFromText(content) {
   return match ? parseInt(match[1], 10) : 0;
 }
 
-function scaleEntities(entities, factor) {
+export function scaleEntities(entities, factor) {
   return entities.map(e => {
     switch (e.type) {
       case 'line':

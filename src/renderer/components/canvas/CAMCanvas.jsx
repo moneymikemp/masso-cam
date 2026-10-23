@@ -64,7 +64,7 @@ function applyXform(entity, xf) {
     case 'arc':      return { ...entity, center: pt(entity.center), radius: r,
       startAngle: xf.type==='rotate' ? entity.startAngle + xf.a : entity.startAngle,
       endAngle:   xf.type==='rotate' ? entity.endAngle   + xf.a : entity.endAngle };
-    case 'polyline': return { ...entity, vertices: (entity.vertices||[]).map(pt) };
+    case 'polyline': return { ...entity, vertices: (entity.vertices||[]).map(v => ({ ...v, ...pt(v) })) }; // keeps bulge (arc segments)
     case 'ellipse': {
       const newCenter = pt(entity.center);
       const s = (xf.type === 'scale') ? xf.s : 1;
@@ -1043,7 +1043,7 @@ export default function CAMCanvas({ tracePreview = null }) {
     statusTimerRef.current = setTimeout(() => setStatusMsg(''), 2000);
   }
 
-  const { viewport, entities, layers, operations: allOperations, selectedEntityIds, hoveredEntityId, showToolpaths, showRapids, bounds, stockConfig, tabPlacementActive, tabPlacementOpId, dogboneSelectionActive, dogboneSelectionOpId, textPlacementActive, textPlacementOpId, medialAxisPolylines, postConfig, activeTool, gridSnap, refImage, previewEntities, zSliderPos, activeWorkspaceId } = state;
+  const { viewport, entities, layers, operations: allOperations, selectedEntityIds, hoveredEntityId, showToolpaths, showRapids, bounds, stockConfig, tabPlacementActive, tabPlacementOpId, dogboneSelectionActive, dogboneSelectionOpId, textPlacementActive, textPlacementOpId, medialAxisPolylines, postConfig, activeTool, gridSnap, refImage, previewEntities, zSliderPos, activeWorkspaceId, nestSheets } = state;
   const operations = allOperations.filter(op => !op.workspaceId || op.workspaceId === activeWorkspaceId);
   const isInch = postConfig?.units === 'inch';
 
@@ -1403,6 +1403,7 @@ export default function CAMCanvas({ tracePreview = null }) {
   }
 
   function drawStock(ctx) {
+    drawNestSheets(ctx);
     if (!stockConfig || stockConfig.width <= 0 || stockConfig.length <= 0) return;
     // stockOriginX/Y is the world position of the datum point.
     // The stock rectangle is offset from it based on the datum fraction.
@@ -1422,6 +1423,27 @@ export default function CAMCanvas({ tracePreview = null }) {
     ctx.setLineDash([6, 4]);
     ctx.strokeRect(tl.x, tl.y, w, h);
     ctx.setLineDash([]);
+  }
+
+  // Sheets from Part List → Apply: outline and name, behind everything.
+  function drawNestSheets(ctx) {
+    if (!nestSheets?.length) return;
+    ctx.save();
+    for (const sh of nestSheets) {
+      const tl = w2c(sh.x, sh.y + sh.l);
+      const br = w2c(sh.x + sh.w, sh.y);
+      ctx.fillStyle = 'rgba(204,136,51,0.06)';
+      ctx.fillRect(tl.x, tl.y, br.x - tl.x, br.y - tl.y);
+      ctx.strokeStyle = 'rgba(255,187,102,0.6)';
+      ctx.lineWidth = 1;
+      ctx.setLineDash([8, 4]);
+      ctx.strokeRect(tl.x, tl.y, br.x - tl.x, br.y - tl.y);
+      ctx.setLineDash([]);
+      ctx.fillStyle = 'rgba(255,187,102,0.85)';
+      ctx.font = '12px system-ui, sans-serif';
+      ctx.fillText(sh.name, tl.x + 4, tl.y - 6);
+    }
+    ctx.restore();
   }
 
   function drawPreviewEntities(ctx) {
@@ -2289,7 +2311,7 @@ export default function CAMCanvas({ tracePreview = null }) {
     drawSnapIndicator(ctx, cur, snapType);
   }
 
-  useEffect(() => { draw(); }, [entities, layers, operations, viewport, selectedEntityIds, hoveredEntityId, showToolpaths, showRapids, mousePos, stockConfig, zSliderPos, zLevels, showOnionSkin, tabPlacementActive, tabPlacementOpId, dogboneSelectionActive, dogboneSelectionOpId, textPlacementActive, textPlacementOpId, medialAxisPolylines, liveXf, drawPhase, refImage, previewEntities, plugCanvasEntities]);
+  useEffect(() => { draw(); }, [entities, layers, operations, viewport, selectedEntityIds, hoveredEntityId, showToolpaths, showRapids, mousePos, stockConfig, zSliderPos, zLevels, showOnionSkin, tabPlacementActive, tabPlacementOpId, dogboneSelectionActive, dogboneSelectionOpId, textPlacementActive, textPlacementOpId, medialAxisPolylines, liveXf, drawPhase, refImage, previewEntities, plugCanvasEntities, nestSheets]);
 
   // Mouse events
   const onMouseDown = useCallback((e) => {

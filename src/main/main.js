@@ -246,6 +246,23 @@ ipcMain.handle('dialog-open-svg', async () => {
   return { path: result.filePaths[0], content };
 });
 
+// Part List (PLASMA screen): add several DXF/SVG parts at once, and re-read
+// one by path for Refresh. Only DXF/SVG files are read.
+ipcMain.handle('dialog-open-parts', async () => {
+  const result = await dialog.showOpenDialog(mainWindow, {
+    title: 'Add Parts',
+    filters: [{ name: 'Parts (DXF, SVG)', extensions: ['dxf', 'svg'] }],
+    properties: ['openFile', 'multiSelections'],
+  });
+  if (result.canceled) return [];
+  return result.filePaths.map(p => ({ path: p, content: fs.readFileSync(p, 'utf-8') }));
+});
+
+ipcMain.handle('read-part-file', async (_, filePath) => {
+  if (typeof filePath !== 'string' || !/\.(dxf|svg)$/i.test(filePath)) return null;
+  try { return fs.readFileSync(filePath, 'utf-8'); } catch { return null; }
+});
+
 ipcMain.handle('dialog-save-dxf', async (_, defaultName) => {
   const result = await dialog.showSaveDialog(mainWindow, {
     title: 'Export DXF',

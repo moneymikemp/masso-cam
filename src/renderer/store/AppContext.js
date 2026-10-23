@@ -162,6 +162,10 @@ const initialState = {
 
   // Temporary preview entities for offset/array modals
   previewEntities: [],
+  // Part List (PLASMA screen): [{ id, name, path, sourceIndex, entities, qty, materialKey, priority, rotation }]
+  partList: [],
+  // Sheets laid out by Part List → Apply: [{ id, name, x, y, w, l }] (mm, world)
+  nestSheets: [],
 
   // Undo/redo for entity edits (snapshots of entities array, capped at 50)
   entityHistory: [],
@@ -393,6 +397,34 @@ function reducer(state, action) {
         dirty: true,
       };
     }
+    case 'SET_PART_LIST': return { ...state, partList: action.payload, dirty: true };
+    // Part List → Apply: swap the previous nest's sheets (entities tagged
+    // nestSheet, Plasma Cuts with params.sheet) for the new ones.
+    case 'APPLY_PART_NEST': {
+      const { add, ops, sheets } = action.payload;
+      return {
+        ...state,
+        entities: [...state.entities.filter(e => !e.nestSheet), ...add],
+        operations: [...state.operations.filter(op => !op.params?.sheet), ...ops],
+        nestSheets: sheets,
+        selectedEntityIds: [],
+        entityHistory: [...state.entityHistory.slice(-49), state.entities],
+        entityFuture: [],
+        dirty: true,
+      };
+    }
+    // Remove some entities and add others as one undo step (Nest → Apply).
+    case 'REPLACE_ENTITIES': {
+      const ids = new Set(action.payload.remove || []);
+      return {
+        ...state,
+        entities: [...state.entities.filter(e => !ids.has(e.id)), ...(action.payload.add || [])],
+        selectedEntityIds: [],
+        entityHistory: [...state.entityHistory.slice(-49), state.entities],
+        entityFuture: [],
+        dirty: true,
+      };
+    }
     case 'DELETE_ENTITIES': {
       const ids = new Set(action.payload);
       return {
@@ -557,6 +589,8 @@ function reducer(state, action) {
         postConfig:    p.postConfig || state.postConfig,
         machineConfig: p.machineConfig || state.machineConfig,
         stockConfig:   p.stockConfig || state.stockConfig,
+        partList:      p.partList || [],
+        nestSheets:    p.nestSheets || [],
         gcodeOutput:   '',
         selectedEntityIds: [],
         selectedOperationId: null,
@@ -622,6 +656,8 @@ export function AppProvider({ children }) {
     postConfig: state.postConfig,
     machineConfig: state.machineConfig,
     stockConfig: state.stockConfig,
+    partList: state.partList,
+    nestSheets: state.nestSheets,
   }), [state]);
 
   return (

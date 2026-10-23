@@ -1,12 +1,22 @@
 // Geometry engine: offset, translate, rotate entities.
 
+// A Plasma Cut lead-in point set by Nest (entity.leadAt) moves with its entity.
+function withLeadAt(moved, entity, pt) {
+  return entity.leadAt && moved !== entity ? { ...moved, leadAt: pt(entity.leadAt) } : moved;
+}
+
 export function translateEntity(entity, dx, dy) {
   const pt = p => ({ x: p.x + dx, y: p.y + dy });
+  return withLeadAt(translated(entity, pt), entity, pt);
+}
+
+function translated(entity, pt) {
   switch (entity.type) {
     case 'line':     return { ...entity, start: pt(entity.start), end: pt(entity.end) };
     case 'circle':   return { ...entity, center: pt(entity.center) };
     case 'arc':      return { ...entity, center: pt(entity.center) };
-    case 'polyline': return { ...entity, vertices: (entity.vertices||[]).map(pt) };
+    case 'polyline': return { ...entity, vertices: (entity.vertices||[]).map(v => ({ ...v, ...pt(v) })) }; // keeps bulge (arc segments)
+    case 'ellipse':  return { ...entity, center: pt(entity.center) };
     default: return entity;
   }
 }
@@ -17,11 +27,16 @@ export function rotateEntityAround(entity, cx, cy, angle) {
     const rx = p.x - cx, ry = p.y - cy;
     return { x: cx + rx*cos - ry*sin, y: cy + rx*sin + ry*cos };
   };
+  return withLeadAt(rotated(entity, pt, angle), entity, pt);
+}
+
+function rotated(entity, pt, angle) {
   switch (entity.type) {
     case 'line':     return { ...entity, start: pt(entity.start), end: pt(entity.end) };
     case 'circle':   return { ...entity, center: pt(entity.center) };
     case 'arc':      return { ...entity, center: pt(entity.center), startAngle: entity.startAngle + angle, endAngle: entity.endAngle + angle };
-    case 'polyline': return { ...entity, vertices: (entity.vertices||[]).map(pt) };
+    case 'polyline': return { ...entity, vertices: (entity.vertices||[]).map(v => ({ ...v, ...pt(v) })) }; // keeps bulge (arc segments)
+    case 'ellipse':  return { ...entity, center: pt(entity.center), rotation: (entity.rotation || 0) + angle };
     default: return entity;
   }
 }
