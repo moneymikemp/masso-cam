@@ -498,45 +498,55 @@ ipcMain.handle('get-initial-file', () => {
 
 // ── System font enumeration ────────────────────────────────────────────────────
 
-let systemFontsCache = null;
-
+// Windows 10 1809+ installs fonts per-user by default (HKCU + %LOCALAPPDATA%),
+// so both the machine-wide and per-user locations must be read.
 function getSystemFonts() {
   const { execSync } = require('child_process');
   const windir = process.env.WINDIR || 'C:\\Windows';
-  const fontDir = path.join(windir, 'Fonts');
+  const fontDirs = [path.join(windir, 'Fonts')];
+  if (process.env.LOCALAPPDATA) {
+    fontDirs.push(path.join(process.env.LOCALAPPDATA, 'Microsoft', 'Windows', 'Fonts'));
+  }
+  const regKeys = [
+    'HKLM\\SOFTWARE\\Microsoft\\Windows NT\\CurrentVersion\\Fonts',
+    'HKCU\\SOFTWARE\\Microsoft\\Windows NT\\CurrentVersion\\Fonts',
+  ];
   const fonts = [];
   const seenNames = new Set();
+  const seenPaths = new Set();
 
-  try {
-    const output = execSync(
-      'reg query "HKLM\\SOFTWARE\\Microsoft\\Windows NT\\CurrentVersion\\Fonts"',
-      { encoding: 'utf8', timeout: 15000 }
-    );
-    for (const line of output.split('\n')) {
-      const match = line.trim().match(/^(.+?)\s+REG_SZ\s+(.+\.(?:ttf|otf))$/i);
-      if (!match) continue;
-      const family = match[1]
-        .replace(/\s*\(TrueType\)/i, '')
-        .replace(/\s*\(OpenType\)/i, '')
-        .trim();
-      const filename = match[2].trim();
-      const fontPath = filename.includes(':\\') ? filename : path.join(fontDir, filename);
-      if (!family || seenNames.has(family.toLowerCase())) continue;
-      if (!fs.existsSync(fontPath)) continue;
-      seenNames.add(family.toLowerCase());
-      fonts.push({ family, path: fontPath });
-    }
-  } catch {
+  function addFont(family, fontPath) {
+    if (!family || seenNames.has(family.toLowerCase())) return;
+    if (seenPaths.has(fontPath.toLowerCase()) || !fs.existsSync(fontPath)) return;
+    seenNames.add(family.toLowerCase());
+    seenPaths.add(fontPath.toLowerCase());
+    fonts.push({ family, path: fontPath });
+  }
+
+  for (const key of regKeys) {
     try {
-      const files = fs.readdirSync(fontDir);
-      for (const file of files) {
+      const output = execSync(`reg query "${key}"`, { encoding: 'utf8', timeout: 15000 });
+      for (const line of output.split('\n')) {
+        const match = line.trim().match(/^(.+?)\s+REG_(?:EXPAND_)?SZ\s+(.+\.(?:ttf|otf))$/i);
+        if (!match) continue;
+        const family = match[1]
+          .replace(/\s*\(TrueType\)/i, '')
+          .replace(/\s*\(OpenType\)/i, '')
+          .trim();
+        const filename = match[2].trim();
+        const fontPath = filename.includes(':\\') ? filename : path.join(fontDirs[0], filename);
+        addFont(family, fontPath);
+      }
+    } catch {} // HKCU key may not exist if no per-user fonts are installed
+  }
+
+  // Pick up anything the registry missed (or everything, if reg query failed)
+  for (const dir of fontDirs) {
+    try {
+      for (const file of fs.readdirSync(dir)) {
         if (!/\.(ttf|otf)$/i.test(file)) continue;
         const family = file.replace(/\.(ttf|otf)$/i, '').replace(/[-_]/g, ' ');
-        const fontPath = path.join(fontDir, file);
-        if (!seenNames.has(family.toLowerCase())) {
-          seenNames.add(family.toLowerCase());
-          fonts.push({ family, path: fontPath });
-        }
+        addFont(family, path.join(dir, file));
       }
     } catch {}
   }
@@ -544,10 +554,9 @@ function getSystemFonts() {
   return fonts.sort((a, b) => a.family.localeCompare(b.family));
 }
 
-ipcMain.handle('list-system-fonts', () => {
-  if (!systemFontsCache) systemFontsCache = getSystemFonts();
-  return systemFontsCache;
-});
+// Not cached: re-enumerate each time a text panel opens so newly installed
+// fonts appear without restarting the app.
+ipcMain.handle('list-system-fonts', () => getSystemFonts());
 
 ipcMain.handle('read-font-file', (_, fontPath) => {
   try {
