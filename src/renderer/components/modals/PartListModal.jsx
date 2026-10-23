@@ -10,15 +10,17 @@ import { placeEntity, placePoint } from '../../plasma/placement';
 import { loadPlasmaMaterials, findThickness, paramsFromThickness } from '../../plasma/plasmaMaterials';
 import { getDefaultParams } from '../../store/AppContext';
 
-// Part List (PLASMA screen → ▤ Part List), like ProNest's Edit Part List.
-// Parts come from DXF/SVG files (one file can hold several — each outermost
-// outline is a part) and live in the project (state.partList), with a
-// quantity, material, priority and rotation each. Nest groups the parts by
+// Nest (PLASMA screen → ▦ Nest), a part list like ProNest's Edit Part List.
+// Parts come from DXF/SVG files or from the drawing (one file or drawing can
+// hold several — each outermost outline is a part) and live in the project
+// (state.partList), with a quantity (or Fill: as many as the sheet has room
+// for), material, priority and rotation each. Nest groups the parts by
 // material — a material sets the kerf and lead-in, so thicknesses never
 // share a sheet — and fills the sheet sizes you enter, as many sheets as it
 // takes (plasma/nesting.js nestSheets). Apply lays the sheets out side by
-// side in the drawing, with a calculated Plasma Cut per sheet; 💾 Plasma
-// G-code then writes a program per sheet.
+// side in the drawing, with a calculated Plasma Cut per sheet, replacing
+// the drawing's own copies of parts taken from it; 💾 Plasma G-code then
+// writes a program per sheet.
 
 const MM = 25.4;
 const PREFS_KEY = 'dmdcam.partlist';
@@ -59,17 +61,9 @@ function fileBase(path) {
   return String(path).split(/[\\/]/).pop().replace(/\.(dxf|svg)$/i, '');
 }
 
-/** A DXF/SVG file's parts: each outermost outline with everything inside it, moved so its corner is at 0,0 (mm). */
-function partsFromFile(path, content, isInch) {
-  let entities;
-  if (/\.svg$/i.test(path)) {
-    entities = parseSvg(content).entities;
-  } else {
-    const dxf = parseDxf(content);
-    // A unitless DXF is taken to be in the app's units.
-    entities = dxf.dxfUnits === 'unitless' && isInch ? scaleEntities(dxf.entities, MM) : dxf.entities;
-  }
-  const { parts, loose } = nestPartsFromEntities(entities);
+/** Parts found in entities: each outermost outline with everything inside it, moved so its corner is at 0,0 (mm). */
+function partsFromEntities(entities, ids, name) {
+  const { parts, loose } = nestPartsFromEntities(entities, ids);
   const byId = new Map(entities.map(e => [e.id, e]));
   return {
     loose,
@@ -80,9 +74,43 @@ function partsFromFile(path, content, isInch) {
         delete moved.leadAt; delete moved.nestSheet;
         return moved;
       });
-      return { name: parts.length > 1 ? `${fileBase(path)} (${i + 1})` : fileBase(path), path, sourceIndex: i, entities: ents };
+      return { name: parts.length > 1 ? `${name} (${i + 1})` : name, sourceIndex: i, sourceIds: p.ids, entities: ents };
     }),
   };
+}
+
+/** A DXF/SVG file's parts. */
+function partsFromFile(path, content, isInch) {
+  let entities;
+  if (/\.svg$/i.test(path)) {
+    entities = parseSvg(content).entities;
+  } else {
+    const dxf = parseDxf(content);
+    // A unitless DXF is taken to be in the app's units.
+    entities = dxf.dxfUnits === 'unitless' && isInch ? scaleEntities(dxf.entities, MM) : dxf.entities;
+  }
+  const r = partsFromEntities(entities, null, fileBase(path));
+  return { loose: r.loose, parts: r.parts.map(({ sourceIds, ...p }) => ({ ...p, path })) };
+}
+
+/**
+ * Identical parts (same outline size and area, same entity count — in the
+ * same orientation) as one part with a quantity, e.g. a drawing that is
+ * already a sheet of stakes.
+ */
+function groupIdentical(parts) {
+  const out = [];
+  const byKey = new Map();
+  for (const p of parts) {
+    const sh = partShape(p);
+    const key = sh && `${p.entities.length}|${sh.w.toFixed(2)}|${sh.h.toFixed(2)}|${Math.abs(sh.area).toFixed(0)}`;
+    const same = key && byKey.get(key);
+    if (same) { same.qty += p.qty; same.sourceIds = [...same.sourceIds, ...p.sourceIds]; continue; }
+    const copy = { ...p };
+    if (key) byKey.set(key, copy);
+    out.push(copy);
+  }
+  return out;
 }
 
 /** Outline and size of a list part (its entities form exactly one part). */
@@ -112,7 +140,7 @@ function Thumb({ part }) {
   );
 }
 
-export default function PartListModal({ partList, entities, activeWorkspaceId, stockConfig, isInch, dispatch, onClose }) {
+export default function PartListModal({ partList, entities, selectedEntityIds, activeWorkspaceId, stockConfig, isInch, dispatch, onClose }) {
   const prefs = useMemo(loadPrefs, []);
   const toDisp = v => (isInch ? +(v / MM).toFixed(4) : +v.toFixed(2));
   const toMM = v => (isInch ? v * MM : v);
@@ -174,6 +202,26 @@ export default function PartListModal({ partList, entities, activeWorkspaceId, s
     ].filter(Boolean).join(' '));
   }
 
+  // The drawing's parts (the selected ones, if any are selected). Nested
+  // sheets from an earlier Apply aren't parts of the drawing.
+  function addFromDrawing() {
+    const drawing = entities.filter(e => !e.nestSheet);
+    const sel = (selectedEntityIds || []).filter(id => drawing.some(e => e.id === id));
+    const r = partsFromEntities(drawing, sel, 'Drawing');
+    const have = new Set(partList.flatMap(p => p.sourceIds || []));
+    const fresh = r.parts.filter(p => !p.sourceIds.some(id => have.has(id)));
+    const added = groupIdentical(fresh.map(p => ({ id: uuid(), qty: 1, materialKey: prefs.lastMaterial || '', priority: 5, rotation: 'any', ...p })));
+    if (added.length === 1) added[0].name = 'Drawing';
+    if (added.length) setList([...partList, ...added]);
+    const copies = added.reduce((s, p) => s + p.qty, 0);
+    setMessage([
+      added.length
+        ? `Added ${added.length} part${added.length === 1 ? '' : 's'}${copies > added.length ? ` (${copies} copies)` : ''} from the ${sel.length ? 'selection' : 'drawing'} — Apply replaces ${copies === 1 ? 'it' : 'them'} with the nest.`
+        : r.parts.length ? 'Those parts are already in the list.' : 'No closed outlines in the drawing.',
+      r.loose && `${r.loose} shape${r.loose === 1 ? '' : 's'} outside any outline left out.`,
+    ].filter(Boolean).join(' '));
+  }
+
   async function addParts() {
     try {
       const files = await window.electron?.openParts?.();
@@ -222,7 +270,7 @@ export default function PartListModal({ partList, entities, activeWorkspaceId, s
     savePrefs({ ...prefs, sheets: sizes, ...mm, angleStep, pairs });
     const groups = new Map();
     for (const p of partList) {
-      if (!(p.qty > 0) || !shapes.get(p.id) || !matName(p.materialKey)) continue;
+      if (!(p.fill || p.qty > 0) || !shapes.get(p.id) || !matName(p.materialKey)) continue;
       if (!groups.has(p.materialKey)) groups.set(p.materialKey, []);
       groups.get(p.materialKey).push(p);
     }
@@ -240,7 +288,7 @@ export default function PartListModal({ partList, entities, activeWorkspaceId, s
         const cut = paramsFromThickness(thickness);
         const input = parts.map(p => {
           const sh = shapes.get(p.id);
-          return { outline: sh.outline, lead: outsideLead(sh.outline, cut), qty: Math.round(p.qty), priority: p.priority ?? 5, rotation: p.rotation || 'any' };
+          return { outline: sh.outline, lead: outsideLead(sh.outline, cut), qty: p.fill ? 0 : Math.round(p.qty), fill: !!p.fill, priority: p.priority ?? 5, rotation: p.rotation || 'any' };
         });
         const gi = g;
         const res = await nestSheets(input, sizes, {
@@ -277,6 +325,9 @@ export default function PartListModal({ partList, entities, activeWorkspaceId, s
   function apply() {
     if (!allSheets.length) return;
     const add = [], ops = [], sheetRects = [];
+    // Parts taken from the drawing: the nest replaces the drawing's copies.
+    const nested = new Set(allSheets.flatMap(({ group, sheet }) => sheet.placements.map(pl => group.parts[pl.part].id)));
+    const remove = new Set(partList.filter(p => nested.has(p.id)).flatMap(p => p.sourceIds || []));
     let x0 = 0;
     for (const { group, sheet, k } of allSheets) {
       const id = uuid();
@@ -317,9 +368,11 @@ export default function PartListModal({ partList, entities, activeWorkspaceId, s
       });
       x0 += sheet.w + SHEET_GAP;
     }
-    const finalEntities = [...entities.filter(e => !e.nestSheet), ...add];
+    const finalEntities = [...entities.filter(e => !e.nestSheet && !remove.has(e.id)), ...add];
     for (const op of ops) op.toolpath = generateToolpath(op, finalEntities, { stockConfig, allEntities: finalEntities });
-    dispatch({ type: 'APPLY_PART_NEST', payload: { add, ops, sheets: sheetRects } });
+    // The list keeps those parts (their geometry is stored), but they no longer point into the drawing.
+    if (remove.size) dispatch({ type: 'SET_PART_LIST', payload: partList.map(p => (p.sourceIds?.some(id => remove.has(id)) ? { ...p, sourceIds: undefined } : p)) });
+    dispatch({ type: 'APPLY_PART_NEST', payload: { add, ops, sheets: sheetRects, remove: [...remove] } });
     const first = sheetRects[0];
     dispatch({ type: 'SET_STOCK_CONFIG', payload: { width: first.w, length: first.l, datum: 'bl', stockOriginX: first.x, stockOriginY: first.y, stockOffset: 0 } });
     dispatch({ type: 'SET_STATUS', payload: `Nested ${sheetRects.length} sheet${sheetRects.length === 1 ? '' : 's'} — 💾 Plasma G-code writes one program per sheet` });
@@ -343,13 +396,15 @@ export default function PartListModal({ partList, entities, activeWorkspaceId, s
     <div style={S.overlay}>
       <div style={{ ...S.box, ...(dragging ? S.drop : {}) }} onClick={e => e.stopPropagation()}
         onDragOver={e => { e.preventDefault(); setDragging(true); }} onDragLeave={() => setDragging(false)} onDrop={onDrop}>
-        <div style={S.title}>▤ Part List <span style={{ fontSize:11, fontWeight:400, color:'#666688' }}>— drop DXF/SVG files here, or Add Parts</span></div>
+        <div style={S.title}>▦ Nest <span style={{ fontSize:11, fontWeight:400, color:'#666688' }}>— part list: add the drawing's parts, or drop DXF/SVG files here</span></div>
 
         <div style={S.bar}>
+          <button style={{ ...S.btn, ...S.secondary }} onClick={addFromDrawing}
+            title="The parts in the drawing (the selected ones, if any) — Apply replaces them with the nest">+ From Drawing{selectedEntityIds?.length ? ' (selection)' : ''}</button>
           <button style={{ ...S.btn, ...S.secondary }} onClick={addParts}>+ Add Parts…</button>
           <button style={{ ...S.btn, ...S.secondary }} onClick={refresh} disabled={!partList.length} title="Re-read each part's DXF/SVG file">⟳ Refresh</button>
           <span style={{ flex:1, fontSize:11, color:'#8888aa' }}>{message}</span>
-          <span style={{ fontSize:11, color:'#8888aa' }}>{partList.length} part{partList.length === 1 ? '' : 's'}, {partList.reduce((s, p) => s + (+p.qty || 0), 0)} total</span>
+          <span style={{ fontSize:11, color:'#8888aa' }}>{partList.length} part{partList.length === 1 ? '' : 's'}, {partList.reduce((s, p) => s + (p.fill ? 0 : +p.qty || 0), 0)} total{partList.some(p => p.fill) ? ' + fill' : ''}</span>
         </div>
 
         <div style={S.tableWrap}>
@@ -376,7 +431,14 @@ export default function PartListModal({ partList, entities, activeWorkspaceId, s
                     <td style={S.td}><Thumb part={p} /></td>
                     <td style={S.td}><input style={{ ...S.input, width:'100%' }} value={p.name} title={p.path || ''} onChange={e => update(p.id, { name: e.target.value })} /></td>
                     <td style={{ ...S.td, color:'#8888aa', whiteSpace:'nowrap' }}>{sh ? `${fmt(sh.w)} × ${fmt(sh.h)}` : '⚠ no outline'}</td>
-                    <td style={S.td}><input style={{ ...S.input, width:64 }} type="number" min={0} value={p.qty} onChange={e => update(p.id, { qty: Math.max(0, Math.round(+e.target.value || 0)) })} /></td>
+                    <td style={{ ...S.td, whiteSpace:'nowrap' }}>
+                      {p.fill
+                        ? <input style={{ ...S.input, width:64, color:'#ffbb66' }} value="Fill" readOnly title="As many as the sheet has room for" />
+                        : <input style={{ ...S.input, width:64 }} type="number" min={0} value={p.qty} onChange={e => update(p.id, { qty: Math.max(0, Math.round(+e.target.value || 0)) })} />}
+                      <label style={{ fontSize:11, color:'#aaaacc', marginLeft:6 }} title="Fill the room left on each sheet after the counted parts (a sheet of its own if no part has a count)">
+                        <input type="checkbox" checked={!!p.fill} onChange={e => update(p.id, { fill: e.target.checked })} style={{ verticalAlign:'middle' }} /> Fill
+                      </label>
+                    </td>
                     <td style={S.td}>
                       <select style={{ ...S.input, ...(matName(p.materialKey) ? {} : { borderColor:'#aa6644' }) }} value={p.materialKey || ''}
                         onChange={e => { update(p.id, { materialKey: e.target.value }); savePrefs({ ...loadPrefs(), lastMaterial: e.target.value }); }}>
@@ -392,12 +454,12 @@ export default function PartListModal({ partList, entities, activeWorkspaceId, s
                         <option value="none">None</option>
                       </select>
                     </td>
-                    <td style={{ ...S.td, color: placed == null ? '#555577' : placed < p.qty ? '#cc8866' : '#55dd77' }}>{placed == null ? '–' : `${placed}`}</td>
+                    <td style={{ ...S.td, color: placed == null ? '#555577' : !p.fill && placed < p.qty ? '#cc8866' : '#55dd77' }}>{placed == null ? '–' : `${placed}`}</td>
                     <td style={S.td}><button style={{ ...S.link, color:'#cc6666' }} onClick={() => setList(partList.filter(x => x.id !== p.id))} title="Remove part">✕</button></td>
                   </tr>
                 );
               })}
-              {!partList.length && <tr><td style={{ ...S.td, color:'#666688', padding:20 }} colSpan={9}>No parts yet — click + Add Parts… or drop DXF/SVG files on this window.</td></tr>}
+              {!partList.length && <tr><td style={{ ...S.td, color:'#666688', padding:20 }} colSpan={9}>No parts yet — click + From Drawing for the parts you imported, + Add Parts… for DXF/SVG files, or drop files on this window.</td></tr>}
             </tbody>
           </table>
         </div>
@@ -473,7 +535,7 @@ export default function PartListModal({ partList, entities, activeWorkspaceId, s
           <button style={{ ...S.btn, ...S.secondary }} onClick={() => { cancelled.current = closed.current = true; onClose(); }}>Close</button>
           <button style={{ ...S.btn, ...S.secondary }} onClick={running ? () => { cancelled.current = true; } : nest} disabled={!partList.length}>{running ? 'Stop' : results ? 'Nest Again' : 'Nest'}</button>
           <button style={{ ...S.btn, ...S.primary, opacity: allSheets.length && !running ? 1 : 0.5 }} onClick={apply} disabled={!allSheets.length || running}
-            title="Lay the sheets out in the drawing with a Plasma Cut each (replaces the previous Part List nest)">Apply</button>
+            title="Lay the sheets out in the drawing with a Plasma Cut each (replaces the previous nest, and the drawing's copies of parts taken from it)">Apply</button>
         </div>
       </div>
     </div>

@@ -1,5 +1,5 @@
-// Moving parts from their own frame to a nest placement — shared by ▦ Nest
-// and ▤ Part List. A placement { angle, x, y } (from plasma/nesting.js)
+// Moving parts from their own frame to a nest placement, for ▦ Nest
+// (the part list). A placement { angle, x, y } (from plasma/nesting.js)
 // rotates the part about its frame centre (cx, cy) and moves that centre
 // to (x, y).
 

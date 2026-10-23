@@ -1,6 +1,6 @@
 import React, { useEffect, useCallback, useState, useRef } from 'react';
 import { v4 as uuid } from 'uuid';
-import { useApp } from './store/AppContext';
+import { useApp, stockLowerLeft } from './store/AppContext';
 import CAMCanvas from './components/canvas/CAMCanvas';
 import ThreeCanvas from './components/canvas/ThreeCanvas';
 import OperationsPanel from './components/panels/OperationsPanel';
@@ -20,7 +20,6 @@ import { materialTagLine, loadPlasmaMaterials, loadPlasmaMachine, cutSettingsFor
 import PlasmaMaterialsModal from './components/modals/PlasmaMaterialsModal';
 import PlasmaMachineModal from './components/modals/PlasmaMachineModal';
 import PartListModal from './components/modals/PartListModal';
-import NestModal from './components/modals/NestModal';
 import { offsetEntity } from './cam/offsetEngine';
 import { roundedOffsetPolyline, isClockwise, stripClose, pointInPolygon, unionPolygons } from './cam/offset';
 import { mirrorEntitiesX, mirrorEntitiesY } from './cam/toolpath';
@@ -173,6 +172,7 @@ export default function App() {
   const { activePanelTab, statusMessage, selectedEntityIds, entities, operations, postConfig, activeTool, cadMode, refImage, workspaces, activeWorkspaceId } = state;
   const isInch = postConfig.units === 'inch';
   const plasmaMode = !!state.plasmaMode;
+  const onPlasma = plasmaMode && !cadMode;
   const MM_PER_INCH = 25.4;
   const [modal, setModal] = useState(null); // 'profiles' | 'tool-library' | 'about' | 'inlay-wizard'
   const [view3d, setView3d] = useState(false);
@@ -249,7 +249,7 @@ export default function App() {
         case 'menu-import-svg':       importSvg(); break;
         case 'menu-export-svg':       exportSvgFile(); break;
         case 'menu-export-dxf':       exportDxfFile(); break;
-        case 'menu-export-gcode':     exportGcode(); break;
+        case 'menu-export-gcode':     (plasmaMode && !cadMode ? exportPlasmaGcode() : exportGcode()); break;
         case 'menu-zoom-fit':         dispatch({ type: 'RESET_VIEWPORT' }); break;
         case 'menu-toggle-toolpaths': dispatch({ type: 'TOGGLE_TOOLPATHS' }); break;
         case 'menu-toggle-rapids':    dispatch({ type: 'TOGGLE_RAPIDS' }); break;
@@ -423,7 +423,7 @@ export default function App() {
   // the post chosen in ⚙ Machine (DMD-C3 Plasma Control or CandCNC
   // CommandCNC). Each cut gets its material's torch values (op._cut) from
   // the material library.
-  const exportPlasmaGcode = useCallback(async () => {
+  const exportPlasmaGcode = useCallback(async ({ save = true } = {}) => {
     const ops = operations.filter(op => op.type === 'plasma' && op.enabled && op.toolpath?.moves?.length > 0);
     if (ops.length === 0) {
       dispatch({ type: 'SET_STATUS', payload: 'Calculate the plasma cuts first (⟳ on each, or ⟳ All)' });
@@ -440,8 +440,9 @@ export default function App() {
       postProcessor: pp.id,
       units: saved.units || (postConfig.units === 'mm' ? 'mm' : 'inch'),
       lineNumbering: false,
-      stockOriginX: state.stockConfig.stockOriginX ?? 0,
-      stockOriginY: state.stockConfig.stockOriginY ?? 0,
+      // A cut straight from the drawing: the stock's lower-left corner is X0 Y0.
+      stockOriginX: stockLowerLeft(state.stockConfig).x,
+      stockOriginY: stockLowerLeft(state.stockConfig).y,
       // One material per program; cuts with different kerfs can't share a tag.
       plasmaMaterialTag: mixed ? null : materialTagLine({ materialId: first.materialId, thicknessId: first.thicknessId, name: first.materialName, kerfMm: first.kerf ?? 0 }),
       plasmaMaterialName: mixed ? null : first.materialName,
@@ -468,7 +469,7 @@ export default function App() {
       if (loose.length) programs.push({ suffix: '', gcode: generateForPP(pp.id, loose, cfg) });
       dispatch({ type: 'SET_GCODE', payload: programs[0].gcode });
       dispatch({ type: 'SET_PANEL_TAB', payload: 'gcode' });
-      if (window.electron) {
+      if (save && window.electron) {
         const base = await window.electron.saveGcodeInlay(`plasma.${cfg.fileExt || 'nc'}`);
         if (base) {
           const m = base.match(/^(.*?)(\.[^.\\/]+)?$/);
@@ -482,7 +483,7 @@ export default function App() {
     const gcode = generateForPP(pp.id, posted, cfg);
     dispatch({ type: 'SET_GCODE', payload: gcode });
     dispatch({ type: 'SET_PANEL_TAB', payload: 'gcode' });
-    if (window.electron) {
+    if (save && window.electron) {
       const path = await window.electron.saveGcode(`plasma.${cfg.fileExt || 'nc'}`);
       if (path) {
         await window.electron.writeFile(path, gcode);
@@ -757,8 +758,7 @@ export default function App() {
     <div style={S.app}>
       {/* Modals */}
       {modal === 'profiles' && <MachineProfilesModal onClose={() => setModal(null)} />}
-      {modal === 'nest' && <NestModal entities={entities} operations={operations} selectedEntityIds={selectedEntityIds} isInch={isInch} dispatch={dispatch} onClose={() => setModal(null)} />}
-      {modal === 'part-list' && <PartListModal partList={state.partList} entities={entities} activeWorkspaceId={activeWorkspaceId} stockConfig={state.stockConfig} isInch={isInch} dispatch={dispatch} onClose={() => setModal(null)} />}
+      {modal === 'nest' && <PartListModal partList={state.partList} entities={entities} selectedEntityIds={selectedEntityIds} activeWorkspaceId={activeWorkspaceId} stockConfig={state.stockConfig} isInch={isInch} dispatch={dispatch} onClose={() => setModal(null)} />}
       {modal === 'plasma-machine' && <PlasmaMachineModal isInch={isInch} onClose={() => setModal(null)} onSaved={() => dispatch({ type: 'SET_STATUS', payload: 'Plasma machine saved' })} />}
       {modal === 'plasma-materials' && <PlasmaMaterialsModal isInch={isInch} onClose={() => setModal(null)} onSaved={() => dispatch({ type: 'PLASMA_MATERIALS_SAVED' })} />}
       {modal === 'about' && <AboutModal onClose={() => setModal(null)} />}
@@ -874,8 +874,7 @@ export default function App() {
             <div style={{ width:1, background:'#2a2a50', margin:'0 4px' }} />
             <button style={S.tbBtn} onClick={importDxf}>📐 Import DXF</button>
             <button style={S.tbBtn} onClick={importSvg} title="Import SVG (Ctrl+Shift+V)">🖋 Import SVG</button>
-            <button style={{ ...S.tbBtn, borderColor:'#5a4a2a', color:'#ffbb66' }} onClick={() => setModal('part-list')} title="Parts from DXF/SVG files with quantities and materials, nested onto as many sheets as it takes">▤ Part List</button>
-            <button style={{ ...S.tbBtn, borderColor:'#5a4a2a', color:'#ffbb66' }} onClick={() => setModal('nest')} title="Nest the selected parts (or the whole drawing) on a sheet">▦ Nest</button>
+            <button style={{ ...S.tbBtn, borderColor:'#5a4a2a', color:'#ffbb66' }} onClick={() => setModal('nest')} title="Part list from the drawing or DXF/SVG files, with quantities (or Fill) and materials, nested onto as many sheets as it takes">▦ Nest</button>
             <button style={{ ...S.tbBtn, borderColor:'#5a4a2a', color:'#ffbb66' }} onClick={() => setModal('plasma-materials')} title="Kerf, cut feed and lead-in per material and thickness">⚡ Materials</button>
             <button style={{ ...S.tbBtn, borderColor:'#5a4a2a', color:'#ffbb66' }} onClick={() => setModal('plasma-machine')} title="Plasma post processor (DMD-C3 or CandCNC CommandCNC) and its settings">⚙ Machine</button>
             <button style={{ ...S.tbBtn, borderColor:'#5a4a2a', color:'#ffbb66' }} onClick={exportPlasmaGcode} title="Post all calculated plasma cuts with the post set in ⚙ Machine">💾 Plasma G-code <span style={S.unitBadge}>{unitsLabel}</span></button>
@@ -1051,7 +1050,8 @@ export default function App() {
         <div style={S.rightPanel}>
           <div style={S.tabBar}>
             {cadMode && <div style={S.tab(activePanelTab === 'props')} onClick={() => dispatch({ type: 'SET_PANEL_TAB', payload: 'props' })}>Props</div>}
-            {[['operations','Ops'],['tools','Tools'],['stock','Stock'],['gcode','G-code']].map(([tab, label]) => (
+            {/* PLASMA: no router tools; Stock becomes the sheet. */}
+            {(onPlasma ? [['operations','Ops'],['stock','Sheet'],['gcode','G-code']] : [['operations','Ops'],['tools','Tools'],['stock','Stock'],['gcode','G-code']]).map(([tab, label]) => (
               <div key={tab} style={S.tab(activePanelTab === tab)} onClick={() => dispatch({ type: 'SET_PANEL_TAB', payload: tab })}>{label}</div>
             ))}
           </div>
@@ -1061,9 +1061,10 @@ export default function App() {
           <div style={{ flex:1, overflow:'hidden', display:'flex', flexDirection:'column' }}>
             {activePanelTab === 'props'      && <CADPropertiesPanel />}
             {activePanelTab === 'operations' && <OperationsPanel />}
-            {activePanelTab === 'tools'      && <ToolLibraryPanel />}
+            {activePanelTab === 'tools'      && !onPlasma && <ToolLibraryPanel />}
+            {activePanelTab === 'tools'      && onPlasma && <OperationsPanel />}
             {activePanelTab === 'stock'      && <StockPanel />}
-            {activePanelTab === 'gcode'      && <GcodePanel />}
+            {activePanelTab === 'gcode'      && <GcodePanel onPlasmaExport={exportPlasmaGcode} />}
           </div>
         </div>
       </div>

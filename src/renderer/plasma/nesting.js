@@ -227,7 +227,7 @@ function prepareParts(parts, opts) {
       pieces.push({ pts: Array.from({ length: 32 }, (_, k) => ({ x: pc.x + Math.cos((k * Math.PI) / 16) * pierceR, y: pc.y + Math.sin((k * Math.PI) / 16) * pierceR })), closed: true, grow: 0 });
     }
     return {
-      index, qty: p.qty, cx, cy, local,
+      index, qty: p.qty, fill: !!p.fill, cx, cy, local,
       rotation: p.rotation, priority: p.priority ?? 5,
       shape: nestShape(pieces),
       // Mixed nesting builds an NFP per part pair and relative angle; it
@@ -241,8 +241,8 @@ function prepareParts(parts, opts) {
   });
 }
 
-/** The rotation (radians, 0–90°) that gives the part its smallest bounding box — its convex hull's edges are the candidates. */
-function minBoxAngle(pts) {
+/** Convex hull of { x, y } points, counter-clockwise. */
+function convexHull(pts) {
   const sorted = [...pts].sort((a, b) => a.x - b.x || a.y - b.y);
   const cross = (o, a, b) => (a.x - o.x) * (b.y - o.y) - (a.y - o.y) * (b.x - o.x);
   const half = list => {
@@ -253,7 +253,12 @@ function minBoxAngle(pts) {
     }
     return h.slice(0, -1);
   };
-  const hull = [...half(sorted), ...half([...sorted].reverse())];
+  return [...half(sorted), ...half([...sorted].reverse())];
+}
+
+/** The rotation (radians, 0–90°) that gives the part its smallest bounding box — its convex hull's edges are the candidates. */
+function minBoxAngle(pts) {
+  const hull = convexHull(pts);
   let best = 0, bestArea = Infinity;
   for (let i = 0; i < hull.length; i++) {
     const a = hull[i], b = hull[(i + 1) % hull.length];
@@ -352,7 +357,7 @@ function bestLattice(members, nfpCache, samples = 32) {
 }
 
 /** Places a lattice of units on the sheet; returns the placements that fit (best of a few phase shifts). */
-function fillLattice(members, lat, sheet) {
+function fillLattice(members, lat, sheet, blocked) {
   const { w, v2 } = lat;
   // Unit bounds (real outlines) relative to the unit origin.
   let ub = { minX: Infinity, minY: Infinity, maxX: -Infinity, maxY: -Infinity };
@@ -376,7 +381,8 @@ function fillLattice(members, lat, sheet) {
           for (const m of members) {
             const x = ux + m.dx, y = rowY + m.dy, t = m.o.tight;
             if (x + t.minX < sheet.minX - EPS || x + t.maxX > sheet.maxX + EPS || y + t.minY < sheet.minY - EPS || y + t.maxY > sheet.maxY + EPS) continue;
-            out.push({ part: m.o.part.index, angle: m.o.angle, x, y, left: x + t.minX, right: x + t.maxX });
+            if (blocked && blocked(m.o, x, y)) continue;
+            out.push({ part: m.o.part.index, angle: m.o.angle, x, y, left: x + t.minX, right: x + t.maxX, bottom: y + t.minY });
           }
         }
       }
@@ -388,19 +394,48 @@ function fillLattice(members, lat, sheet) {
   return best || [];
 }
 
+// Fitting an array around parts already on the sheet: every lattice when
+// there are only a few, else the tightest few angles' lattices.
+const OBSTACLES_FULL = 10;
+const OBSTACLE_LATTICES = 12;
+const OBSTACLES_MAX = 40; // beyond this, the array goes in a strip past them instead
+
 /**
- * Array nest of one part. opts: { angleStep (deg), allowPairs, onProgress }.
+ * Array nest of one part. opts: { angleStep (deg), allowPairs, obstacles, onProgress }.
  * Yields to the UI between angles. Returns { placements, info }.
  */
 async function arrayNest(part, sheet, qty, opts) {
   const step = Math.max(1, opts.angleStep || 5);
   const cache = new Map(), nfpCache = new Map();
   const yieldToUI = () => new Promise(r => setTimeout(r, 0));
+  // opts.obstacles: parts already on the sheet ([{ o, x, y }]); lattice
+  // copies that would hit one are left out, so the array fills in around them.
+  // Each obstacle's NFP is only built once a copy comes near it.
+  const obstacles = opts.obstacles || [];
+  const near = Math.max(0, opts.spacing || 0) + Math.max(0, opts.pierceSep || 0) + 1;
+  const obstacleNfps = new Map();
+  const blocked = obstacles.length ? (o, x, y) => {
+    let sets = obstacleNfps.get(o.key);
+    if (!sets) { sets = obstacles.map(() => null); obstacleNfps.set(o.key, sets); }
+    const t = o.tight;
+    return obstacles.some((ob, i) => {
+      const u = ob.o.tight;
+      if (x + t.maxX + near < ob.x + u.minX || x + t.minX - near > ob.x + u.maxX
+        || y + t.maxY + near < ob.y + u.minY || y + t.minY - near > ob.y + u.maxY) return false;
+      if (!sets[i]) sets[i] = makeRings(translatePaths(nfpPaths(ob.o.coarse, o.coarse), ob.x, ob.y));
+      return insideRings(sets[i], x, y);
+    });
+  } : null;
   let best = null;
+  // With obstacles, fitting a lattice around them is the slow part, so the
+  // sweep only ranks lattices by how tight they are; the best few per
+  // angle are fitted afterwards.
+  let ranked = obstacles.length > OBSTACLES_FULL ? [] : null;
   const evaluate = (members, label) => {
     const lat = bestLattice(members, nfpCache);
     if (!lat) return null;
-    const placed = fillLattice(members, lat, sheet);
+    if (ranked) { ranked.push({ members, label, cell: lat.cellArea / members.length }); return null; }
+    const placed = fillLattice(members, lat, sheet, blocked);
     const count = qty ? Math.min(qty, placed.length) : placed.length;
     const cand = { placed, count, cellArea: lat.cellArea / members.length, label };
     if (!best || count > best.count || (count === best.count && cand.cellArea < best.cellArea - 1e-6)) best = cand;
@@ -454,12 +489,31 @@ async function arrayNest(part, sheet, qty, opts) {
   for (let a = 0; a < 180 - 1e-9; a += step) angles.push(a);
   for (let i = 0; i < angles.length; i++) {
     await tryAngle(angles[i]);
-    opts.onProgress?.((i + 1) / angles.length);
+    opts.onProgress?.(((i + 1) / angles.length) * (ranked ? 0.5 : 1));
     if (opts.cancelled?.()) break;
+  }
+  if (ranked) {
+    const bestPerAngle = new Map();
+    for (const r of ranked) if (!bestPerAngle.has(r.label) || r.cell < bestPerAngle.get(r.label).cell) bestPerAngle.set(r.label, r);
+    const top = [...bestPerAngle.values()].sort((p, q) => p.cell - q.cell).slice(0, OBSTACLE_LATTICES);
+    ranked = null;
+    for (let i = 0; i < top.length; i++) {
+      evaluate(top[i].members, top[i].label);
+      opts.onProgress?.(0.5 + ((i + 1) / top.length) * 0.5);
+      await yieldToUI();
+      if (opts.cancelled?.()) break;
+    }
   }
   opts.onProgress?.(1);
   if (!best) return { placements: [], info: 'No arrangement fits on the sheet.' };
-  const placements = [...best.placed].sort((p, q) => p.left - q.left || p.y - q.y).slice(0, best.count);
+  const kept = [...best.placed].sort((p, q) => p.left - q.left || p.y - q.y).slice(0, best.count);
+  // A partial block (fewer copies than the sheet holds) slides down and left
+  // into the corner, moved as one so the spacing between copies stays — not
+  // when it was fitted around parts already on the sheet.
+  const slide = kept.length && !obstacles.length;
+  const dx = slide ? sheet.minX - Math.min(...kept.map(p => p.left)) : 0;
+  const dy = slide ? sheet.minY - Math.min(...kept.map(p => p.bottom)) : 0;
+  const placements = kept.map(p => ({ ...p, x: p.x + dx, y: p.y + dy, left: p.left + dx, right: p.right + dx, bottom: p.bottom + dy }));
   return { placements, info: best.label };
 }
 
@@ -500,7 +554,7 @@ async function mixedNest(parts, sheet, opts, preplaced = []) {
   };
   const items = [];
   for (const p of parts) for (let i = 0; i < p.qty; i++) items.push(p);
-  items.sort((p, q) => p.priority - q.priority || q.area - p.area);
+  items.sort((p, q) => !!p.fill - !!q.fill || p.priority - q.priority || q.area - p.area);
 
   const placed = [...preplaced];
   const unplaced = [];
@@ -576,7 +630,8 @@ export async function nestParts(parts, sheet, opts = {}) {
 
 /**
  * A part list onto as many sheets as it takes.
- * parts: [{ outline, lead, qty, priority, rotation }] (qty ≥ 1).
+ * parts: [{ outline, lead, qty, fill, priority, rotation }] (qty ≥ 1, or fill:
+ * as many as fit in the room left on each sheet).
  * sheetSizes: [{ w, l, count }] in mm, used in order; count 0/blank = as
  * many as needed. opts: as nestParts, plus margin (mm).
  * Returns { sheets: [{ w, l, placements, utilization }], parts (prepared),
@@ -584,8 +639,13 @@ export async function nestParts(parts, sheet, opts = {}) {
  */
 export async function nestSheets(parts, sheetSizes, opts = {}) {
   const prepared = prepareParts(parts, opts);
-  const remaining = prepared.map(p => Math.max(0, Math.round(p.qty || 0)));
-  const total = remaining.reduce((s, q) => s + q, 0);
+  // Fill parts have no count: they take whatever room each sheet has left
+  // after the counted parts, and only get a sheet of their own when there
+  // are no counted parts at all.
+  const remaining = prepared.map(p => (p.fill ? Infinity : Math.max(0, Math.round(p.qty || 0))));
+  const placedCount = prepared.map(() => 0);
+  const countedLeft = () => prepared.reduce((s, p) => s + (p.fill ? 0 : remaining[p.index]), 0);
+  const total = Math.max(1, countedLeft());
   const sheets = [];
   const margin = Math.max(0, opts.margin || 0);
   const cache = new Map();
@@ -593,35 +653,62 @@ export async function nestSheets(parts, sheetSizes, opts = {}) {
   for (const size of sheetSizes) {
     const limit = size.count > 0 ? size.count : Infinity;
     for (let used = 0; used < limit && sheets.length < 100; used++) {
-      if (!remaining.some(q => q > 0) || opts.cancelled?.()) break;
+      if (opts.cancelled?.()) break;
+      if (!countedLeft() && (sheets.length || !prepared.some(p => p.fill))) break;
       const sheet = { minX: margin, minY: margin, maxX: size.w - margin, maxY: size.l - margin };
-      const done = total - remaining.reduce((s, q) => s + q, 0);
-      const sub = { ...opts, onProgress: f => opts.onProgress?.((done + f * remaining.reduce((s, q) => s + q, 0) * 0.5) / total) };
+      const sheetArea = (sheet.maxX - sheet.minX) * (sheet.maxY - sheet.minY);
+      const done = total - countedLeft();
+      const sub = { ...opts, onProgress: f => opts.onProgress?.(Math.min(1, (done + f * Math.max(1, countedLeft()) * 0.5) / total)) };
+      // Counted parts first (by priority), fill parts last.
       const active = prepared.filter(p => remaining[p.index] > 0)
-        .sort((a, b) => a.priority - b.priority || remaining[b.index] - remaining[a.index]);
+        .sort((a, b) => a.fill - b.fill || a.priority - b.priority || remaining[b.index] - remaining[a.index]);
 
       // Parts with many copies: an array block each, in strips left to right
       // (a strip starts one spacing — or pierce separation — past the last).
       let placements = [];
       let stripX = sheet.minX;
       const gap = Math.max(opts.spacing || 0, opts.pierceSep || 0);
-      for (const p of active) {
-        if (active.length > 1 && remaining[p.index] < 6) continue;
-        if (stripX >= sheet.maxX) break;
-        const res = await arrayNest(p, { ...sheet, minX: stripX }, remaining[p.index], arrayOpts(sub, p.rotation || opts.rotation));
-        if (!res.placements.length) continue;
+      const strip = async p => {
+        if (stripX >= sheet.maxX) return;
+        const res = await arrayNest(p, { ...sheet, minX: stripX }, p.fill ? 0 : remaining[p.index], arrayOpts(sub, p.rotation || opts.rotation));
+        if (!res.placements.length) return;
         placements = placements.concat(res.placements.map(({ part, angle, x, y }) => ({ part, angle, x, y })));
         stripX = Math.max(...res.placements.map(pl => pl.right)) + gap;
-      }
-      const left = prepared.map(p => remaining[p.index] - placements.filter(pl => pl.part === p.index).length);
-      const rest = active.filter(p => left[p.index] > 0).map(p => ({ ...p, qty: left[p.index] }));
-      if (rest.length) {
+      };
+      // A few copies go in the mixed fill, packed into the corner.
+      for (const p of active) if (!p.fill && remaining[p.index] >= 6) await strip(p);
+      const leftOf = p => remaining[p.index] - placements.filter(pl => pl.part === p.index).length;
+      const mixed = async rest => {
+        if (!rest.length) return;
         const pre = placements.map(pl => ({ o: orient(prepared[pl.part], pl.angle, cache), x: pl.x, y: pl.y }));
         const res = await mixedNest(rest, sheet, sub, pre);
         placements = placements.concat(res.placements);
+      };
+      const counted = active.filter(p => !p.fill && leftOf(p) > 0);
+      await mixed(counted.map(p => ({ ...p, qty: leftOf(p) })));
+      // Fill parts: an array strip to the right of everything placed, then
+      // single copies into the gaps that leaves (when other parts are on the
+      // sheet), until one won't fit — no sheet holds more than its area allows.
+      // Fill parts: an array over the whole sheet with the copies that would
+      // hit a placed part left out, then single copies into what gaps are
+      // left (when other parts are on the sheet), until one won't fit — no
+      // sheet holds more than its area allows.
+      const fills = active.filter(p => p.fill);
+      const shared = placements.length > 0;
+      for (const p of fills) {
+        if (placements.length > OBSTACLES_MAX) {
+          stripX = Math.max(...placements.map(pl => pl.x + orient(prepared[pl.part], pl.angle, cache).tight.maxX)) + gap;
+          await strip(p);
+          continue;
+        }
+        const obstacles = placements.map(pl => ({ o: orient(prepared[pl.part], pl.angle, cache), x: pl.x, y: pl.y }));
+        const res = await arrayNest(p, sheet, 0, { ...arrayOpts(sub, p.rotation || opts.rotation), obstacles });
+        placements = placements.concat(res.placements.map(({ part, angle, x, y }) => ({ part, angle, x, y })));
       }
+      const arrayed = new Set(placements.map(pl => pl.part));
+      await mixed(fills.filter(p => shared || !arrayed.has(p.index)).map(p => ({ ...p, qty: Math.ceil(sheetArea / Math.max(p.area, 1)) + 1 })));
       if (!placements.length) break; // nothing left fits this size — try the next
-      for (const pl of placements) remaining[pl.part]--;
+      for (const pl of placements) { remaining[pl.part]--; placedCount[pl.part]++; }
       const usedArea = placements.reduce((s, pl) => s + prepared[pl.part].area, 0);
       sheets.push({ w: size.w, l: size.l, placements, utilization: usedArea / ((sheet.maxX - sheet.minX) * (sheet.maxY - sheet.minY)) });
       await new Promise(r => setTimeout(r, 0));
@@ -631,8 +718,8 @@ export async function nestSheets(parts, sheetSizes, opts = {}) {
   return {
     sheets,
     parts: prepared,
-    placed: prepared.map(p => Math.round(p.qty || 0) - remaining[p.index]),
-    unplaced: remaining,
+    placed: placedCount,
+    unplaced: prepared.map(p => (p.fill ? 0 : remaining[p.index])),
   };
 }
 

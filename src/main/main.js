@@ -142,6 +142,7 @@ function buildMenu() {
         { label: 'Show Toolpaths', type: 'checkbox', checked: true, click: (item) => mainWindow.webContents.send('menu-toggle-toolpaths', item.checked) },
         { label: 'Show Rapid Moves', type: 'checkbox', checked: true, click: (item) => mainWindow.webContents.send('menu-toggle-rapids', item.checked) },
         { type: 'separator' },
+        { role: 'reload' },
         { role: 'toggleDevTools' },
       ]
     },
@@ -287,12 +288,21 @@ ipcMain.handle('dialog-save-svg', async (_, defaultName) => {
   return result.canceled ? null : result.filePath;
 });
 
+// The default name's extension goes first in the G-code filter, so Windows
+// keeps it (e.g. .tap for CommandCNC) instead of switching to the first entry.
+function gcodeExtensions(defaultName) {
+  const exts = ['nc', 'gcode', 'tap', 'cnc', 'ngc'];
+  const m = /\.([a-z0-9]+)$/i.exec(defaultName || '');
+  const ext = m ? m[1].toLowerCase() : 'nc';
+  return [ext, ...exts.filter(e => e !== ext)];
+}
+
 ipcMain.handle('dialog-save-gcode', async (_, defaultName) => {
   const result = await dialog.showSaveDialog(mainWindow, {
     title: 'Export G-code',
     defaultPath: defaultName || 'toolpath.nc',
     filters: [
-      { name: 'G-code', extensions: ['nc', 'gcode', 'tap', 'cnc'] },
+      { name: 'G-code', extensions: gcodeExtensions(defaultName) },
       { name: 'All Files', extensions: ['*'] }
     ]
   });
@@ -304,7 +314,7 @@ ipcMain.handle('dialog-save-gcode-inlay', async (_, defaultName) => {
     title: 'Export G-code — choose base filename (multiple files will be saved)',
     defaultPath: defaultName || 'inlay.nc',
     filters: [
-      { name: 'G-code', extensions: ['nc', 'gcode', 'tap', 'cnc'] },
+      { name: 'G-code', extensions: gcodeExtensions(defaultName) },
       { name: 'All Files', extensions: ['*'] }
     ]
   });

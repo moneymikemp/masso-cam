@@ -162,7 +162,7 @@ const initialState = {
 
   // Temporary preview entities for offset/array modals
   previewEntities: [],
-  // Part List (PLASMA screen): [{ id, name, path, sourceIndex, entities, qty, materialKey, priority, rotation }]
+  // Part List (PLASMA screen): [{ id, name, path or sourceIds (from the drawing), sourceIndex, entities, qty, fill, materialKey, priority, rotation }]
   partList: [],
   // Sheets laid out by Part List → Apply: [{ id, name, x, y, w, l }] (mm, world)
   nestSheets: [],
@@ -400,25 +400,19 @@ function reducer(state, action) {
     case 'SET_PART_LIST': return { ...state, partList: action.payload, dirty: true };
     // Part List → Apply: swap the previous nest's sheets (entities tagged
     // nestSheet, Plasma Cuts with params.sheet) for the new ones.
+    // remove: the drawing's own copies of parts the nest replaces. A Plasma
+    // Cut on the whole drawing, or only on removed entities, would now cut
+    // the sheets a second time (or nothing), so it goes too.
     case 'APPLY_PART_NEST': {
-      const { add, ops, sheets } = action.payload;
+      const { add, ops, sheets, remove = [] } = action.payload;
+      const gone = new Set(remove);
+      const stale = op => op.type === 'plasma' && !op.params?.sheet && gone.size > 0
+        && (!op.selectedIds?.length || op.selectedIds.every(id => gone.has(id)));
       return {
         ...state,
-        entities: [...state.entities.filter(e => !e.nestSheet), ...add],
-        operations: [...state.operations.filter(op => !op.params?.sheet), ...ops],
+        entities: [...state.entities.filter(e => !e.nestSheet && !gone.has(e.id)), ...add],
+        operations: [...state.operations.filter(op => !op.params?.sheet && !stale(op)), ...ops],
         nestSheets: sheets,
-        selectedEntityIds: [],
-        entityHistory: [...state.entityHistory.slice(-49), state.entities],
-        entityFuture: [],
-        dirty: true,
-      };
-    }
-    // Remove some entities and add others as one undo step (Nest → Apply).
-    case 'REPLACE_ENTITIES': {
-      const ids = new Set(action.payload.remove || []);
-      return {
-        ...state,
-        entities: [...state.entities.filter(e => !ids.has(e.id)), ...(action.payload.add || [])],
         selectedEntityIds: [],
         entityHistory: [...state.entityHistory.slice(-49), state.entities],
         entityFuture: [],
@@ -672,6 +666,17 @@ export function useApp() {
 }
 
 // Default parameters for each operation type
+/**
+ * The stock's lower-left corner (world mm). Plasma programs always use it as
+ * X0 Y0, whatever datum the router side has set (stockOriginX/Y is the datum).
+ */
+export function stockLowerLeft(stockConfig) {
+  const { datum = 'bl', width = 0, length = 0, stockOriginX = 0, stockOriginY = 0 } = stockConfig || {};
+  const fx = datum[1] === 'l' ? 0 : datum[1] === 'c' ? 0.5 : 1;
+  const fy = datum[0] === 'b' ? 0 : datum[0] === 'm' ? 0.5 : 1;
+  return { x: stockOriginX - fx * width, y: stockOriginY - fy * length };
+}
+
 export function getDefaultParams(type) {
   const base = { safeZ: 25, topZ: 0, feedRate: 1500, plungeRate: 500, spindleRpm: 18000, totalDepth: 10, depthPerPass: 3 };
   switch (type) {

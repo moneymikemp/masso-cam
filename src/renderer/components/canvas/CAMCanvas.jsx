@@ -1,6 +1,6 @@
 import React, { useRef, useEffect, useCallback, useState, useMemo } from 'react';
 import { v4 as uuid } from 'uuid';
-import { useApp } from '../../store/AppContext';
+import { useApp, stockLowerLeft } from '../../store/AppContext';
 import { circleToPoints, arcToPoints, polylineToPoints } from '../../dxf/parser';
 import { computeAutoTabPositions, mirrorEntitiesX, mirrorEntitiesY } from '../../cam/toolpath';
 import { cubicBezierToPolyline } from '../../cam/textEngine';
@@ -1044,6 +1044,7 @@ export default function CAMCanvas({ tracePreview = null }) {
   }
 
   const { viewport, entities, layers, operations: allOperations, selectedEntityIds, hoveredEntityId, showToolpaths, showRapids, bounds, stockConfig, tabPlacementActive, tabPlacementOpId, dogboneSelectionActive, dogboneSelectionOpId, textPlacementActive, textPlacementOpId, medialAxisPolylines, postConfig, activeTool, gridSnap, refImage, previewEntities, zSliderPos, activeWorkspaceId, nestSheets } = state;
+  const plasmaScreen = !!state.plasmaMode && !state.cadMode;
   const operations = allOperations.filter(op => !op.workspaceId || op.workspaceId === activeWorkspaceId);
   const isInch = postConfig?.units === 'inch';
 
@@ -1391,8 +1392,10 @@ export default function CAMCanvas({ tracePreview = null }) {
   function drawOrigin(ctx) {
     // Crosshair sits at the datum point, which may not be world (0,0) when
     // the stock has been fitted to the part without moving geometry.
-    const ox = stockConfig?.stockOriginX ?? 0;
-    const oy = stockConfig?.stockOriginY ?? 0;
+    // PLASMA: programs start at the stock's lower-left corner.
+    const corner = plasmaScreen ? stockLowerLeft(stockConfig) : null;
+    const ox = corner ? corner.x : stockConfig?.stockOriginX ?? 0;
+    const oy = corner ? corner.y : stockConfig?.stockOriginY ?? 0;
     const o = w2c(ox, oy);
     const size = 12;
     ctx.strokeStyle = '#ff4444';
@@ -2311,7 +2314,7 @@ export default function CAMCanvas({ tracePreview = null }) {
     drawSnapIndicator(ctx, cur, snapType);
   }
 
-  useEffect(() => { draw(); }, [entities, layers, operations, viewport, selectedEntityIds, hoveredEntityId, showToolpaths, showRapids, mousePos, stockConfig, zSliderPos, zLevels, showOnionSkin, tabPlacementActive, tabPlacementOpId, dogboneSelectionActive, dogboneSelectionOpId, textPlacementActive, textPlacementOpId, medialAxisPolylines, liveXf, drawPhase, refImage, previewEntities, plugCanvasEntities, nestSheets]);
+  useEffect(() => { draw(); }, [entities, layers, operations, viewport, selectedEntityIds, hoveredEntityId, showToolpaths, showRapids, mousePos, stockConfig, zSliderPos, zLevels, showOnionSkin, tabPlacementActive, tabPlacementOpId, dogboneSelectionActive, dogboneSelectionOpId, textPlacementActive, textPlacementOpId, medialAxisPolylines, liveXf, drawPhase, refImage, previewEntities, plugCanvasEntities, nestSheets, plasmaScreen]);
 
   // Mouse events
   const onMouseDown = useCallback((e) => {

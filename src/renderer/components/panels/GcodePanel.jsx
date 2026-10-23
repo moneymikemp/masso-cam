@@ -21,13 +21,18 @@ const S = {
   postInput: { flex: 1, background: '#0d0d20', border: '1px solid #2a2a50', color: '#ccccee', borderRadius: 3, padding: '2px 4px', fontSize: 10 },
 };
 
-export default function GcodePanel() {
+// onPlasmaExport: on the PLASMA screen, Generate and Export post the Plasma
+// Cuts with the plasma post (App's 💾 Plasma G-code) instead of the router post.
+export default function GcodePanel({ onPlasmaExport }) {
   const { state, dispatch } = useApp();
-  const { operations, tools, postConfig, stockConfig, gcodeOutput } = state;
+  const { operations, tools, postConfig, stockConfig, gcodeOutput, plasmaMode, cadMode } = state;
+  const plasma = plasmaMode && !cadMode && !!onPlasmaExport;
   const [showPost, setShowPost] = useState(false);
 
   function generate() {
-    const enabled = operations.filter(op => op.enabled && op.toolpath?.moves?.length > 0);
+    if (plasma) { onPlasmaExport({ save: false }); return; }
+    // Router/mill operations only — Plasma Cuts are posted from the PLASMA screen.
+    const enabled = operations.filter(op => op.type !== 'plasma' && op.enabled && op.toolpath?.moves?.length > 0);
     if (enabled.length === 0) {
       dispatch({ type: 'SET_STATUS', payload: 'No calculated operations to export' });
       return;
@@ -51,9 +56,10 @@ export default function GcodePanel() {
   }
 
   async function exportGcode() {
+    if (plasma) { onPlasmaExport(); return; }
     if (!gcodeOutput) { generate(); return; }
 
-    const enabledOps = operations.filter(op => op.enabled && op.toolpath?.moves?.length > 0);
+    const enabledOps = operations.filter(op => op.type !== 'plasma' && op.enabled && op.toolpath?.moves?.length > 0);
     const gcfg = {
       ...postConfig,
       wcs: stockConfig.wcs,
@@ -133,8 +139,9 @@ export default function GcodePanel() {
       <div style={S.header}>
         <span style={S.title}>G-code</span>
         <button style={S.genBtn} onClick={generate}>⟳ Generate</button>
-        <button style={S.exportBtn} onClick={exportGcode} disabled={!gcodeOutput}>
-          ↓ Export .nc
+        <button style={S.exportBtn} onClick={exportGcode} disabled={!gcodeOutput && !plasma}
+          title={plasma ? 'Plasma post from ⚙ Machine (one program per sheet)' : 'Router post'}>
+          {plasma ? '↓ Export Plasma' : '↓ Export .nc'}
         </button>
       </div>
 

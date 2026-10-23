@@ -114,6 +114,10 @@ export default function StockPanel() {
   const { state, dispatch } = useApp();
   const { stockConfig, entities, layers, operations, stlBounds } = state;
   const isInch = state.postConfig?.units === 'inch';
+  // PLASMA screen: the stock is the sheet, X0 Y0 is always its lower-left
+  // corner, and the torch finds Z itself — so no Z, datum or WCS settings.
+  const plasma = !!state.plasmaMode && !state.cadMode;
+  const originDatum = plasma ? 'bl' : stockConfig.datum;
 
   // Compute bounds from DXF entities (for moveToOrigin and DXF-based fitStockToPart).
   const bounds = useMemo(() => entities.length > 0 ? getBounds(entities) : null, [entities]);
@@ -179,8 +183,8 @@ export default function StockPanel() {
     const gCX = (gMinX + gMaxX) / 2, gCY = (gMinY + gMaxY) / 2;
 
     // Which point on the geometry should land at machine (0, 0)?
-    const refX = stockConfig.datum[1] === 'l' ? gMinX : stockConfig.datum[1] === 'c' ? gCX : gMaxX;
-    const refY = stockConfig.datum[0] === 'b' ? gMinY : stockConfig.datum[0] === 'm' ? gCY : gMaxY;
+    const refX = originDatum[1] === 'l' ? gMinX : originDatum[1] === 'c' ? gCX : gMaxX;
+    const refY = originDatum[0] === 'b' ? gMinY : originDatum[0] === 'm' ? gCY : gMaxY;
 
     const shifted   = applyShift(entities, -refX, -refY);
     const newBounds = getBounds(shifted);
@@ -198,8 +202,11 @@ export default function StockPanel() {
 
     // Stock wraps the shifted geometry with `offset` margin on all sides.
     // newBounds.minX is the geometry left after shifting (0 for 'bl', -nW for 'tr', etc.)
-    const stockOriginX = newBounds.minX - offset + datumXFrac(stockConfig.datum) * padW;
-    const stockOriginY = newBounds.minY - offset + datumYFrac(stockConfig.datum) * padH;
+    // On PLASMA the sheet's corner sits on X0 Y0 (no margin below or left of it).
+    const left = plasma ? newBounds.minX : newBounds.minX - offset;
+    const bottom = plasma ? newBounds.minY : newBounds.minY - offset;
+    const stockOriginX = left + datumXFrac(stockConfig.datum) * padW;
+    const stockOriginY = bottom + datumYFrac(stockConfig.datum) * padH;
 
     dispatch({ type: 'SET_STOCK_CONFIG', payload: {
       width: padW, length: padH, stockOriginX, stockOriginY,
@@ -256,6 +263,65 @@ export default function StockPanel() {
   };
 
   const fmt = v => isInch ? (v / MM_PER_INCH).toFixed(4) : v.toFixed(1);
+
+  if (plasma) {
+    const sheets = state.nestSheets || [];
+    return (
+      <div style={S.panel}>
+        <div style={S.header}>
+          <span style={S.headerTitle}>Sheet</span>
+        </div>
+        <div style={S.body}>
+
+          {sheets.length > 0 && <>
+            <div style={S.section}>Nested Sheets</div>
+            {sheets.map((sh, i) => (
+              <div key={sh.id} style={{ ...S.infoBox, marginTop: 0, marginBottom: 4 }}>
+                <div style={{ color: '#ffbb66' }}>{sh.name}</div>
+                <div>{fmt(sh.w)} × {fmt(sh.l)} {distUnit} · program <span style={S.infoVal}>-sheet{i + 1}</span></div>
+              </div>
+            ))}
+            <div style={{ fontSize: 10, color: '#555577', marginBottom: 4 }}>
+              Sizes come from ▦ Nest. 💾 Plasma G-code writes one program per sheet, each with its sheet's lower-left corner as X0 Y0.
+            </div>
+          </>}
+
+          <div style={S.section}>{sheets.length ? 'Cutting from the drawing (no nest)' : 'Setup'}</div>
+          <div style={{ display: 'flex', gap: 4, marginBottom: 6 }}>
+            <button style={S.actionBtn(hasGeometry)} onClick={fitStockToPart} title="Size the sheet to the drawing plus the margin below">
+              Fit Sheet to Part
+            </button>
+            <button style={S.actionBtn(hasGeometry)} onClick={moveToOrigin} title="Move the drawing so its lower-left corner is at X0 Y0">
+              Move to Origin
+            </button>
+          </div>
+          <div style={S.row}>
+            <span style={S.label}>Width (X)</span>
+            <NumInput value={toDisp(stockConfig.width)} onChange={v => set('width', toMM(v))} min={0} step={dStep} />
+            <span style={S.unit}>{distUnit}</span>
+          </div>
+          <div style={S.row}>
+            <span style={S.label}>Length (Y)</span>
+            <NumInput value={toDisp(stockConfig.length)} onChange={v => set('length', toMM(v))} min={0} step={dStep} />
+            <span style={S.unit}>{distUnit}</span>
+          </div>
+          <div style={S.row}>
+            <span style={S.label} title="Plate around the drawing when fitting the sheet to it">Fit Margin</span>
+            <NumInput value={toDisp(stockConfig.stockOffset ?? 0)} onChange={applyStockOffset} min={0} step={dStep} />
+            <span style={S.unit}>{distUnit}</span>
+          </div>
+
+          <div style={S.section}>Program Origin</div>
+          <div style={{ ...S.infoBox, marginTop: 0 }}>
+            X0 Y0 is the <strong style={{ color: '#ffbb66' }}>lower-left corner</strong> of the sheet ↙.
+            Jog the torch to the plate's lower-left corner and zero X and Y there.
+            The torch finds the plate surface itself (touch-off), so there's no Z zero to set.
+          </div>
+
+        </div>
+      </div>
+    );
+  }
 
   return (
     <div style={S.panel}>

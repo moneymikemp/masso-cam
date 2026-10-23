@@ -79,32 +79,53 @@ function rasterise(polys, x0, y0, g, w, h) {
   return mask;
 }
 
-/** Zhang–Suen thinning, in place. */
+/** Zhang–Suen thinning, in place. Only set pixels are visited (the list shrinks as it thins). */
 function thin(m, w, h) {
   const at = (r, c) => (r >= 0 && r < h && c >= 0 && c < w ? m[r * w + c] : 0);
+  let on = [];
+  for (let i = 0; i < m.length; i++) if (m[i]) on.push(i);
+  const p = new Uint8Array(8);
   let changed = true;
   const del = [];
   while (changed) {
     changed = false;
     for (let pass = 0; pass < 2; pass++) {
       del.length = 0;
-      for (let r = 0; r < h; r++) {
-        for (let c = 0; c < w; c++) {
-          if (!m[r * w + c]) continue;
-          const p = [at(r - 1, c), at(r - 1, c + 1), at(r, c + 1), at(r + 1, c + 1), at(r + 1, c), at(r + 1, c - 1), at(r, c - 1), at(r - 1, c - 1)];
-          const b = p.reduce((s, v) => s + v, 0);
-          if (b < 2 || b > 6) continue;
-          let a = 0;
-          for (let i = 0; i < 8; i++) if (!p[i] && p[(i + 1) % 8]) a++;
-          if (a !== 1) continue;
-          if (pass === 0 ? p[0] * p[2] * p[4] || p[2] * p[4] * p[6] : p[0] * p[2] * p[6] || p[0] * p[4] * p[6]) continue;
-          del.push(r * w + c);
-        }
+      for (const i of on) {
+        const r = Math.floor(i / w), c = i % w;
+        p[0] = at(r - 1, c); p[1] = at(r - 1, c + 1); p[2] = at(r, c + 1); p[3] = at(r + 1, c + 1);
+        p[4] = at(r + 1, c); p[5] = at(r + 1, c - 1); p[6] = at(r, c - 1); p[7] = at(r - 1, c - 1);
+        const b = p[0] + p[1] + p[2] + p[3] + p[4] + p[5] + p[6] + p[7];
+        if (b < 2 || b > 6) continue;
+        let a = 0;
+        for (let k = 0; k < 8; k++) if (!p[k] && p[(k + 1) % 8]) a++;
+        if (a !== 1) continue;
+        if (pass === 0 ? p[0] * p[2] * p[4] || p[2] * p[4] * p[6] : p[0] * p[2] * p[6] || p[0] * p[4] * p[6]) continue;
+        del.push(i);
       }
       if (del.length) changed = true;
       for (const i of del) m[i] = 0;
     }
+    if (changed) on = on.filter(i => m[i]);
   }
+}
+
+/** Pixels within r cells (square) of a set pixel. */
+function dilate(m, w, h, r) {
+  const rows = new Uint8Array(w * h), out = new Uint8Array(w * h);
+  for (let row = 0; row < h; row++) {
+    let last = -Infinity;
+    for (let c = 0; c < w; c++) { if (m[row * w + c]) last = c; if (c - last <= r) rows[row * w + c] = 1; }
+    last = Infinity;
+    for (let c = w - 1; c >= 0; c--) { if (m[row * w + c]) last = c; if (last - c <= r) rows[row * w + c] = 1; }
+  }
+  for (let c = 0; c < w; c++) {
+    let last = -Infinity;
+    for (let row = 0; row < h; row++) { if (rows[row * w + c]) last = row; if (row - last <= r) out[row * w + c] = 1; }
+    last = Infinity;
+    for (let row = h - 1; row >= 0; row--) { if (rows[row * w + c]) last = row; if (last - row <= r) out[row * w + c] = 1; }
+  }
+  return out;
 }
 
 /** Distance from a point to the nearest edge of a loop. */
@@ -188,6 +209,10 @@ export function narrowCenterlines(loop, isHole, kerf) {
     const scrapMask = rasterise([loop], x0, y0, g, w, h);
     if (!isHole) for (let i = 0; i < scrapMask.length; i++) scrapMask[i] ^= 1;
     const bitMask = rasterise(group.map(fromInt), x0, y0, g, w, h);
+    // Only the scrap around the bit is thinned: a wide cut-out next to it
+    // would otherwise take hundreds of passes and change nothing in the bit.
+    const band = dilate(bitMask, w, h, Math.ceil(m / g) + 2);
+    for (let i = 0; i < scrapMask.length; i++) scrapMask[i] &= band[i];
     thin(scrapMask, w, h);
     // Skeleton pixels in the bit, where the slot is at least half a kerf wide.
     const keep = new Uint8Array(w * h);
