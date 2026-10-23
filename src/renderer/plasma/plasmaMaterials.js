@@ -16,6 +16,10 @@ export const DEFAULT_PLASMA_MATERIALS = [
     thicknesses: [
       { id: '16ga', label: '16 ga', kerfIn: 0.04, feedInMin: 180, leadInLengthIn: 0.12, leadStyle: 'arc' },
       { id: '1-8', label: '1/8"', kerfIn: 0.045, feedInMin: 140, leadInLengthIn: 0.14, leadStyle: 'arc' },
+      // Hypertherm Powermax 65 cut charts (shielded consumables).
+      { id: '14ga', label: '14 ga (0.075") 45A shielded', kerfIn: 0.055, feedInMin: 270, leadInLengthIn: 0.15, leadStyle: 'arc', amps: 45, process: '45A Shielded', pierceDelayS: 0.2, pierceHeightIn: 0.15, cutHeightIn: 0.06, arcVolts: 130 },
+      { id: '12ga', label: '12 ga (0.105") 45A shielded', kerfIn: 0.058, feedInMin: 190, leadInLengthIn: 0.15, leadStyle: 'arc', amps: 45, process: '45A Shielded', pierceDelayS: 0.4, pierceHeightIn: 0.15, cutHeightIn: 0.06, arcVolts: 133 },
+      { id: '10ga', label: '10 ga (0.135") 65A shielded', kerfIn: 0.065, feedInMin: 190, leadInLengthIn: 0.15, leadStyle: 'arc', amps: 65, process: '65A Shielded', pierceDelayS: 0.1, pierceHeightIn: 0.15, cutHeightIn: 0.06, arcVolts: 125 },
       { id: '3-16', label: '3/16"', kerfIn: 0.05, feedInMin: 95, leadInLengthIn: 0.15, leadStyle: 'arc' },
       { id: '1-4', label: '1/4"', kerfIn: 0.055, feedInMin: 70, leadInLengthIn: 0.17, leadStyle: 'arc' },
       { id: '3-8', label: '3/8"', kerfIn: 0.065, feedInMin: 38, leadInLengthIn: 0.2, leadStyle: 'arc' },
