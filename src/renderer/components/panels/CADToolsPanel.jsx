@@ -1,6 +1,6 @@
 import React, { useState } from 'react';
 import { v4 as uuid } from 'uuid';
-import { useApp } from '../../store/AppContext';
+import { useApp, appUnits } from '../../store/AppContext';
 import { circleToPoints, arcToPoints, polylineToPoints } from '../../dxf/parser';
 import { unionPolygons, differencePolygons, intersectPolygons, stripClose, offsetPolyline, roundedOffsetPolyline, isClockwise, pointInPolygon, polygonArea } from '../../cam/offset';
 
@@ -106,7 +106,7 @@ const numInp = {
 export default function CADToolsPanel() {
   const { state, dispatch } = useApp();
   const { activeTool, gridSnap, entities, selectedEntityIds } = state;
-  const isInch = state.postConfig?.units === 'inch';
+  const isInch = appUnits(state) === 'inch';
   const unit = isInch ? 'in' : 'mm';
 
   // Offset state — distance stored in mm, displayed in current unit

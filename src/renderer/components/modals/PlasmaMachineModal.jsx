@@ -100,6 +100,8 @@ export default function PlasmaMachineModal({ isInch, onClose, onSaved }) {
           )}
         </div>
         <div style={S.btnRow}>
+          <button style={{ ...S.btn, ...S.secondary, marginRight: 'auto' }} title={`Put ${pp.label}'s settings back to the defaults (not saved until you click Save)`}
+            onClick={() => setMachine(m => ({ ...m, settings: { ...m.settings, [pp.id]: { ...pp.defaultSettings } } }))}>Reset to Defaults</button>
           <button style={{ ...S.btn, ...S.secondary }} onClick={onClose}>Cancel</button>
           <button style={{ ...S.btn, ...S.primary }} onClick={save}>Save</button>
         </div>

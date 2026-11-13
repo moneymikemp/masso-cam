@@ -506,7 +506,9 @@ async function arrayNest(part, sheet, qty, opts) {
   }
   opts.onProgress?.(1);
   if (!best) return { placements: [], info: 'No arrangement fits on the sheet.' };
-  const kept = [...best.placed].sort((p, q) => p.left - q.left || p.y - q.y).slice(0, best.count);
+  // The copies nearest the corner, so a partial count stays one block: a
+  // leaning lattice's leftmost copies can be spread the length of the sheet.
+  const kept = [...best.placed].sort((p, q) => (p.left + p.bottom) - (q.left + q.bottom) || p.left - q.left).slice(0, best.count);
   // A partial block (fewer copies than the sheet holds) slides down and left
   // into the corner, moved as one so the spacing between copies stays — not
   // when it was fitted around parts already on the sheet.
@@ -633,11 +635,40 @@ export async function nestParts(parts, sheet, opts = {}) {
  * parts: [{ outline, lead, qty, fill, priority, rotation }] (qty ≥ 1, or fill:
  * as many as fit in the room left on each sheet).
  * sheetSizes: [{ w, l, count }] in mm, used in order; count 0/blank = as
- * many as needed. opts: as nestParts, plus margin (mm).
+ * many as needed. opts: as nestParts, plus margin (mm) and corner ('ll' |
+ * 'lr' | 'ul' | 'ur': pack into that corner, the one the table is zeroed at).
  * Returns { sheets: [{ w, l, placements, utilization }], parts (prepared),
  * placed: count per part, unplaced: count per part }.
  */
 export async function nestSheets(parts, sheetSizes, opts = {}) {
+  const fx = opts.corner?.[1] === 'r', fy = opts.corner?.[0] === 'u';
+  if (!fx && !fy) return nestFromLeft(parts, sheetSizes, opts);
+  // Another corner: nest the mirror images from the lower-left, then mirror
+  // each sheet back. A part mirrored, turned by a and mirrored back is the
+  // part turned by -a (by a when mirrored both ways, a half turn), and its
+  // frame centre (the bbox centre) mirrors with it. One mirror flips the
+  // outline's winding, so it's reversed to keep it.
+  const one = fx !== fy;
+  const flip = q => ({ ...q, x: fx ? -q.x : q.x, y: fy ? -q.y : q.y });
+  const loop = pts => (one ? pts.map(flip).reverse() : pts.map(flip));
+  const flipLead = l => l && { ...l, start: l.start && flip(l.start), pierce: l.pierce && flip(l.pierce), leadPts: l.leadPts?.map(flip) };
+  const res = await nestFromLeft(parts.map(p => ({ ...p, outline: loop(p.outline), lead: flipLead(p.lead) })), sheetSizes, opts);
+  return {
+    ...res,
+    parts: res.parts.map(p => ({ ...p, cx: fx ? -p.cx : p.cx, cy: fy ? -p.cy : p.cy, local: loop(p.local) })),
+    sheets: res.sheets.map(sh => ({
+      ...sh,
+      placements: sh.placements.map(({ left, right, bottom, ...pl }) => ({
+        ...pl,
+        x: fx ? sh.w - pl.x : pl.x,
+        y: fy ? sh.l - pl.y : pl.y,
+        angle: one ? -pl.angle : pl.angle,
+      })),
+    })),
+  };
+}
+
+async function nestFromLeft(parts, sheetSizes, opts) {
   const prepared = prepareParts(parts, opts);
   // Fill parts have no count: they take whatever room each sheet has left
   // after the counted parts, and only get a sheet of their own when there

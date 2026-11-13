@@ -1,5 +1,5 @@
 import React, { useState, useEffect } from 'react';
-import { useApp } from '../../store/AppContext';
+import { useApp, appUnits } from '../../store/AppContext';
 import { loadFontFromArrayBuffer, textToGlyphContours, textToArcPolylines, getTextBounds } from '../../cam/textEngine';
 import { loadPlasmaMaterials, findThickness, paramsFromThickness } from '../../plasma/plasmaMaterials';
 
@@ -114,7 +114,7 @@ const PLUG_HEIGHT_OFFSET_MM = 25.4 * 0.075; // ≈ 1.905 mm (0.075 in default)
 
 export default function OperationParams({ op, tools, operations = [], onChange }) {
   const { state, dispatch } = useApp();
-  const isInch = state.postConfig?.units === 'inch';
+  const isInch = appUnits(state) === 'inch';
   const p = op.params || {};
 
   // ── Plasma Cut: material library ───────────────────────────────────────────

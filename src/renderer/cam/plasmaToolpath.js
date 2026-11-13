@@ -262,8 +262,12 @@ export function generatePlasma(op, shapes) {
   const moves = [];
   const contours = [];
   let skippedLeads = 0;
+  let dots = 0;
   for (const c of order) {
     if (c.kind === 'open') {
+      // A dot or a zero-length line in the drawing: pierced in place (a drill
+      // mark, if that's what it's for), and counted so the warning shows it.
+      if (c.pts.every(p => Math.hypot(p.x - c.pts[0].x, p.y - c.pts[0].y) < 0.05)) dots++;
       moves.push({ type: 'rapid', x: c.pts[0].x, y: c.pts[0].y });
       moves.push({ type: 'torch_on' });
       for (let i = 1; i < c.pts.length; i++) moves.push({ type: 'feed', x: c.pts[i].x, y: c.pts[i].y, f: feed });
@@ -283,6 +287,7 @@ export function generatePlasma(op, shapes) {
     for (const pt of walkAlong(loop, overcut)) moves.push({ type: 'feed', x: pt.x, y: pt.y, f: feed });
     moves.push({ type: 'torch_off' });
   }
+  if (dots) warnings.push(`${dots} dot${dots === 1 ? '' : 's'} or zero-length line${dots === 1 ? '' : 's'} in the drawing — pierced in place (a drill mark); delete ${dots === 1 ? 'it' : 'them'} from the drawing if not wanted.`);
   if (skippedLeads) warnings.push(`${skippedLeads} cut${skippedLeads === 1 ? '' : 's'} too small for a lead-in — pierced on the path.`);
 
   return { moves, warnings, contours };

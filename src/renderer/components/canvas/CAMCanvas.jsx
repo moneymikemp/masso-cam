@@ -1,6 +1,6 @@
 import React, { useRef, useEffect, useCallback, useState, useMemo } from 'react';
 import { v4 as uuid } from 'uuid';
-import { useApp, stockLowerLeft } from '../../store/AppContext';
+import { useApp, appUnits, plasmaZero, rectCorner } from '../../store/AppContext';
 import { circleToPoints, arcToPoints, polylineToPoints } from '../../dxf/parser';
 import { computeAutoTabPositions, mirrorEntitiesX, mirrorEntitiesY } from '../../cam/toolpath';
 import { cubicBezierToPolyline } from '../../cam/textEngine';
@@ -1046,7 +1046,7 @@ export default function CAMCanvas({ tracePreview = null }) {
   const { viewport, entities, layers, operations: allOperations, selectedEntityIds, hoveredEntityId, showToolpaths, showRapids, bounds, stockConfig, tabPlacementActive, tabPlacementOpId, dogboneSelectionActive, dogboneSelectionOpId, textPlacementActive, textPlacementOpId, medialAxisPolylines, postConfig, activeTool, gridSnap, refImage, previewEntities, zSliderPos, activeWorkspaceId, nestSheets } = state;
   const plasmaScreen = !!state.plasmaMode && !state.cadMode;
   const operations = allOperations.filter(op => !op.workspaceId || op.workspaceId === activeWorkspaceId);
-  const isInch = postConfig?.units === 'inch';
+  const isInch = appUnits(state) === 'inch';
 
   const [canvasDims, setCanvasDims] = useState({ w: 0, h: 0 });
   const [liveXf, setLiveXf] = useState(null); // drives overlay position during drag
@@ -1392,8 +1392,8 @@ export default function CAMCanvas({ tracePreview = null }) {
   function drawOrigin(ctx) {
     // Crosshair sits at the datum point, which may not be world (0,0) when
     // the stock has been fitted to the part without moving geometry.
-    // PLASMA: programs start at the stock's lower-left corner.
-    const corner = plasmaScreen ? stockLowerLeft(stockConfig) : null;
+    // PLASMA: programs start at the stock's corner set in ⚙ Machine.
+    const corner = plasmaScreen ? plasmaZero(stockConfig, state.plasmaTable.origin) : null;
     const ox = corner ? corner.x : stockConfig?.stockOriginX ?? 0;
     const oy = corner ? corner.y : stockConfig?.stockOriginY ?? 0;
     const o = w2c(ox, oy);
@@ -1405,7 +1405,27 @@ export default function CAMCanvas({ tracePreview = null }) {
     ctx.beginPath(); ctx.moveTo(o.x - size, o.y); ctx.lineTo(o.x + size, o.y); ctx.stroke();
   }
 
+  // PLASMA: the table's travel (⚙ Machine), drawn from X0 Y0 toward the sheet.
+  function drawTableTravel(ctx) {
+    const { origin, travelX, travelY } = state.plasmaTable;
+    if (!plasmaScreen || !(travelX > 0 && travelY > 0) || !stockConfig) return;
+    const z = plasmaZero(stockConfig, origin);
+    const x0 = origin[1] === 'r' ? z.x - travelX : z.x, y0 = origin[0] === 'u' ? z.y - travelY : z.y;
+    const a = w2c(x0, y0 + travelY), b = w2c(x0 + travelX, y0);
+    ctx.save();
+    ctx.strokeStyle = '#44aa88';
+    ctx.lineWidth = 1;
+    ctx.setLineDash([10, 6]);
+    ctx.strokeRect(a.x, a.y, b.x - a.x, b.y - a.y);
+    ctx.setLineDash([]);
+    ctx.fillStyle = '#44aa88';
+    ctx.font = '11px sans-serif';
+    ctx.fillText('Table travel', a.x + 6, a.y + 14);
+    ctx.restore();
+  }
+
   function drawStock(ctx) {
+    drawTableTravel(ctx);
     drawNestSheets(ctx);
     if (!stockConfig || stockConfig.width <= 0 || stockConfig.length <= 0) return;
     // stockOriginX/Y is the world position of the datum point.
@@ -1574,9 +1594,9 @@ export default function CAMCanvas({ tracePreview = null }) {
     ctx.stroke();
   }
 
-  function drawMoveList(ctx, moves, baseCutColor) {
+  function drawMoveList(ctx, moves, baseCutColor, start) {
     const SNAP = 0.001;
-    let prevX = 0, prevY = 0, curZ = 0;
+    let prevX = start?.x ?? 0, prevY = start?.y ?? 0, curZ = 0;
     for (const move of moves) {
       const x = move.x ?? prevX;
       const y = move.y ?? prevY;
@@ -1686,7 +1706,10 @@ export default function CAMCanvas({ tracePreview = null }) {
         }
       } else {
         const cutColor = op.type === 'drill' ? COLORS.toolpathPlunge : COLORS.toolpathCut;
-        drawMoveList(ctx, op.toolpath.moves, cutColor);
+        // A plasma program starts at its X0 Y0: the sheet's (or stock's) origin corner.
+        const sh = op.type === 'plasma' ? op.params?.sheet : null;
+        const start = sh ? rectCorner(sh, state.plasmaTable.origin) : op.type === 'plasma' ? plasmaZero(stockConfig, state.plasmaTable.origin) : null;
+        drawMoveList(ctx, op.toolpath.moves, cutColor, start);
       }
       // Tab markers — drawn for ops that have tab params set, regardless of mode
       if (op.params?.tabs && op.toolpath.contours?.length) {
@@ -2314,7 +2337,7 @@ export default function CAMCanvas({ tracePreview = null }) {
     drawSnapIndicator(ctx, cur, snapType);
   }
 
-  useEffect(() => { draw(); }, [entities, layers, operations, viewport, selectedEntityIds, hoveredEntityId, showToolpaths, showRapids, mousePos, stockConfig, zSliderPos, zLevels, showOnionSkin, tabPlacementActive, tabPlacementOpId, dogboneSelectionActive, dogboneSelectionOpId, textPlacementActive, textPlacementOpId, medialAxisPolylines, liveXf, drawPhase, refImage, previewEntities, plugCanvasEntities, nestSheets, plasmaScreen]);
+  useEffect(() => { draw(); }, [entities, layers, operations, viewport, selectedEntityIds, hoveredEntityId, showToolpaths, showRapids, mousePos, stockConfig, zSliderPos, zLevels, showOnionSkin, tabPlacementActive, tabPlacementOpId, dogboneSelectionActive, dogboneSelectionOpId, textPlacementActive, textPlacementOpId, medialAxisPolylines, liveXf, drawPhase, refImage, previewEntities, plugCanvasEntities, nestSheets, plasmaScreen, state.plasmaTable]);
 
   // Mouse events
   const onMouseDown = useCallback((e) => {

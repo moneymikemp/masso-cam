@@ -1,5 +1,5 @@
 import React, { useMemo } from 'react';
-import { useApp } from '../../store/AppContext';
+import { useApp, appUnits } from '../../store/AppContext';
 import { getBounds } from '../../dxf/parser';
 
 const MM_PER_INCH = 25.4;
@@ -113,7 +113,7 @@ function NumInput({ value, onChange, min, step = 0.1 }) {
 export default function StockPanel() {
   const { state, dispatch } = useApp();
   const { stockConfig, entities, layers, operations, stlBounds } = state;
-  const isInch = state.postConfig?.units === 'inch';
+  const isInch = appUnits(state) === 'inch';
   // PLASMA screen: the stock is the sheet, X0 Y0 is always its lower-left
   // corner, and the torch finds Z itself — so no Z, datum or WCS settings.
   const plasma = !!state.plasmaMode && !state.cadMode;
@@ -266,6 +266,9 @@ export default function StockPanel() {
 
   if (plasma) {
     const sheets = state.nestSheets || [];
+    const corner = state.plasmaTable.origin;
+    const cornerName = { ll: 'lower-left', lr: 'lower-right', ul: 'upper-left (back-left)', ur: 'upper-right (back-right)' }[corner] || 'lower-left';
+    const cornerArrow = { ll: '↙', lr: '↘', ul: '↖', ur: '↗' }[corner] || '↙';
     return (
       <div style={S.panel}>
         <div style={S.header}>
@@ -282,7 +285,7 @@ export default function StockPanel() {
               </div>
             ))}
             <div style={{ fontSize: 10, color: '#555577', marginBottom: 4 }}>
-              Sizes come from ▦ Nest. 💾 Plasma G-code writes one program per sheet, each with its sheet's lower-left corner as X0 Y0.
+              Sizes come from ▦ Nest. 💾 Plasma G-code writes one program per sheet, each with its sheet's {cornerName} corner as X0 Y0.
             </div>
           </>}
 
@@ -313,8 +316,8 @@ export default function StockPanel() {
 
           <div style={S.section}>Program Origin</div>
           <div style={{ ...S.infoBox, marginTop: 0 }}>
-            X0 Y0 is the <strong style={{ color: '#ffbb66' }}>lower-left corner</strong> of the sheet ↙.
-            Jog the torch to the plate's lower-left corner and zero X and Y there.
+            X0 Y0 is the <strong style={{ color: '#ffbb66' }}>{cornerName} corner</strong> of the sheet {cornerArrow} (set in ⚙ Machine).
+            Jog the torch to the plate's {cornerName} corner and zero X and Y there.
             The torch finds the plate surface itself (touch-off), so there's no Z zero to set.
           </div>
 

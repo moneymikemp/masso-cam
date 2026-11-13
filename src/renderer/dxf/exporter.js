@@ -1,6 +1,7 @@
 // DXF R12 (AC1009) exporter.
 // Produces a file compatible with AutoCAD R12 and all modern CAD applications.
-// All coordinates are in millimetres. Angles are decimal degrees CCW from +X.
+// Written in the app's units (opts.units 'inch' | 'mm'; the drawing is mm),
+// with $INSUNITS / $MEASUREMENT saying which. Angles are decimal degrees CCW from +X.
 
 function fmt(n) {
   if (typeof n !== 'number' || !isFinite(n)) return '0';
@@ -63,13 +64,18 @@ export function collectTextContours(operations) {
   return contours;
 }
 
-export function exportDxf(entities, layers, operations) {
+export function exportDxf(entities, layers, operations, opts = {}) {
   const lines = [];
   const w = (code, val) => { lines.push(String(code), String(val)); };
+  const inch = opts.units === 'inch';
+  const L = n => fmt(inch ? n / 25.4 : n); // a length or coordinate, in the file's units
 
   // ── HEADER ────────────────────────────────────────────────────────────────
   w(0, 'SECTION'); w(2, 'HEADER');
   w(9, '$ACADVER'); w(1, 'AC1009');
+  // Not R12 variables, but CAD programs read them: 1 = inches, 4 = mm.
+  w(9, '$INSUNITS'); w(70, inch ? 1 : 4);
+  w(9, '$MEASUREMENT'); w(70, inch ? 0 : 1);
   w(9, '$EXTMIN'); w(10, '0.0'); w(20, '0.0'); w(30, '0.0');
   w(9, '$EXTMAX'); w(10, '1000.0'); w(20, '1000.0'); w(30, '0.0');
   w(0, 'ENDSEC');
@@ -113,20 +119,20 @@ export function exportDxf(entities, layers, operations) {
     switch (e.type) {
       case 'line':
         w(0, 'LINE'); w(8, layer);
-        w(10, fmt(e.start.x)); w(20, fmt(e.start.y)); w(30, '0.0');
-        w(11, fmt(e.end.x));   w(21, fmt(e.end.y));   w(31, '0.0');
+        w(10, L(e.start.x)); w(20, L(e.start.y)); w(30, '0.0');
+        w(11, L(e.end.x));   w(21, L(e.end.y));   w(31, '0.0');
         break;
 
       case 'circle':
         w(0, 'CIRCLE'); w(8, layer);
-        w(10, fmt(e.center.x)); w(20, fmt(e.center.y)); w(30, '0.0');
-        w(40, fmt(e.radius));
+        w(10, L(e.center.x)); w(20, L(e.center.y)); w(30, '0.0');
+        w(40, L(e.radius));
         break;
 
       case 'arc':
         w(0, 'ARC'); w(8, layer);
-        w(10, fmt(e.center.x)); w(20, fmt(e.center.y)); w(30, '0.0');
-        w(40, fmt(e.radius));
+        w(10, L(e.center.x)); w(20, L(e.center.y)); w(30, '0.0');
+        w(40, L(e.radius));
         w(50, fmt(radToDeg(e.startAngle)));
         w(51, fmt(radToDeg(e.endAngle)));
         break;
@@ -139,7 +145,7 @@ export function exportDxf(entities, layers, operations) {
         w(70, flags);
         for (const v of (e.vertices || [])) {
           w(0, 'VERTEX'); w(8, layer);
-          w(10, fmt(v.x)); w(20, fmt(v.y)); w(30, '0.0');
+          w(10, L(v.x)); w(20, L(v.y)); w(30, '0.0');
           if (v.bulge) w(42, fmt(v.bulge));  // DXF group 42 = arc bulge
         }
         w(0, 'SEQEND'); w(8, layer);
@@ -158,7 +164,7 @@ export function exportDxf(entities, layers, operations) {
         w(66, 1); w(10, '0.0'); w(20, '0.0'); w(30, '0.0'); w(70, 1);
         for (const v of everts) {
           w(0, 'VERTEX'); w(8, layer);
-          w(10, fmt(v.x)); w(20, fmt(v.y)); w(30, '0.0');
+          w(10, L(v.x)); w(20, L(v.y)); w(30, '0.0');
         }
         w(0, 'SEQEND'); w(8, layer);
         break;
@@ -176,7 +182,7 @@ export function exportDxf(entities, layers, operations) {
     w(70, contour.closed ? 1 : 0);
     for (const v of contour.vertices) {
       w(0, 'VERTEX'); w(8, 'TEXT');
-      w(10, fmt(v.x)); w(20, fmt(v.y)); w(30, '0.0');
+      w(10, L(v.x)); w(20, L(v.y)); w(30, '0.0');
       if (v.bulge) w(42, fmt(v.bulge));
     }
     w(0, 'SEQEND'); w(8, 'TEXT');

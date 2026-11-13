@@ -1,5 +1,5 @@
 import React, { useState, useEffect } from 'react';
-import { useApp } from '../../store/AppContext';
+import { useApp, appUnits } from '../../store/AppContext';
 import { loadFontFromArrayBuffer, textToArcPolylines } from '../../cam/textEngine';
 
 const MM = 25.4;
@@ -20,7 +20,7 @@ const S = {
 
 export default function CadTextPanel() {
   const { state, dispatch } = useApp();
-  const isInch = state.postConfig?.units === 'inch';
+  const isInch = appUnits(state) === 'inch';
   const dUnit = isInch ? 'in' : 'mm';
   const dStep = isInch ? 0.01 : 0.25;
 

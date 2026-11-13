@@ -1,6 +1,6 @@
 import React, { useEffect, useCallback, useState, useRef } from 'react';
 import { v4 as uuid } from 'uuid';
-import { useApp, stockLowerLeft } from './store/AppContext';
+import { useApp, appUnits, plasmaZero, rectCorner } from './store/AppContext';
 import CAMCanvas from './components/canvas/CAMCanvas';
 import ThreeCanvas from './components/canvas/ThreeCanvas';
 import OperationsPanel from './components/panels/OperationsPanel';
@@ -15,7 +15,7 @@ import { parseSvg } from './svg/parser';
 import { exportSvg as generateSvg } from './svg/exporter';
 import { exportDxf as generateDxf } from './dxf/exporter';
 import { generateGcode, generateGcodeByTool } from './gcode/postprocessor';
-import { generateForPP, POST_PROCESSORS } from './gcode/postProcessors';
+import { generateForPP, POST_PROCESSORS, plasmaTable } from './gcode/postProcessors';
 import { materialTagLine, loadPlasmaMaterials, loadPlasmaMachine, cutSettingsFor } from './plasma/plasmaMaterials';
 import PlasmaMaterialsModal from './components/modals/PlasmaMaterialsModal';
 import PlasmaMachineModal from './components/modals/PlasmaMachineModal';
@@ -170,7 +170,7 @@ const S = {
 export default function App() {
   const { state, dispatch, getProject } = useApp();
   const { activePanelTab, statusMessage, selectedEntityIds, entities, operations, postConfig, activeTool, cadMode, refImage, workspaces, activeWorkspaceId } = state;
-  const isInch = postConfig.units === 'inch';
+  const isInch = appUnits(state) === 'inch';
   const plasmaMode = !!state.plasmaMode;
   const onPlasma = plasmaMode && !cadMode;
   const MM_PER_INCH = 25.4;
@@ -184,6 +184,7 @@ export default function App() {
   const [traceSmooth, setTraceSmooth] = useState(20);        // 1-80 → RDP tolerance
   const [traceArcFit, setTraceArcFit] = useState(50);        // 0 = lines only; 1-100 → arc tolerance
   const [tracePreview, setTracePreview] = useState(null);    // live preview: Array<Array<{type,...}>>
+  const [traceOn, setTraceOn] = useState(false);             // auto-trace is opt-in: off = image only, to draw over by hand
 
   useEffect(() => {
     if (window.electron) {
@@ -191,10 +192,16 @@ export default function App() {
     }
   }, []);
 
+  // The PLASMA machine's X0 Y0 corner, for the canvas, the Sheet tab and ▦ Nest.
+  const loadPlasmaOrigin = useCallback(() => {
+    loadPlasmaMachine().then(m => dispatch({ type: 'SET_PLASMA_TABLE', payload: plasmaTable(m) }));
+  }, [dispatch]);
+  useEffect(() => { loadPlasmaOrigin(); }, [loadPlasmaOrigin]);
+
   // Live trace preview — re-runs whenever threshold, smooth, arcFit, or the reference image changes.
   // tracePreview shape: Array<Array<{type:'line',start,end} | {type:'arc',center,radius,startAngle,endAngle}>>
   useEffect(() => {
-    if (!refImage || !refImageElRef.current) { setTracePreview(null); return; }
+    if (!traceOn || !refImage || !refImageElRef.current) { setTracePreview(null); return; }
     const timer = setTimeout(() => {
       try {
         const threshold = traceThreshold / 100;
@@ -215,7 +222,7 @@ export default function App() {
       } catch { setTracePreview(null); }
     }, 60);
     return () => clearTimeout(timer);
-  }, [refImage, traceThreshold, traceSmooth, traceArcFit]);
+  }, [traceOn, refImage, traceThreshold, traceSmooth, traceArcFit]);
 
   // Load a project file passed as CLI argument (file association double-click at launch)
   useEffect(() => {
@@ -312,11 +319,11 @@ export default function App() {
       const bounds = getBounds(entities);
       dispatch({ type: 'SET_DXF', payload: { entities, layers, bounds } });
 
-      const appUnits = state.postConfig?.units ?? 'mm';
+      const units = appUnits(state);
       let statusMsg;
-      if (dxfUnits !== 'unitless' && dxfUnits !== appUnits) {
+      if (dxfUnits !== 'unitless' && dxfUnits !== units) {
         const dxfLabel = dxfUnits === 'inch' ? 'inches' : 'mm';
-        const appLabel = appUnits === 'inch' ? 'inches' : 'mm';
+        const appLabel = units === 'inch' ? 'inches' : 'mm';
         statusMsg = `DXF imported as ${dxfLabel} — your current unit setting is ${appLabel}, coordinates have been converted`;
       } else {
         const unitNote = dxfUnits === 'unitless' ? 'unitless' : dxfUnits === 'inch' ? 'inches' : 'mm';
@@ -326,7 +333,7 @@ export default function App() {
     } catch (err) {
       dispatch({ type: 'SET_STATUS', payload: 'DXF import failed: ' + err.message });
     }
-  }, [dispatch]);
+  }, [dispatch, state.units, postConfig]);
 
   const importSvg = useCallback(async () => {
     try {
@@ -358,7 +365,7 @@ export default function App() {
       dispatch({ type: 'SET_STATUS', payload: 'No entities to export' });
       return;
     }
-    const dxfContent = generateDxf(entities, state.layers, operations);
+    const dxfContent = generateDxf(entities, state.layers, operations, { units: isInch ? 'inch' : 'mm' });
     if (window.electron) {
       const savePath = await window.electron.saveDxf('export.dxf');
       if (savePath) {
@@ -374,7 +381,7 @@ export default function App() {
       URL.revokeObjectURL(a.href);
       dispatch({ type: 'SET_STATUS', payload: 'DXF exported' });
     }
-  }, [entities, state.layers, operations, dispatch]);
+  }, [entities, state.layers, operations, isInch, dispatch]);
 
   const exportSvgFile = useCallback(async () => {
     if (entities.length === 0) {
@@ -432,24 +439,44 @@ export default function App() {
     const [machine, materials] = await Promise.all([loadPlasmaMachine(), loadPlasmaMaterials()]);
     const pp = POST_PROCESSORS[machine.postProcessor] || POST_PROCESSORS.dmdPlasma;
     const saved = machine.settings[pp.id] || {};
+    const table = plasmaTable(machine);
+    const looseZero = plasmaZero(state.stockConfig, table.origin);
+    // A program that needs more X or Y travel than the table has (from its X0 Y0, which it starts and ends at).
+    const len = v => (isInch ? `${(v / 25.4).toFixed(2)}"` : `${Math.round(v)} mm`);
+    const overTravel = (list, zero, label) => {
+      if (!(table.travelX > 0 && table.travelY > 0)) return null;
+      let x0 = 0, x1 = 0, y0 = 0, y1 = 0;
+      for (const op of list) {
+        for (const m of op.toolpath.moves) {
+          if (m.x !== undefined) { x0 = Math.min(x0, m.x - zero.x); x1 = Math.max(x1, m.x - zero.x); }
+          if (m.y !== undefined) { y0 = Math.min(y0, m.y - zero.y); y1 = Math.max(y1, m.y - zero.y); }
+        }
+      }
+      const over = [];
+      if (x1 - x0 > table.travelX + 0.5) over.push(`X ${len(x1 - x0)} (table ${len(table.travelX)})`);
+      if (y1 - y0 > table.travelY + 0.5) over.push(`Y ${len(y1 - y0)} (table ${len(table.travelY)})`);
+      return over.length ? `${label}: ${over.join(', ')}` : null;
+    };
+    const tooBig = warns => !warns.length || !save || !window.electron
+      || window.confirm(`Bigger than the table travel (⚙ Machine):\n${warns.join('\n')}\n\nExport anyway?`);
     const first = ops[0].params || {};
     const mixed = ops.some(op => Math.abs((op.params?.kerf ?? 0) - (first.kerf ?? 0)) > 1e-6);
     const cfg = {
       ...pp.defaultSettings,
       ...saved,
       postProcessor: pp.id,
-      units: saved.units || (postConfig.units === 'mm' ? 'mm' : 'inch'),
+      units: saved.units || (isInch ? 'inch' : 'mm'),
       lineNumbering: false,
-      // A cut straight from the drawing: the stock's lower-left corner is X0 Y0.
-      stockOriginX: stockLowerLeft(state.stockConfig).x,
-      stockOriginY: stockLowerLeft(state.stockConfig).y,
+      // A cut straight from the drawing: the stock's corner (⚙ Machine) is X0 Y0.
+      stockOriginX: looseZero.x,
+      stockOriginY: looseZero.y,
       // One material per program; cuts with different kerfs can't share a tag.
       plasmaMaterialTag: mixed ? null : materialTagLine({ materialId: first.materialId, thicknessId: first.thicknessId, name: first.materialName, kerfMm: first.kerf ?? 0 }),
       plasmaMaterialName: mixed ? null : first.materialName,
     };
     const posted = ops.map(op => ({ ...op, _cut: cutSettingsFor(materials, op.params) }));
 
-    // Part List sheets: one program per sheet, each with its own corner as 0,0.
+    // Part List sheets: one program per sheet, each with its own corner (⚙ Machine's origin) as 0,0.
     const sheetOps = posted.filter(op => op.params?.sheet);
     if (sheetOps.length) {
       const bySheet = new Map();
@@ -457,24 +484,40 @@ export default function App() {
         if (!bySheet.has(op.params.sheet.id)) bySheet.set(op.params.sheet.id, []);
         bySheet.get(op.params.sheet.id).push(op);
       }
+      const warns = [];
       const programs = [...bySheet.values()].map((sheetOpsOne, i) => {
         const sh = sheetOpsOne[0].params.sheet;
         const name = sheetOpsOne[0].params.materialName;
+        const zero = rectCorner(sh, table.origin);
+        const w = overTravel(sheetOpsOne, zero, `Sheet ${i + 1}`);
+        if (w) warns.push(w);
         return {
           suffix: `-sheet${i + 1}`,
-          gcode: generateForPP(pp.id, sheetOpsOne, { ...cfg, stockOriginX: sh.x, stockOriginY: sh.y, plasmaMaterialName: name, plasmaMaterialTag: null }),
+          gcode: generateForPP(pp.id, sheetOpsOne, { ...cfg, stockOriginX: zero.x, stockOriginY: zero.y, plasmaMaterialName: name, plasmaMaterialTag: null }),
         };
       });
+      // Cuts outside the nest (left in the drawing) get their own, clearly named file.
       const loose = posted.filter(op => !op.params?.sheet);
-      if (loose.length) programs.push({ suffix: '', gcode: generateForPP(pp.id, loose, cfg) });
+      if (loose.length) {
+        const w = overTravel(loose, looseZero, 'Loose cuts');
+        if (w) warns.push(w);
+        programs.push({ suffix: '-loose', gcode: generateForPP(pp.id, loose, cfg) });
+      }
       dispatch({ type: 'SET_GCODE', payload: programs[0].gcode });
       dispatch({ type: 'SET_PANEL_TAB', payload: 'gcode' });
+      if (warns.length) dispatch({ type: 'SET_STATUS', payload: `⚠ Bigger than the table — ${warns.join('; ')}` });
+      if (!tooBig(warns)) return;
       if (save && window.electron) {
         const base = await window.electron.saveGcodeInlay(`plasma.${cfg.fileExt || 'nc'}`);
         if (base) {
           const m = base.match(/^(.*?)(\.[^.\\/]+)?$/);
-          for (const p of programs) await window.electron.writeFile(`${m[1]}${p.suffix}${m[2] || `.${cfg.fileExt || 'nc'}`}`, p.gcode);
-          dispatch({ type: 'SET_STATUS', payload: `Exported ${programs.length} program${programs.length === 1 ? '' : 's'}: ${m[1].split(/[\\/]/).pop()}-sheet1…` });
+          const ext = m[2] || `.${cfg.fileExt || 'nc'}`;
+          const name = m[1].split(/[\\/]/).pop();
+          for (const p of programs) await window.electron.writeFile(`${m[1]}${p.suffix}${ext}`, p.gcode);
+          // Name every file and its pierce count, so the right one gets loaded.
+          const cuts = g => (g.match(/^M3\b/gm) || []).length;
+          const list = programs.map(p => `${name}${p.suffix}${ext} (${cuts(p.gcode)} cuts)`).join(', ');
+          dispatch({ type: 'SET_STATUS', payload: `${warns.length ? '⚠ ' : ''}Exported ${programs.length} file${programs.length === 1 ? '' : 's'}: ${list}${loose.length ? ' — -loose has cuts that are not on a nested sheet' : ''}${warns.length ? ` — bigger than the table: ${warns.join('; ')}` : ''}` });
         }
       }
       return;
@@ -483,14 +526,17 @@ export default function App() {
     const gcode = generateForPP(pp.id, posted, cfg);
     dispatch({ type: 'SET_GCODE', payload: gcode });
     dispatch({ type: 'SET_PANEL_TAB', payload: 'gcode' });
+    const warn = overTravel(posted, looseZero, 'Program');
+    if (warn) dispatch({ type: 'SET_STATUS', payload: `⚠ Bigger than the table — ${warn}` });
+    if (!tooBig(warn ? [warn] : [])) return;
     if (save && window.electron) {
       const path = await window.electron.saveGcode(`plasma.${cfg.fileExt || 'nc'}`);
       if (path) {
         await window.electron.writeFile(path, gcode);
-        dispatch({ type: 'SET_STATUS', payload: `Exported: ${path.split(/[\\/]/).pop()}${mixed ? ' — cuts have different kerfs, so no material tag was written' : ''}` });
+        dispatch({ type: 'SET_STATUS', payload: `${warn ? '⚠ ' : ''}Exported: ${path.split(/[\\/]/).pop()}${mixed ? ' — cuts have different kerfs, so no material tag was written' : ''}${warn ? ` — bigger than the table: ${warn}` : ''}` });
       }
     }
-  }, [operations, postConfig, state.stockConfig, dispatch]);
+  }, [operations, postConfig, isInch, state.stockConfig, dispatch]);
 
   const exportGcode = useCallback(async () => {
     // Router/mill operations only — Plasma Cuts are posted from the PLASMA screen.
@@ -615,7 +661,8 @@ export default function App() {
       // Default scale: fit the image into ~200mm wide area
       const mmPerPixel = Math.min(0.5, 200 / (img.naturalWidth || 1));
       dispatch({ type: 'SET_REF_IMAGE', payload: { dataUrl, x: 0, y: 0, mmPerPixel, opacity: 0.35 } });
-      dispatch({ type: 'SET_STATUS', payload: `Reference image loaded (${img.naturalWidth}×${img.naturalHeight}px)` });
+      setTraceOn(false);
+      dispatch({ type: 'SET_STATUS', payload: `Reference image loaded (${img.naturalWidth}×${img.naturalHeight}px) — draw over it, or ✎ Trace to auto-trace` });
     };
     img.src = dataUrl;
   }, [dispatch]);
@@ -752,14 +799,14 @@ export default function App() {
 
   const enabledOpsCount = operations.filter(o => o.enabled).length;
   const calculatedCount = operations.filter(o => o.enabled && o.toolpath).length;
-  const unitsLabel = postConfig.units === 'inch' ? 'INCH' : 'MM';
+  const unitsLabel = isInch ? 'INCH' : 'MM';
 
   return (
     <div style={S.app}>
       {/* Modals */}
       {modal === 'profiles' && <MachineProfilesModal onClose={() => setModal(null)} />}
-      {modal === 'nest' && <PartListModal partList={state.partList} entities={entities} selectedEntityIds={selectedEntityIds} activeWorkspaceId={activeWorkspaceId} stockConfig={state.stockConfig} isInch={isInch} dispatch={dispatch} onClose={() => setModal(null)} />}
-      {modal === 'plasma-machine' && <PlasmaMachineModal isInch={isInch} onClose={() => setModal(null)} onSaved={() => dispatch({ type: 'SET_STATUS', payload: 'Plasma machine saved' })} />}
+      {modal === 'nest' && <PartListModal partList={state.partList} entities={entities} selectedEntityIds={selectedEntityIds} activeWorkspaceId={activeWorkspaceId} stockConfig={state.stockConfig} table={state.plasmaTable} isInch={isInch} dispatch={dispatch} onClose={() => setModal(null)} />}
+      {modal === 'plasma-machine' && <PlasmaMachineModal isInch={isInch} onClose={() => setModal(null)} onSaved={() => { loadPlasmaOrigin(); dispatch({ type: 'SET_STATUS', payload: 'Plasma machine saved' }); }} />}
       {modal === 'plasma-materials' && <PlasmaMaterialsModal isInch={isInch} onClose={() => setModal(null)} onSaved={() => dispatch({ type: 'PLASMA_MATERIALS_SAVED' })} />}
       {modal === 'about' && <AboutModal onClose={() => setModal(null)} />}
       {modal === 'tool-library' && <ToolLibraryModal onClose={() => setModal(null)} />}
@@ -809,7 +856,7 @@ export default function App() {
           selectedEntityIds={selectedEntityIds}
           entities={entities}
           tools={state.tools || []}
-          isInch={postConfig.units === 'inch'}
+          isInch={isInch}
         />
       )}
 
@@ -826,6 +873,15 @@ export default function App() {
             >{label}</button>
           );
         })}
+        {/* App-wide units: what every length is shown and typed in (not a post setting). */}
+        <div style={{ display:'flex', marginLeft:4 }} title="Units for the whole app — drawing, sheet, cut settings. Each post still has its own G20/G21 output setting.">
+          {[['inch', 'IN'], ['mm', 'MM']].map(([u, label], i) => (
+            <button key={u}
+              style={{ ...S.tbBtn, ...(isInch === (u === 'inch') ? S.tbBtnActive : { color:'#777799' }), borderRadius: i ? '0 4px 4px 0' : '4px 0 0 4px', marginLeft: i ? -1 : 0, padding:'4px 8px' }}
+              onClick={() => { dispatch({ type: 'SET_UNITS', payload: u }); window.electron?.storeSet('appUnits', u); }}
+            >{label}</button>
+          ))}
+        </div>
         <div style={{ width:1, background:'#2a2a50', margin:'0 4px' }} />
         <div style={{ display:'flex', gap:4, flex:1, overflow:'hidden' }}>
           {/* CAD-mode-only tools */}
@@ -838,12 +894,16 @@ export default function App() {
             <div style={{ width:1, background:'#2a2a50', margin:'0 2px' }} />
             <button title="Import reference image (JPG/PNG)" style={S.tbBtn} onClick={importRefImage}>🖼 Ref Img</button>
             {refImage && <>
-              <button
+              <button title={traceOn ? 'Hide the auto-trace preview (draw over the image by hand)' : 'Auto-trace the image — shows a cyan preview to tune, then ⟳ Apply Trace'}
+                style={{ ...S.tbBtn, ...(traceOn ? { background:'#10303a', borderColor:'#00aacc', color:'#00ccff' } : {}) }}
+                onClick={() => setTraceOn(t => !t)}
+              >✎ Trace{traceOn ? ' ✓' : ''}</button>
+              {traceOn && <button
                 title="Apply trace to drawing — adds the cyan preview outlines as entities"
                 style={{ ...S.tbBtn, borderColor:'#3a5a3a', color:'#88cc88' }}
                 onClick={runAutoTrace}
-              >⟳ Apply Trace</button>
-              <button title="Clear reference image" style={{ ...S.tbBtn, borderColor:'#5a3a3a', color:'#cc8888' }} onClick={() => { dispatch({ type:'SET_REF_IMAGE', payload:null }); refImageElRef.current = null; setTracePreview(null); }}>✕ Img</button>
+              >⟳ Apply Trace</button>}
+              <button title="Clear reference image" style={{ ...S.tbBtn, borderColor:'#5a3a3a', color:'#cc8888' }} onClick={() => { dispatch({ type:'SET_REF_IMAGE', payload:null }); refImageElRef.current = null; setTracePreview(null); setTraceOn(false); }}>✕ Img</button>
               <span style={{ fontSize:10, color:'#556688', display:'flex', alignItems:'center', gap:4 }}>
                 <span>Opacity</span>
                 <input type="range" min={5} max={80} value={Math.round((refImage.opacity??0.35)*100)} style={{ width:80, accentColor:'#5566aa' }}
@@ -851,6 +911,7 @@ export default function App() {
                 <span>Scale</span>
                 <input type="range" min={1} max={200} value={Math.round((refImage.mmPerPixel||0.1)*100)} style={{ width:80, accentColor:'#5566aa' }}
                   onChange={e => dispatch({ type:'UPDATE_REF_IMAGE', payload:{ mmPerPixel: +e.target.value/100 } })} />
+                {traceOn && <>
                 <span style={{ color:'#00ccff' }}>Threshold</span>
                 <input type="range" min={10} max={90} value={traceThreshold} style={{ width:90, accentColor:'#00aacc' }}
                   onChange={e => setTraceThreshold(+e.target.value)}
@@ -865,6 +926,7 @@ export default function App() {
                   onChange={e => setTraceArcFit(+e.target.value)}
                   title={traceArcFit === 0 ? 'Arc Fit: off — straight lines only' : `Arc Fit: ${traceArcFit}% — arc tolerance ${(0.15 + traceArcFit/100*1.35).toFixed(2)} mm`} />
                 <span style={{ color:'#00ccff', minWidth:20 }}>{traceArcFit === 0 ? 'off' : traceArcFit}</span>
+                </>}
               </span>
             </>}
           </>}

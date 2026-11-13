@@ -3,6 +3,19 @@
 // controller.  postprocessor.js imports generateForPP() and dispatches to the
 // correct hook set based on cfg.postProcessor.
 
+import { applyPathRules } from './pathRules';
+
+// Text going inside a G-code ( ) comment: controllers reject a '(' or ')' in
+// a comment (LinuxCNC stops with "nested comment"), and some choke on
+// non-ASCII, so brackets replace parentheses and dashes/quotes go plain.
+export function commentText(s) {
+  return String(s ?? '')
+    .replace(/\(/g, '[').replace(/\)/g, ']')
+    .replace(/[\u2012-\u2015]/g, '-').replace(/[\u2018\u2019]/g, "'").replace(/[\u201c\u201d\u2033]/g, '"')
+    .replace(/[^\x20-\x7e]/g, '')
+    .replace(/\s+/g, ' ').trim();
+}
+
 // ── Shared move emitter ───────────────────────────────────────────────────────
 
 export function coreGenerate(operations, cfg, hooks) {
@@ -101,8 +114,11 @@ export function coreGenerate(operations, cfg, hooks) {
             cutLength += Math.hypot(to.x - at.x, to.y - at.y);
             at = to;
           }
-          emitAll(hooks.torchOn?.(ctx, { cutLength })); modalG = null; currentFeed = 0; break;
+          emitAll(hooks.torchOn?.(ctx, { cutLength, thcOff: !!move.thcOff, thcNote: move.thcNote })); modalG = null; currentFeed = 0; break;
         }
+        // Plasma path rules: THC off/on partway along a cut.
+        case 'thc':
+          emitAll(hooks.thc?.(ctx, move.on)); break;
         case 'torch_off':
           emitAll(hooks.torchOff?.(ctx)); modalG = null; currentFeed = 0; break;
         default: break;
@@ -117,12 +133,12 @@ export function coreGenerate(operations, cfg, hooks) {
 
     ctx.op = op;
     emit('');
-    emit(`(--- ${op.name} [${op.type}] ---)`);
+    emit(`(--- ${commentText(op.name)} [${op.type}] ---)`);
     emitAll(hooks.opStart?.(op, ctx));
     if (op.type !== 'plasma') emit(`; ${params?.climb === false ? 'Conventional' : 'Climb'}`);
-    if (tool) emit(`(Tool: ${tool.name} dia=${tool.diameter}mm)`);
+    if (tool) emit(`(Tool: ${commentText(tool.name)} dia=${tool.diameter}mm)`);
     if (toolpath.warnings?.length) {
-      toolpath.warnings.forEach(w => emit(`(WARNING: ${w})`));
+      toolpath.warnings.forEach(w => emit(`(WARNING: ${commentText(w)})`));
     }
 
     if (tool && tool.id !== currentToolId) {
@@ -146,7 +162,7 @@ export function coreGenerate(operations, cfg, hooks) {
       for (const sub of toolpath.subToolpaths) {
         if (!sub.moves?.length) continue;
         emit('');
-        emit(`(Pass: ${sub.name})`);
+        emit(`(Pass: ${commentText(sub.name)})`);
         const subKey = sub.toolKey ?? sub.toolHint ?? null;
         if (subKey !== activeToolKey) {
           emitAll(hooks.subPassChange(sub, ctx));
@@ -156,7 +172,7 @@ export function coreGenerate(operations, cfg, hooks) {
         emitMoves(sub.moves);
       }
     } else {
-      emitMoves(toolpath.moves);
+      emitMoves(hooks.prepareMoves ? hooks.prepareMoves(toolpath.moves, ctx) : toolpath.moves);
     }
   }
 
@@ -530,7 +546,7 @@ const commandCncHooks = {
     state.setup = null;
     state.touchedAt = null;
     const ls = [`(DMDCAM - CandCNC CommandCNC Plasma - Generated ${new Date().toLocaleString()})`];
-    if (cfg.plasmaMaterialName) ls.push(`(Material: ${cfg.plasmaMaterialName.replace(/[()]/g, '').replace(/\s+/g, ' ').trim()})`);
+    if (cfg.plasmaMaterialName) ls.push(`(Material: ${commentText(cfg.plasmaMaterialName)})`);
     ls.push(
       cfg.units === 'mm' ? 'G21 (Units: Metric)' : 'G20 (Units: Inches)',
       'F10.0',
@@ -569,7 +585,7 @@ const commandCncHooks = {
   spindleOn: () => [],
   coolantOn: () => [],
   subPassChange: () => [],
-  torchOn: ({ cfg, fmt, fmtF, state, traveled, op }, { cutLength }) => {
+  torchOn: ({ cfg, fmt, fmtF, state, traveled, op }, { cutLength, thcOff, thcNote }) => {
     const c = cncNote(cfg);
     const cut = op?._cut || {};
     const ls = [];
@@ -586,15 +602,24 @@ const commandCncHooks = {
     ls.push(c(`G0 Z${fmt(cut.pierceHeight ?? 3.81)}`, 'Z move to pierce height'), 'M3 S100');
     if (cut.pierceDelay > 0) ls.push(`G4 P${+cut.pierceDelay.toFixed(3)}`);
     ls.push(c(`G1 Z${fmt(cut.cutHeight ?? 1.524)} F${fmtF(plunge)}`, 'Z move to cut height'));
-    ls.push(cutLength > (cfg.minDthcLength || 0) ? c('M67 E0 Q20', 'Auto DTHC is ON') : c('M67 E0 Q10', 'Auto DTHC OFF min cut'));
+    if (thcOff) ls.push(c('M67 E0 Q10', `DTHC OFF ${thcNote || 'path rules'}`));
+    else ls.push(cutLength > (cfg.minDthcLength || 0) ? c('M67 E0 Q20', 'Auto DTHC is ON') : c('M67 E0 Q10', 'Auto DTHC OFF min cut'));
     return ls;
   },
+  // Path rules (SheetCam style): slower with the THC off on small holes,
+  // tight curves and sharp corners, and THC off near the end of each cut.
+  prepareMoves: (moves, { cfg }) => (cfg.pathRules ? applyPathRules(moves, {
+    holeDia: cfg.ruleHoleDia, holeFeed: cfg.ruleHoleFeed, arcDia: cfg.ruleArcDia, cornerAngle: cfg.ruleCornerAngle,
+    slowFeed: cfg.ruleSlowFeed, margin: cfg.ruleMargin, endOff: cfg.ruleEndOff, minThcLength: cfg.minDthcLength || 0,
+  }) : moves),
+  thc: ({ cfg }, on) => [cncNote(cfg)(on ? 'M67 E0 Q20' : 'M67 E0 Q10', on ? 'DTHC ON' : 'DTHC OFF')],
   torchOff: ({ cfg, fmt, fmtX, fmtY, pos }) => {
     const c = cncNote(cfg);
     return [
       c(`G0 X${fmtX(pos.x + 0.0254)} Y${fmtY(pos.y + 0.0254)}`, 'Add tiny extension'),
       'M5',
       c('o<endcut> call', 'Sync Z from the DTHC'),
+      'G4 P0.5',
       `G0 Z${fmt(cncRapidZ(cfg))}`,
     ];
   },
@@ -620,9 +645,40 @@ const commandCncHooks = {
 function cncPlungeSafety(cfg) { return Math.max(9.525, cfg.plungeSafety || 0); }
 function cncRapidZ(cfg) { const p = cncPlungeSafety(cfg); return (cfg.rapidHeight || 0) > p ? cfg.rapidHeight : p * 2; }
 
+// Where the operator zeroes X and Y on the plate. Programs are written from
+// that corner (lower-right: X runs negative; upper/back: Y runs negative),
+// and ▦ Nest packs into it. "Lower" is the Y0 side, the bottom of the screen.
+const SPEC_ORIGIN = { key:'origin', label:'Program Origin (X0 Y0)', type:'select', options:[
+  {v:'ll',l:'Lower-left corner of the sheet'},{v:'lr',l:'Lower-right corner of the sheet'},
+  {v:'ul',l:'Upper-left (back-left) corner of the sheet'},{v:'ur',l:'Upper-right (back-right) corner of the sheet'},
+], note:'The corner you jog to and zero X and Y at (lower = bottom of the screen)' };
+
+// The table's X and Y travel: exports warn when a program needs more, and
+// the PLASMA screen draws it from X0 Y0. 0 = not set.
+const SPEC_TRAVEL_X = { key:'travelX', label:'Table Travel X', type:'length', note:'How far the torch can move in X (0 = no check)' };
+const SPEC_TRAVEL_Y = { key:'travelY', label:'Table Travel Y', type:'length', note:'How far the torch can move in Y (0 = no check)' };
+
+// Which machine axis runs the table's length. ▦ Nest turns each sheet to
+// match, so its long side lies along that axis (on screen, X is across).
+const SPEC_LONG_AXIS = { key:'longAxis', label:'Table Length Runs Along', type:'select', options:[{v:'y',l:'Y — X is across the table (most tables)'},{v:'x',l:'X — X runs the length of the table'}], note:'Nested sheets are turned so their long side runs this way' };
+
+/**
+ * The PLASMA machine's table: { origin: 'll' | 'lr' | 'ul' | 'ur', longAxis: 'y' | 'x',
+ * travelX, travelY (mm, 0 = not set) }. machine: { postProcessor, settings }.
+ */
+export function plasmaTable(machine) {
+  const pp = POST_PROCESSORS[machine?.postProcessor] || POST_PROCESSORS.dmdPlasma;
+  const s = { ...pp.defaultSettings, ...(machine?.settings?.[pp.id] || {}) };
+  return { origin: s.origin || 'll', longAxis: s.longAxis || 'y', travelX: +s.travelX || 0, travelY: +s.travelY || 0 };
+}
+
 // Plasma settings lengths are mm ('length' fields show in the app's units).
 const CNC_SPEC = [
   SPEC_UNITS,
+  SPEC_ORIGIN,
+  SPEC_LONG_AXIS,
+  SPEC_TRAVEL_X,
+  SPEC_TRAVEL_Y,
   { key:'rapidHeight',      label:'Rapid Height',             type:'length', note:'Z for moves between cuts, above the plate' },
   { key:'plungeSafety',     label:'Touch-off Start Height',   type:'length', note:'Rapid down to here before probing (0.375" minimum)' },
   { key:'touchOffMode',     label:'Touch-off',                type:'select', options:[{v:'every',l:'Before every pierce'},{v:'distance',l:'After a set travel distance'}] },
@@ -633,6 +689,14 @@ const CNC_SPEC = [
   { key:'softPierce',       label:'Soft Pierce',              type:'number', unit:'%', min:30, max:100, step:10, showIf: s => s.rs485, note:'Pierce at this % of the cut amps (100 = off)' },
   { key:'dthcDelay',        label:'DTHC Delay',               type:'number', unit:'sec', min:0, max:10, step:0.1, note:'After reaching cut height, before the THC adjusts' },
   { key:'minDthcLength',    label:'Min Cut Length for DTHC',  type:'length', note:'Shorter cuts (small holes) run with the THC off' },
+  { key:'pathRules',        label:'Path Rules',               type:'checkbox', note:'Slow down with the THC off on small holes, tight curves and sharp corners (as SheetCam path rules)' },
+  { key:'ruleHoleDia',      label:'Small Holes Under',        type:'length', showIf: s => s.pathRules, note:'Diameter — the whole hole at the hole feed, THC off' },
+  { key:'ruleHoleFeed',     label:'Hole Feed',                type:'number', unit:'%', min:10, max:100, step:1, showIf: s => s.pathRules },
+  { key:'ruleArcDia',       label:'Tight Curves Under',       type:'length', showIf: s => s.pathRules, note:'Curve diameter — slowed, THC off' },
+  { key:'ruleCornerAngle',  label:'Corners Tighter Than',     type:'number', unit:'°', min:0, max:180, step:1, showIf: s => s.pathRules, note:'Included angle — slowed, THC off' },
+  { key:'ruleSlowFeed',     label:'Curve/Corner Feed',        type:'number', unit:'%', min:10, max:100, step:1, showIf: s => s.pathRules },
+  { key:'ruleMargin',       label:'THC Off Before/After',     type:'length', showIf: s => s.pathRules, note:'Around each curve or corner' },
+  { key:'ruleEndOff',       label:'THC Off Before End',       type:'length', showIf: s => s.pathRules },
   { key:'autoSet',          label:'AutoSet',                  type:'checkbox', note:'DTHC samples the arc voltage at the start of each cut' },
   { key:'pauseAfterSetup',  label:'Pause to Check DTHC',      type:'checkbox', note:'M1 after the volts/amps are loaded — press Resume to cut' },
   { key:'comments',         label:'Comments in G-code',       type:'checkbox' },
@@ -641,9 +705,14 @@ const CNC_SPEC = [
   SPEC_FOOTER,
 ];
 
+// From a working CommandCNC table's SheetCam program (CandCNC rev 29B post):
+// zeroed lower-right, 0.9" rapids, touch-off from 0.5", 100 ipm plunge, RS485 with 75 psi.
 const CNC_DEFAULTS = {
-  units: 'inch', rapidHeight: 19.05, plungeSafety: 9.525, touchOffMode: 'every', touchOffDistance: 25.4,
-  plungeRate: 762, rs485: false, airPressure: 0, softPierce: 100, dthcDelay: 1, minDthcLength: 25.4,
+  units: 'inch', origin: 'lr', longAxis: 'y', travelX: 0, travelY: 0, rapidHeight: 22.86, plungeSafety: 12.7, touchOffMode: 'every', touchOffDistance: 25.4,
+  plungeRate: 2540, rs485: true, airPressure: 75, softPierce: 100, dthcDelay: 1, minDthcLength: 12.7,
+  // Path rules, from the same table's SheetCam rule set.
+  pathRules: true, ruleHoleDia: 38.1, ruleHoleFeed: 65, ruleArcDia: 19.05, ruleCornerAngle: 45,
+  ruleSlowFeed: 94, ruleMargin: 2.54, ruleEndOff: 1.016,
   autoSet: true, pauseAfterSetup: true, comments: true, fileExt: 'tap', programHeader: '', programFooter: '',
   lineNumbering: false,
 };
@@ -721,8 +790,8 @@ export const POST_PROCESSORS = {
     label: 'DMD-C3 Plasma (FluidNC)',
     description: 'DMD-C3 Plasma Control on FluidNC — torch M3/M5 only; the app adds pierce heights and delays',
     plasmaOnly: true,
-    defaultSettings: { ...COMMON_DEFAULTS, lineNumbering: false, units: 'inch' },
-    settingsSpec: [SPEC_UNITS, SPEC_HEADER, SPEC_FOOTER],
+    defaultSettings: { ...COMMON_DEFAULTS, lineNumbering: false, units: 'inch', origin: 'll', longAxis: 'y', travelX: 0, travelY: 0 },
+    settingsSpec: [SPEC_UNITS, SPEC_ORIGIN, SPEC_LONG_AXIS, SPEC_TRAVEL_X, SPEC_TRAVEL_Y, SPEC_HEADER, SPEC_FOOTER],
     hooks: dmdPlasmaHooks,
   },
   commandCnc: {

@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useCallback } from 'react';
-import { useApp } from '../../store/AppContext';
+import { useApp, appUnits } from '../../store/AppContext';
 
 const MM_PER_INCH = 25.4;
 const TOOL_TYPES   = ['flat','ball','tapered','upcut','downcut','compression','diamond'];
@@ -319,7 +319,7 @@ function fmtDia(t, isInch) {
 // ── Main component ─────────────────────────────────────────────────────────────
 export default function ToolLibraryModal({ onClose }) {
   const { state, dispatch } = useApp();
-  const isInch     = state.postConfig?.units === 'inch';
+  const isInch     = appUnits(state) === 'inch';
   const machineName = state.machineConfig?.name || 'Masso G3';
 
   const [tools,         setTools]        = useState([]);

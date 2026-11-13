@@ -109,6 +109,14 @@ const initialState = {
     safeZ: 25,
   },
 
+  // App-wide display/entry units ('mm' | 'inch'); null until the user picks
+  // one, and until then the router post's units are used. Read via appUnits().
+  units: null,
+  // The PLASMA machine's X0 Y0 corner ('ll' | 'lr', from ⚙ Machine).
+  // The PLASMA machine's table, from ⚙ Machine (postProcessors.js plasmaTable):
+  // X0 Y0 corner, which axis runs the length, and the X/Y travel (mm, 0 = not set).
+  plasmaTable: { origin: 'll', longAxis: 'y', travelX: 0, travelY: 0 },
+
   postConfig: {
     name: 'Masso G3',
     postProcessor: 'massoG3',
@@ -467,6 +475,8 @@ function reducer(state, action) {
 
     // Machine
     case 'SET_MACHINE_CONFIG': return { ...state, machineConfig: { ...state.machineConfig, ...action.payload }, dirty: true };
+    case 'SET_UNITS':          return { ...state, units: action.payload };
+    case 'SET_PLASMA_TABLE':   return { ...state, plasmaTable: action.payload };
     case 'SET_POST_CONFIG':    return { ...state, postConfig: { ...state.postConfig, ...action.payload }, dirty: true };
     // Restore persisted user preferences without marking the project dirty.
     case 'APPLY_SAVED_PREFS': return { ...state, postConfig: { ...state.postConfig, ...action.payload } };
@@ -634,6 +644,14 @@ export function AppProvider({ children }) {
     });
   }, []);
 
+  // App-wide units (top-bar IN/MM switch).
+  useEffect(() => {
+    if (!window.electron) return;
+    window.electron.storeGet('appUnits').then(u => {
+      if (u === 'mm' || u === 'inch') dispatch({ type: 'SET_UNITS', payload: u });
+    });
+  }, []);
+
   // TEMP DEBUG — exposes live state for console inspection during vcarve2 debugging.
   // Remove once the "e" terminal fragmentation bug is fixed.
   useEffect(() => {
@@ -670,6 +688,22 @@ export function useApp() {
  * The stock's lower-left corner (world mm). Plasma programs always use it as
  * X0 Y0, whatever datum the router side has set (stockOriginX/Y is the datum).
  */
+/** The units the app shows and takes lengths in: 'mm' or 'inch'. */
+export function appUnits(state) {
+  return state.units || state.postConfig?.units || 'mm';
+}
+
+/** A corner ('ll' | 'lr' | 'ul' | 'ur') of a rectangle { x, y, w, l } (x, y = its lower-left). */
+export function rectCorner(r, corner = 'll') {
+  return { x: r.x + (corner[1] === 'r' ? r.w : 0), y: r.y + (corner[0] === 'u' ? r.l : 0) };
+}
+
+/** The plasma program's X0 Y0 on the stock: the corner ⚙ Machine says. */
+export function plasmaZero(stockConfig, corner) {
+  const ll = stockLowerLeft(stockConfig);
+  return rectCorner({ ...ll, w: stockConfig?.width || 0, l: stockConfig?.length || 0 }, corner);
+}
+
 export function stockLowerLeft(stockConfig) {
   const { datum = 'bl', width = 0, length = 0, stockOriginX = 0, stockOriginY = 0 } = stockConfig || {};
   const fx = datum[1] === 'l' ? 0 : datum[1] === 'c' ? 0.5 : 1;

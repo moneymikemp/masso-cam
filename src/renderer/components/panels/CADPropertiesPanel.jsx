@@ -1,5 +1,5 @@
 import React, { useState } from 'react';
-import { useApp } from '../../store/AppContext';
+import { useApp, appUnits } from '../../store/AppContext';
 
 const MM_PER_INCH = 25.4;
 
@@ -54,7 +54,7 @@ function NumField({ label, value, readOnly, onChange, unit }) {
 export default function CADPropertiesPanel() {
   const { state, dispatch } = useApp();
   const { entities, selectedEntityIds, postConfig } = state;
-  const isInch = postConfig?.units === 'inch';
+  const isInch = appUnits(state) === 'inch';
   const toDisp = v => isInch ? +(v / MM_PER_INCH).toFixed(4) : +v.toFixed(3);
   const toMM = v => isInch ? v * MM_PER_INCH : v;
   const unit = isInch ? 'in' : 'mm';

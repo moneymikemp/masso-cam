@@ -140,7 +140,8 @@ function Thumb({ part }) {
   );
 }
 
-export default function PartListModal({ partList, entities, selectedEntityIds, activeWorkspaceId, stockConfig, isInch, dispatch, onClose }) {
+export default function PartListModal({ partList, entities, selectedEntityIds, activeWorkspaceId, stockConfig, table, isInch, dispatch, onClose }) {
+  const { origin = 'll', longAxis = 'y', travelX = 0, travelY = 0 } = table || {};
   const prefs = useMemo(loadPrefs, []);
   const toDisp = v => (isInch ? +(v / MM).toFixed(4) : +v.toFixed(2));
   const toMM = v => (isInch ? v * MM : v);
@@ -224,7 +225,13 @@ export default function PartListModal({ partList, entities, selectedEntityIds, a
 
   async function addParts() {
     try {
-      const files = await window.electron?.openParts?.();
+      // In a browser (dev server) there's no Electron dialog: use a file input.
+      const files = window.electron?.openParts ? await window.electron.openParts() : await new Promise(resolve => {
+        const input = document.createElement('input');
+        input.type = 'file'; input.accept = '.dxf,.svg'; input.multiple = true;
+        input.onchange = async () => resolve(await Promise.all([...input.files].map(async f => ({ path: f.name, content: await f.text() }))));
+        input.click();
+      });
       if (files?.length) addFiles(files);
     } catch (err) {
       setMessage(`Couldn't open the file picker (${err.message}) — restart DMDCAM, or drop files on this window.`);
@@ -264,8 +271,15 @@ export default function PartListModal({ partList, entities, selectedEntityIds, a
   }
 
   async function nest() {
-    const sizes = sheets.map(s => ({ w: toMM(+s.w), l: toMM(+s.l), count: Math.max(0, Math.round(+s.count || 0)) })).filter(s => s.w > 0 && s.l > 0);
+    // Each sheet turned so its long side runs along the table's length (⚙ Machine).
+    const sizes = sheets.map(s => {
+      const a = toMM(+s.w), b = toMM(+s.l);
+      const [w, l] = longAxis === 'x' ? [Math.max(a, b), Math.min(a, b)] : [Math.min(a, b), Math.max(a, b)];
+      return { w, l, count: Math.max(0, Math.round(+s.count || 0)) };
+    }).filter(s => s.w > 0 && s.l > 0);
     if (!sizes.length) { setMessage('Enter at least one sheet size.'); return; }
+    const big = travelX > 0 && travelY > 0 && sizes.find(s => s.w > travelX + 0.5 || s.l > travelY + 0.5);
+    const tableNote = big ? `⚠ A ${fmt(big.w)} × ${fmt(big.l)} sheet is bigger than the table travel (${fmt(travelX)} × ${fmt(travelY)}, ⚙ Machine) — parts past it can't be cut.` : '';
     const mm = { margin: toMM(margin), spacing: toMM(spacing), pierceSep: toMM(pierceSep) };
     savePrefs({ ...prefs, sheets: sizes, ...mm, angleStep, pairs });
     const groups = new Map();
@@ -297,6 +311,7 @@ export default function PartListModal({ partList, entities, selectedEntityIds, a
           rotation: 'any',
           angleStep,
           allowPairs: pairs,
+          corner: origin, // pack into the corner the table is zeroed at
           onProgress: f => setProgress((gi + f) / groups.size),
           cancelled: () => cancelled.current,
         });
@@ -309,6 +324,7 @@ export default function PartListModal({ partList, entities, selectedEntityIds, a
         setRunning(false);
         setResults(out);
         setSheetIdx(0);
+        if (tableNote) setMessage(tableNote);
       }
     }
   }
@@ -466,7 +482,7 @@ export default function PartListModal({ partList, entities, selectedEntityIds, a
 
         <div style={S.lower}>
           <div style={S.side}>
-            <div style={S.section}>Sheets <span style={{ fontWeight:400, textTransform:'none', color:'#666688' }}>(used in order; count blank = as many as needed)</span></div>
+            <div style={S.section}>Sheets <span style={{ fontWeight:400, textTransform:'none', color:'#666688' }}>(used in order; count blank = as many as needed; long side along {longAxis === 'x' ? 'X' : 'Y'}, set in ⚙ Machine)</span></div>
             {sheets.map((s, i) => (
               <div key={i} style={{ display:'flex', gap:6, alignItems:'center', marginBottom:4 }}>
                 <input style={{ ...S.input, width:70 }} type="number" min={0} value={s.w} onChange={e => setSheets(ss => ss.map((x, j) => (j === i ? { ...x, w: e.target.value } : x)))} title={`Width X (${unit})`} />

@@ -216,7 +216,11 @@ function convertEntity(entity) {
 
     case 'SPLINE': {
       if (!entity.controlPoints || entity.controlPoints.length < 2) return null;
-      const pts = sampleSpline(entity.controlPoints, entity.degree || 3, entity.knots || [], 64);
+      // dxf-parser names them knotValues / degreeOfSplineCurve. Without the
+      // real knots the curve is drawn shifted and its ends miss their neighbours.
+      const knots = entity.knotValues || entity.knots || [];
+      const degree = entity.degreeOfSplineCurve || entity.degree || 3;
+      const pts = sampleSpline(entity.controlPoints, degree, knots, Math.max(64, entity.controlPoints.length * 8));
       return { type: 'polyline', vertices: pts.map(p => ({ x: p.x, y: p.y, bulge: 0 })), closed: false };
     }
 
