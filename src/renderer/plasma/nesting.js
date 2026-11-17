@@ -839,4 +839,51 @@ export function nestConflicts(parts, sheet, margin, placements, { only = null, s
   return bad;
 }
 
+/**
+ * Slides placement i along (dx, dy) — a unit step on one axis — until it
+ * touches another part or the edge margin (ProNest's "bump"). Returns the
+ * moved placement, the same one if it's already touching that way, or null
+ * when it starts out too close (nothing to slide from).
+ */
+export function bumpPlacement(parts, sheet, margin, placements, i, dx, dy) {
+  const pl = placements[i];
+  const p = parts[pl.part];
+  const shape = rotatePts(p.shape, pl.angle);
+  const cut = bboxOf(rotatePts(p.cutShape, pl.angle));
+  const others = placements.flatMap((q, j) => {
+    if (j === i) return [];
+    const pts = rotatePts(parts[q.part].shape, q.angle).map(r => ({ x: r.x + q.x, y: r.y + q.y }));
+    return [{ path: toInt(pts), box: bboxOf(pts) }];
+  });
+  const box = bboxOf(shape);
+  const hits = d => {
+    const x = pl.x + dx * d, y = pl.y + dy * d;
+    if (cut.minX + x < margin - 0.01 || cut.minY + y < margin - 0.01 || cut.maxX + x > sheet.w - margin + 0.01 || cut.maxY + y > sheet.l - margin + 0.01) return true;
+    let path = null;
+    for (const o of others) {
+      if (box.maxX + x <= o.box.minX || o.box.maxX <= box.minX + x || box.maxY + y <= o.box.minY || o.box.maxY <= box.minY + y) continue;
+      path = path || toInt(shape.map(q => ({ x: q.x + x, y: q.y + y })));
+      const c = new ClipperLib.Clipper();
+      c.AddPath(path, ClipperLib.PolyType.ptSubject, true);
+      c.AddPath(o.path, ClipperLib.PolyType.ptClip, true);
+      const out = new ClipperLib.Paths();
+      c.Execute(ClipperLib.ClipType.ctIntersection, out, ClipperLib.PolyFillType.pftNonZero, ClipperLib.PolyFillType.pftNonZero);
+      if (out.reduce((s, q) => s + Math.abs(ClipperLib.Clipper.Area(q)), 0) / (SCALE * SCALE) > 0.5) return true;
+    }
+    return false;
+  };
+  if (hits(0)) return null;
+  // As far as the edge margin allows, in 2 mm steps (no shape is thinner
+  // than that once grown), then halve the last step down to 0.01 mm.
+  const room = dx > 0 ? sheet.w - margin - (cut.maxX + pl.x) : dx < 0 ? cut.minX + pl.x - margin : dy > 0 ? sheet.l - margin - (cut.maxY + pl.y) : cut.minY + pl.y - margin;
+  let ok = 0, bad = null;
+  for (let d = Math.min(2, room); ok < room; d = Math.min(ok + 2, room)) {
+    if (hits(d)) { bad = d; break; }
+    ok = d;
+    if (d >= room) break;
+  }
+  if (bad != null) while (bad - ok > 0.01) { const m = (ok + bad) / 2; if (hits(m)) bad = m; else ok = m; }
+  return { ...pl, x: pl.x + dx * ok, y: pl.y + dy * ok };
+}
+
 export const _test = { nfpPaths, makeRings, insideRings, intervalsOnLine, bestLattice, prepareParts, orient };

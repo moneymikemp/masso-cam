@@ -5,7 +5,7 @@ import { parseSvg } from '../../svg/parser';
 import { translateEntity } from '../../cam/offsetEngine';
 import { nestPartsFromEntities, entityToProfile, generateToolpath } from '../../cam/toolpath';
 import { outsideLead } from '../../cam/plasmaToolpath';
-import { nestSheets, nestConflicts } from '../../plasma/nesting';
+import { nestSheets, nestConflicts, bumpPlacement } from '../../plasma/nesting';
 import { placeEntity, placePoint } from '../../plasma/placement';
 import { loadPlasmaMaterials, findThickness, paramsFromThickness } from '../../plasma/plasmaMaterials';
 import { getDefaultParams } from '../../store/AppContext';
@@ -29,7 +29,7 @@ const SHEET_GAP = 2 * MM; // between sheets in the drawing
 
 const S = {
   overlay: { position:'fixed', inset:0, background:'rgba(0,0,0,0.7)', zIndex:1000, display:'flex', alignItems:'center', justifyContent:'center' },
-  box: { background:'#1a1a38', border:'1px solid #3a3a70', borderRadius:8, padding:'16px 20px', width:1180, maxWidth:'97vw', height:'90vh', display:'flex', flexDirection:'column', color:'#ccc', fontFamily:'system-ui,sans-serif' },
+  box: { background:'#1a1a38', border:'1px solid #3a3a70', borderRadius:8, padding:'16px 20px', width:'98vw', height:'95vh', display:'flex', flexDirection:'column', color:'#ccc', fontFamily:'system-ui,sans-serif' },
   title: { fontSize:15, fontWeight:700, color:'#ffbb66', marginBottom:10, display:'flex', alignItems:'center', gap:10 },
   bar: { display:'flex', gap:8, alignItems:'center', marginBottom:8 },
   tableWrap: { flex:1, minHeight:120, overflowY:'auto', background:'#0d0d20', border:'1px solid #2a2a50', borderRadius:4 },
@@ -49,6 +49,7 @@ const S = {
   link: { background:'none', border:'none', color:'#88aaff', cursor:'pointer', fontSize:12, padding:'2px 0' },
   warn: { fontSize:11, color:'#cc8866' },
   drop: { outline:'2px dashed #aa6a2a', outlineOffset:-4 },
+  trayRow: { display:'flex', alignItems:'center', gap:8, padding:'3px 6px', marginBottom:3, background:'#14142c', border:'1px solid #2a2a50', borderRadius:4, cursor:'grab', userSelect:'none' },
 };
 
 function loadPrefs() {
@@ -338,7 +339,9 @@ export default function PartListModal({ partList, entities, selectedEntityIds, a
           onProgress: f => setProgress((gi + f) / groups.size),
           cancelled: () => cancelled.current,
         });
-        out.push({ materialKey: key, materialId, thicknessId, materialName: `${material.name} ${thickness.label}`, thickness, cut, parts, leads: input.map(i => i.lead), margin: mm.margin, res });
+        out.push({ materialKey: key, materialId, thicknessId, materialName: `${material.name} ${thickness.label}`, thickness, cut, parts, leads: input.map(i => i.lead), margin: mm.margin, res,
+          // Not on a sheet: what didn't fit, and parts taken off a sheet by hand.
+          tray: res.unplaced.flatMap((n, i) => Array.from({ length: n }, () => ({ part: i, angle: 0 }))) });
         g++;
         if (cancelled.current) break;
       }
@@ -357,13 +360,18 @@ export default function PartListModal({ partList, entities, selectedEntityIds, a
   const allSheets = useMemo(() => (results || []).flatMap((gr, gi) => gr.res.sheets.map((sh, k) => ({ group: gr, gi, sheet: sh, k }))), [results]);
   const placedById = useMemo(() => {
     const m = new Map();
-    for (const gr of results || []) gr.parts.forEach((p, i) => m.set(p.id, gr.res.placed[i]));
+    for (const gr of results || []) {
+      const counts = gr.parts.map(() => 0);
+      for (const sh of gr.res.sheets) for (const pl of sh.placements) counts[pl.part]++;
+      gr.parts.forEach((p, i) => m.set(p.id, counts[i]));
+    }
     return m;
   }, [results]);
-  const unplacedTotal = (results || []).reduce((s, gr) => s + gr.res.unplaced.reduce((a, b) => a + b, 0), 0);
+  const unplacedTotal = (results || []).reduce((s, gr) => s + (gr.tray?.length || 0), 0);
 
   function apply() {
     if (!allSheets.length) return;
+    if (allSheets.every(s => !s.sheet.placements.length)) { setMessage('Every sheet is empty — drag parts onto one first.'); return; }
     const red = allSheets.reduce((n, { group, sheet }) => n + nestConflicts(group.res.parts, sheet, group.margin, sheet.placements).size, 0);
     if (red && !window.confirm(`${red} part${red === 1 ? ' is' : 's are'} too close to another part or the sheet edge (red). Apply anyway?`)) return;
     const add = [], ops = [], sheetRects = [];
@@ -372,6 +380,7 @@ export default function PartListModal({ partList, entities, selectedEntityIds, a
     const remove = new Set(partList.filter(p => nested.has(p.id)).flatMap(p => p.sourceIds || []));
     let x0 = 0;
     for (const { group, sheet, k } of allSheets) {
+      if (!sheet.placements.length) continue; // emptied by hand
       const id = uuid();
       const name = `${group.materialName} — Sheet ${k + 1}`;
       const ids = [];
@@ -422,8 +431,9 @@ export default function PartListModal({ partList, entities, selectedEntityIds, a
   }
 
   const current = allSheets[sheetIdx];
-  // Moving a part by hand: drag = { i, cx, cy, scale, orig, pl (live), base (the
-  // other parts' conflicts) } — committed to the results on release.
+  // Moving a part by hand: drag = { mode: 'move' | 'rotate', i, cx, cy, scale,
+  // orig, pl (live), base (the other parts' conflicts) } — committed to the
+  // results on release. Rotate also has a0, the pointer's start angle.
   const [drag, setDrag] = useState(null);
   const [sel, setSel] = useState(null);
   useEffect(() => { setSel(null); setDrag(null); }, [sheetIdx, results?.length]);
@@ -449,13 +459,42 @@ export default function PartListModal({ partList, entities, selectedEntityIds, a
     });
   }, [current, placements]);
 
-  function setPlacement(i, pl) {
+  // Hand edits to the current sheet's group: its placements and its tray.
+  const BUMP_NOTE = 'That part is already too close to something (red) — move it clear first, then bump.';
+  function editCurrent(fn) {
     const { gi, k } = current;
-    setResults(rs => rs.map((gr, g) => (g !== gi ? gr : {
-      ...gr,
-      res: { ...gr.res, sheets: gr.res.sheets.map((sh, j) => (j !== k ? sh : { ...sh, placements: sh.placements.map((p, n) => (n === i ? pl : p)) })) },
-    })));
+    setMessage(m => (m === BUMP_NOTE ? '' : m)); // a stale bump warning goes once something moves
+    setResults(rs => rs.map((gr, g) => {
+      if (g !== gi) return gr;
+      const { placements: next, tray } = fn(gr.res.sheets[k].placements, gr.tray || []);
+      return { ...gr, tray, res: { ...gr.res, sheets: gr.res.sheets.map((sh, j) => (j !== k ? sh : { ...sh, placements: next })) } };
+    }));
   }
+  const setPlacement = (i, pl) => editCurrent((ps, tray) => ({ placements: ps.map((p, n) => (n === i ? pl : p)), tray }));
+  function takeOff(i) {
+    editCurrent((ps, tray) => ({ placements: ps.filter((_, n) => n !== i), tray: [...tray, { part: ps[i].part, angle: ps[i].angle }] }));
+    setSel(null);
+  }
+  function placeFromTray(part, angle, x, y) {
+    const n = current.sheet.placements.length;
+    editCurrent((ps, tray) => {
+      const t = [...tray];
+      t.splice(t.findIndex(e => e.part === part), 1);
+      return { placements: [...ps, { part, angle, x, y }], tray: t };
+    });
+    setSel(n);
+  }
+  // A part's box on the sheet (sheet coordinates, y up).
+  const partBox = pl => {
+    const local = current.group.res.parts[pl.part].local;
+    const c = Math.cos(pl.angle), sn = Math.sin(pl.angle);
+    let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+    for (const q of local) {
+      const x = q.x * c - q.y * sn + pl.x, y = q.x * sn + q.y * c + pl.y;
+      if (x < minX) minX = x; if (x > maxX) maxX = x; if (y < minY) minY = y; if (y > maxY) maxY = y;
+    }
+    return { minX, minY, maxX, maxY };
+  };
   function startDrag(e, i) {
     if (e.button !== 0) return;
     e.stopPropagation();
@@ -463,15 +502,117 @@ export default function PartListModal({ partList, entities, selectedEntityIds, a
     setSel(i);
     const orig = current.sheet.placements[i];
     const base = nestConflicts(current.group.res.parts, current.sheet, current.group.margin, current.sheet.placements, { skip: i });
-    setDrag({ i, cx: e.clientX, cy: e.clientY, scale: svgRef.current.getScreenCTM().a, orig, pl: orig, base });
+    setDrag({ mode: 'move', i, cx: e.clientX, cy: e.clientY, scale: svgRef.current.getScreenCTM().a, orig, pl: orig, base });
   }
+
+  // The selected part's tools: 90° turns, free rotate, bump, nudge.
+  const TAU = 2 * Math.PI;
+  const norm = a => ((a % TAU) + TAU) % TAU;
+  const selName = sel != null && placements[sel] ? current.group.parts[placements[sel].part].name : '';
+  function turn(i, dir) {
+    const pl = current.sheet.placements[i];
+    setPlacement(i, { ...pl, angle: norm(pl.angle + (dir * Math.PI) / 2) });
+  }
+  function nudge(i, dx, dy, step) {
+    const pl = current.sheet.placements[i];
+    setPlacement(i, { ...pl, x: pl.x + dx * step, y: pl.y + dy * step });
+  }
+  function bump(i, dx, dy) {
+    const { group, sheet } = current;
+    const next = bumpPlacement(group.res.parts, sheet, group.margin, sheet.placements, i, dx, dy);
+    if (!next) { setMessage(BUMP_NOTE); return; }
+    setPlacement(i, next);
+  }
+  // Pointer angle about the part's centre, in sheet terms (y up).
+  const pointerAngle = (e, pl) => {
+    const pt = toSvg(e.clientX, e.clientY);
+    return pt ? Math.atan2(current.sheet.l - pt.y - pl.y, pt.x - pl.x) : 0;
+  };
+  function startRotate(e, i) {
+    if (e.button !== 0) return;
+    e.stopPropagation();
+    svgRef.current.setPointerCapture(e.pointerId);
+    const orig = current.sheet.placements[i];
+    const base = nestConflicts(current.group.res.parts, current.sheet, current.group.margin, current.sheet.placements, { skip: i });
+    setDrag({ mode: 'rotate', i, orig, pl: orig, base, a0: pointerAngle(e, orig) });
+  }
+  // Keys for the selected part: R / Shift+R turn, arrows nudge (Shift ×10), Ctrl+arrow bumps, Esc lets go.
+  useEffect(() => {
+    if (tab !== 'nest' || sel == null || !current) return undefined;
+    const onKey = e => {
+      if (/^(INPUT|SELECT|TEXTAREA)$/.test(e.target.tagName)) return;
+      const dirs = { ArrowLeft: [-1, 0], ArrowRight: [1, 0], ArrowUp: [0, 1], ArrowDown: [0, -1] };
+      if (e.key === 'r' || e.key === 'R') { e.preventDefault(); turn(sel, e.shiftKey ? -1 : 1); }
+      else if (dirs[e.key]) {
+        e.preventDefault();
+        const [dx, dy] = dirs[e.key];
+        if (e.ctrlKey) bump(sel, dx, dy);
+        else nudge(sel, dx, dy, (isInch ? 0.01 * MM : 0.25) * (e.shiftKey ? 10 : 1));
+      } else if (e.key === 'Delete' || e.key === 'Backspace') { e.preventDefault(); takeOff(sel); }
+      else if (e.key === 'Escape') { e.preventDefault(); e.stopPropagation(); setSel(null); }
+    };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  });
 
   // Sheet view zoom and pan: a viewBox (mm, y down); null = the whole sheet.
   const svgRef = useRef(null);
   const [view, setView] = useState(null);
   const [pan, setPan] = useState(null);
   useEffect(() => setView(null), [sheetIdx]);
-  const fitBox = current ? { x: -current.sheet.w * 0.01, y: -current.sheet.l * 0.01, w: current.sheet.w * 1.02, h: current.sheet.l * 1.02 } : null;
+  // Fit shows the sheet and any part left hanging off it.
+  const extent = useMemo(() => {
+    if (!current) return null;
+    const { w, l } = current.sheet;
+    const e = { minX: 0, minY: 0, maxX: w, maxY: l, off: 0 };
+    for (const pl of current.sheet.placements) {
+      const b = partBox(pl);
+      if (b.minX < -0.01 || b.minY < -0.01 || b.maxX > w + 0.01 || b.maxY > l + 0.01) e.off++;
+      e.minX = Math.min(e.minX, b.minX); e.minY = Math.min(e.minY, b.minY); e.maxX = Math.max(e.maxX, b.maxX); e.maxY = Math.max(e.maxY, b.maxY);
+    }
+    return e;
+  }, [current]);
+  const fitBox = extent ? (() => {
+    const pad = Math.max(extent.maxX - extent.minX, extent.maxY - extent.minY) * 0.01;
+    return { x: extent.minX - pad, y: current.sheet.l - extent.maxY - pad, w: extent.maxX - extent.minX + 2 * pad, h: extent.maxY - extent.minY + 2 * pad };
+  })() : null;
+  const usedPct = current ? placements.reduce((t, pl) => t + current.group.res.parts[pl.part].area, 0)
+    / Math.max(1, (current.sheet.w - 2 * current.group.margin) * (current.sheet.l - 2 * current.group.margin)) : 0;
+  // Click the red count: select the next red part and centre on it.
+  function showRed() {
+    const list = [...conflicts].sort((a, b) => a - b);
+    if (!list.length) return;
+    const next = list.find(i => sel == null || i > sel) ?? list[0];
+    setSel(next);
+    const b = partBox(current.sheet.placements[next]);
+    setView(v => {
+      const box = v || fitBox;
+      return { ...box, x: (b.minX + b.maxX) / 2 - box.w / 2, y: current.sheet.l - (b.minY + b.maxY) / 2 - box.h / 2 };
+    });
+  }
+
+  // Dragging a part from Not on a sheet onto the sheet: trayDrag = { part, angle, pt (sheet coords, or null off the view) }.
+  const [trayDrag, setTrayDrag] = useState(null);
+  useEffect(() => {
+    if (!trayDrag || !current) return undefined;
+    const over = e => {
+      const el = svgRef.current;
+      if (!el) return null;
+      const r = el.getBoundingClientRect();
+      if (e.clientX < r.left || e.clientX > r.right || e.clientY < r.top || e.clientY > r.bottom) return null;
+      const pt = toSvg(e.clientX, e.clientY);
+      return pt && { x: pt.x, y: current.sheet.l - pt.y };
+    };
+    const move = e => { const pt = over(e); setTrayDrag(t => t && { ...t, pt }); };
+    const up = e => {
+      const pt = over(e);
+      if (pt) placeFromTray(trayDrag.part, trayDrag.angle, pt.x, pt.y);
+      setTrayDrag(null);
+    };
+    window.addEventListener('pointermove', move);
+    window.addEventListener('pointerup', up);
+    return () => { window.removeEventListener('pointermove', move); window.removeEventListener('pointerup', up); };
+  });
   const vb = view || fitBox;
   const zoom = vb && fitBox ? fitBox.w / vb.w : 1;
   const toSvg = (cx, cy) => {
@@ -504,6 +645,13 @@ export default function PartListModal({ partList, entities, selectedEntityIds, a
     setPan({ cx: e.clientX, cy: e.clientY, b: vb, scale: svgRef.current.getScreenCTM().a });
   }
   function movePan(e) {
+    if (drag?.mode === 'rotate') {
+      // 1° steps, 15° with Shift.
+      const step = ((e.shiftKey ? 15 : 1) * Math.PI) / 180;
+      const a = norm(Math.round((drag.orig.angle + pointerAngle(e, drag.orig) - drag.a0) / step) * step);
+      setDrag(d => ({ ...d, pl: { ...d.orig, angle: a } }));
+      return;
+    }
     if (drag) {
       // Screen y runs down, the sheet's y up.
       const dx = (e.clientX - drag.cx) / drag.scale, dy = (e.clientY - drag.cy) / drag.scale;
@@ -516,7 +664,7 @@ export default function PartListModal({ partList, entities, selectedEntityIds, a
   }
   const endPan = () => {
     if (drag) {
-      if (drag.pl.x !== drag.orig.x || drag.pl.y !== drag.orig.y) setPlacement(drag.i, drag.pl);
+      if (drag.pl.x !== drag.orig.x || drag.pl.y !== drag.orig.y || drag.pl.angle !== drag.orig.angle) setPlacement(drag.i, drag.pl);
       setDrag(null);
     }
     setPan(null);
@@ -648,8 +796,25 @@ export default function PartListModal({ partList, entities, selectedEntityIds, a
             </div>
             <div style={{ ...S.warn, marginTop:10 }}>
               {partList.some(p => p.qty > 0 && !matName(p.materialKey)) && <div>⚠ Parts without a material are skipped.</div>}
-              {unplacedTotal > 0 && <div>⚠ {unplacedTotal} part{unplacedTotal === 1 ? '' : 's'} didn't fit on the sheets (too big, or the sheet counts ran out).</div>}
             </div>
+            {current && (() => {
+              const tray = current.group.tray || [];
+              const rows = [...tray.reduce((m, t) => m.set(t.part, (m.get(t.part) || 0) + 1), new Map())];
+              const elsewhere = unplacedTotal - tray.length;
+              return <>
+                <div style={S.section}>Not on a sheet ({tray.length}) <span style={{ fontWeight:400, textTransform:'none', color:'#666688' }}>— drag onto the sheet</span></div>
+                {rows.map(([part, n]) => (
+                  <div key={part} style={S.trayRow} title="Drag onto the sheet"
+                    onPointerDown={e => { if (e.button !== 0) return; e.preventDefault(); setSel(null); setTrayDrag({ part, angle: 0, pt: null }); }}>
+                    <Thumb part={current.group.parts[part]} />
+                    <span style={{ flex:1, fontSize:12, overflow:'hidden', textOverflow:'ellipsis', whiteSpace:'nowrap' }}>{current.group.parts[part].name}</span>
+                    <span style={{ fontSize:12, color:'#ffbb66' }}>×{n}</span>
+                  </div>
+                ))}
+                {!tray.length && <div style={{ fontSize:11, color:'#666688' }}>Everything is on a sheet. A part taken off one (✕ or Delete) waits here — drag it onto any {current.group.materialName} sheet.</div>}
+                {elsewhere > 0 && <div style={{ ...S.warn, marginTop:6 }}>⚠ {elsewhere} more in other materials — open one of their sheets.</div>}
+              </>;
+            })()}
           </div>
 
           <div style={S.preview}>
@@ -671,6 +836,52 @@ export default function PartListModal({ partList, entities, selectedEntityIds, a
                       strokeWidth={i === sel ? 2 : 1} vectorEffect="non-scaling-stroke" style={{ cursor: drag?.i === i ? 'grabbing' : 'move' }} onPointerDown={e => startDrag(e, i)} />;
                   })}
                   {previewPaths.map((p, i) => p.lead && <path key={`l${i}`} d={p.lead} fill="none" stroke="#ffaa44" strokeWidth={1.5} vectorEffect="non-scaling-stroke" pointerEvents="none" />)}
+                  {trayDrag?.pt && (() => {
+                    const ghost = { part: trayDrag.part, angle: trayDrag.angle, x: trayDrag.pt.x, y: trayDrag.pt.y };
+                    const frame = current.group.res.parts[ghost.part];
+                    const all = [...current.sheet.placements, ghost];
+                    const bad = nestConflicts(current.group.res.parts, current.sheet, current.group.margin, all, { only: all.length - 1 }).size > 0;
+                    const c = Math.cos(ghost.angle), sn = Math.sin(ghost.angle);
+                    const d = frame.local.map((q, i) => `${i ? 'L' : 'M'}${(q.x * c - q.y * sn + ghost.x).toFixed(2)},${(current.sheet.l - (q.x * sn + q.y * c + ghost.y)).toFixed(2)}`).join('') + 'Z';
+                    return <path d={d} fill={bad ? 'rgba(230,70,70,0.45)' : 'rgba(80,200,110,0.5)'} stroke="#ffffff" strokeDasharray="4 3" strokeWidth={1} vectorEffect="non-scaling-stroke" pointerEvents="none" />;
+                  })()}
+                  {sel != null && placements[sel] && (() => {
+                    const pl = placements[sel];
+                    const frame = current.group.res.parts[pl.part];
+                    const c = Math.cos(pl.angle), sn = Math.sin(pl.angle);
+                    const xs = frame.local.map(q => q.x * c - q.y * sn + pl.x), ys = frame.local.map(q => q.x * sn + q.y * c + pl.y);
+                    const L = current.sheet.l;
+                    const x0 = Math.min(...xs), x1 = Math.max(...xs), top = L - Math.max(...ys), bot = L - Math.min(...ys);
+                    const el = svgRef.current;
+                    const upp = el?.clientWidth ? 1 / Math.min(el.clientWidth / vb.w, el.clientHeight / vb.h) : vb.w / 800; // mm per screen pixel
+                    const off = 14 * upp, r = 9 * upp, mx = (x0 + x1) / 2, my = (top + bot) / 2;
+                    const handle = (key, x, y, glyph, title, onDown) => (
+                      <g key={key} transform={`translate(${x},${y})`} style={{ cursor:'pointer' }} onPointerDown={onDown}>
+                        <title>{title}</title>
+                        <circle r={r} fill="#2a2a50" stroke="#ffffff" strokeWidth={1} vectorEffect="non-scaling-stroke" />
+                        <text textAnchor="middle" dominantBaseline="central" fontSize={12 * upp} fill="#ffffff" style={{ userSelect:'none' }}>{glyph}</text>
+                      </g>
+                    );
+                    const click = fn => e => { if (e.button !== 0) return; e.stopPropagation(); fn(); };
+                    return (
+                      <g>
+                        <rect x={x0} y={top} width={x1 - x0} height={bot - top} fill="none" stroke="#ffffff" strokeDasharray="4 3" strokeWidth={1} vectorEffect="non-scaling-stroke" pointerEvents="none" />
+                        {handle('tl', x0 - off, top - off, '⟲', 'Turn 90° left (R)', click(() => turn(sel, 1)))}
+                        {handle('tr', x1 + off, top - off, '⟳', 'Turn 90° right (Shift+R)', click(() => turn(sel, -1)))}
+                        {handle('bl', x0 - off, bot + off, '↻', 'Hold and drag to rotate (1° steps, Shift = 15°)', e => startRotate(e, sel))}
+                        {handle('u', mx, top - off, '▲', 'Bump up until it touches (Ctrl+↑)', click(() => bump(sel, 0, 1)))}
+                        {handle('d', mx, bot + off, '▼', 'Bump down until it touches (Ctrl+↓)', click(() => bump(sel, 0, -1)))}
+                        {handle('l', x0 - off, my, '◀', 'Bump left until it touches (Ctrl+←)', click(() => bump(sel, -1, 0)))}
+                        {handle('r', x1 + off, my, '▶', 'Bump right until it touches (Ctrl+→)', click(() => bump(sel, 1, 0)))}
+                        {handle('x', x1 + off, bot + off, '✕', 'Take it off the sheet (Delete) — it waits in Not on a sheet', click(() => takeOff(sel)))}
+                        {drag?.mode === 'rotate' && (
+                          <text x={mx} y={my} textAnchor="middle" dominantBaseline="central" fontSize={16 * upp} fill="#ffffff" stroke="#000000" strokeWidth={3 * upp} paintOrder="stroke" pointerEvents="none">
+                            {((pl.angle * 180) / Math.PI).toFixed(0)}°
+                          </text>
+                        )}
+                      </g>
+                    );
+                  })()}
                 </svg>
               ) : (
                 <div style={{ fontSize:12, color:'#666688', padding:20 }}>{running ? `Nesting… ${Math.round(progress * 100)}%` : 'Set quantities and materials, then click Nest.'}</div>
@@ -678,11 +889,12 @@ export default function PartListModal({ partList, entities, selectedEntityIds, a
             </div>
             {current && (
               <div style={{ fontSize:11, color:'#aaaacc', marginTop:6 }}>
-                Sheet {sheetIdx + 1} of {allSheets.length}: {fmt(current.sheet.w)} × {fmt(current.sheet.l)} · {current.sheet.placements.length} parts · {(current.sheet.utilization * 100).toFixed(1)}% used
-                {conflicts.size > 0 && <span style={{ color:'#ff7777' }}> · ⚠ {conflicts.size} too close (red)</span>}
+                Sheet {sheetIdx + 1} of {allSheets.length}: {fmt(current.sheet.w)} × {fmt(current.sheet.l)} · {placements.length} parts · {(usedPct * 100).toFixed(1)}% used
+                {conflicts.size > 0 && <span style={{ color:'#ff7777', cursor:'pointer', textDecoration:'underline' }} onClick={showRed} title="Show the next red part"> · ⚠ {conflicts.size} too close (red){extent?.off ? `, ${extent.off} off the sheet` : ''}</span>}
+                {selName && <span style={{ color:'#ffffff' }}> · {selName} at {((placements[sel].angle * 180) / Math.PI).toFixed(1)}° — R turns, arrows nudge, Ctrl+arrow bumps</span>}
                 {running && <> · Nesting… {Math.round(progress * 100)}%</>}
                 <span style={{ float:'right', color:'#666688' }}>
-                  drag a part to move it · wheel = zoom · drag the sheet = pan · {Math.round(zoom * 100)}%{' '}
+                  click a part to select it, drag to move · wheel = zoom · drag the sheet = pan · {Math.round(zoom * 100)}%{' '}
                   <button style={S.link} onClick={() => setView(null)} title="Whole sheet (or double-click)">Fit</button>
                 </span>
               </div>
