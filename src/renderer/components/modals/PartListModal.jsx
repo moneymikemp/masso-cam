@@ -182,6 +182,18 @@ export default function PartListModal({ partList, entities, selectedEntityIds, a
   }
   const update = (id, changes) => setList(partList.map(p => (p.id === id ? { ...p, ...changes } : p)));
 
+  // Ticked rows, for setting one material on many parts (none ticked = all).
+  const [checked, setChecked] = useState(() => new Set());
+  const ticked = partList.filter(p => checked.has(p.id));
+  const toggle = id => setChecked(s => { const n = new Set(s); if (n.has(id)) n.delete(id); else n.add(id); return n; });
+  function setMaterialFor(key) {
+    if (!key) return;
+    const ids = new Set((ticked.length ? ticked : partList).map(p => p.id));
+    setList(partList.map(p => (ids.has(p.id) ? { ...p, materialKey: key } : p)));
+    savePrefs({ ...loadPrefs(), lastMaterial: key });
+    setMessage(`${matName(key)} on ${ids.size === partList.length ? 'all' : ids.size} part${ids.size === 1 ? '' : 's'}.`);
+  }
+
   function addFiles(files) {
     const added = [];
     let loose = 0, failed = [];
@@ -419,6 +431,11 @@ export default function PartListModal({ partList, entities, selectedEntityIds, a
             title="The parts in the drawing (the selected ones, if any) — Apply replaces them with the nest">+ From Drawing{selectedEntityIds?.length ? ' (selection)' : ''}</button>
           <button style={{ ...S.btn, ...S.secondary }} onClick={addParts}>+ Add Parts…</button>
           <button style={{ ...S.btn, ...S.secondary }} onClick={refresh} disabled={!partList.length} title="Re-read each part's DXF/SVG file">⟳ Refresh</button>
+          <select style={S.input} value="" disabled={!partList.length} onChange={e => setMaterialFor(e.target.value)}
+            title="Tick parts in the list to set only those; none ticked sets every part">
+            <option value="">Set material for {ticked.length ? `${ticked.length} ticked` : 'all'}…</option>
+            {lib.flatMap(m => m.thicknesses.map(t => <option key={`${m.id}|${t.id}`} value={`${m.id}|${t.id}`}>{m.name} {t.label}</option>))}
+          </select>
           <span style={{ flex:1, fontSize:11, color:'#8888aa' }}>{message}</span>
           <span style={{ fontSize:11, color:'#8888aa' }}>{partList.length} part{partList.length === 1 ? '' : 's'}, {partList.reduce((s, p) => s + (p.fill ? 0 : +p.qty || 0), 0)} total{partList.some(p => p.fill) ? ' + fill' : ''}</span>
         </div>
@@ -427,6 +444,12 @@ export default function PartListModal({ partList, entities, selectedEntityIds, a
           <table style={{ width:'100%', borderCollapse:'collapse' }}>
             <thead>
               <tr>
+                <th style={S.th}>
+                  <input type="checkbox" title="Tick all / none" disabled={!partList.length}
+                    checked={partList.length > 0 && ticked.length === partList.length}
+                    ref={el => { if (el) el.indeterminate = ticked.length > 0 && ticked.length < partList.length; }}
+                    onChange={e => setChecked(new Set(e.target.checked ? partList.map(p => p.id) : []))} />
+                </th>
                 <th style={S.th} />
                 <th style={S.th}>Name</th>
                 <th style={S.th}>Size</th>
@@ -443,7 +466,8 @@ export default function PartListModal({ partList, entities, selectedEntityIds, a
                 const sh = shapes.get(p.id);
                 const placed = placedById.get(p.id);
                 return (
-                  <tr key={p.id}>
+                  <tr key={p.id} style={checked.has(p.id) ? { background:'#2a2a48' } : undefined}>
+                    <td style={S.td}><input type="checkbox" checked={checked.has(p.id)} onChange={() => toggle(p.id)} /></td>
                     <td style={S.td}><Thumb part={p} /></td>
                     <td style={S.td}><input style={{ ...S.input, width:'100%' }} value={p.name} title={p.path || ''} onChange={e => update(p.id, { name: e.target.value })} /></td>
                     <td style={{ ...S.td, color:'#8888aa', whiteSpace:'nowrap' }}>{sh ? `${fmt(sh.w)} × ${fmt(sh.h)}` : '⚠ no outline'}</td>
@@ -475,7 +499,7 @@ export default function PartListModal({ partList, entities, selectedEntityIds, a
                   </tr>
                 );
               })}
-              {!partList.length && <tr><td style={{ ...S.td, color:'#666688', padding:20 }} colSpan={9}>No parts yet — click + From Drawing for the parts you imported, + Add Parts… for DXF/SVG files, or drop files on this window.</td></tr>}
+              {!partList.length && <tr><td style={{ ...S.td, color:'#666688', padding:20 }} colSpan={10}>No parts yet — click + From Drawing for the parts you imported, + Add Parts… for DXF/SVG files, or drop files on this window.</td></tr>}
             </tbody>
           </table>
         </div>
