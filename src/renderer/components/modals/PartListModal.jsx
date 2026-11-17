@@ -1007,7 +1007,7 @@ export default function PartListModal({ partList, entities, selectedEntityIds, a
                   })()}
                 </svg>
               ) : (
-                <div style={{ fontSize:12, color:'#666688', padding:20 }}>{running ? `Nesting… ${Math.round(progress * 100)}%` : 'Set quantities and materials, then click Nest.'}</div>
+                <div style={{ fontSize:12, color:'#666688', padding:20 }}>{running ? `Nesting… ${Math.round(progress * 100)}%` : results ? `Nothing fit on the sheet size${sheets.length === 1 ? '' : 's'} given — check the size and the units (${unit}).` : 'Set quantities and materials, then click Nest.'}</div>
               )}
             </div>
             {current && (
