@@ -191,6 +191,38 @@ function intervalsOnLine(set, axis, c) {
   return out;
 }
 
+/**
+ * Where the edges of two different ring sets cross, inside box b. In a snug
+ * gap between two placed parts the free spots are only these crossings —
+ * neither NFP has a vertex there.
+ */
+function crossings(sets, b, out) {
+  const edges = sets.map(set => {
+    const list = [];
+    if (set.maxX < b.minX || set.minX > b.maxX || set.maxY < b.minY || set.minY > b.maxY) return list;
+    for (const r of set.rings) {
+      for (let i = 0, j = r.n - 1; i < r.n; j = i++) {
+        const x1 = r.xs[j], y1 = r.ys[j], x2 = r.xs[i], y2 = r.ys[i];
+        const lo = Math.min(x1, x2), hi = Math.max(x1, x2), bot = Math.min(y1, y2), top = Math.max(y1, y2);
+        if (hi < b.minX || lo > b.maxX || top < b.minY || bot > b.maxY) continue;
+        list.push([x1, y1, x2, y2, lo, hi, bot, top]);
+      }
+    }
+    return list;
+  });
+  for (let s = 0; s < edges.length; s++) for (let t = s + 1; t < edges.length; t++) {
+    for (const [ax, ay, bx, by, alo, ahi, abot, atop] of edges[s]) for (const [cx, cy, dx, dy, clo, chi, cbot, ctop] of edges[t]) {
+      if (ahi < clo || chi < alo || atop < cbot || ctop < abot) continue;
+      const ex = bx - ax, ey = by - ay, fx = dx - cx, fy = dy - cy;
+      const den = ex * fy - ey * fx;
+      if (Math.abs(den) < 1e-12) continue;
+      const u = ((cx - ax) * fy - (cy - ay) * fx) / den, v = ((cx - ax) * ey - (cy - ay) * ex) / den;
+      if (u < 0 || u > 1 || v < 0 || v > 1) continue;
+      out.push({ x: ax + u * ex, y: ay + u * ey });
+    }
+  }
+}
+
 /** Smallest value ≥ from that isn't strictly inside any of the intervals. */
 function firstFree(intervals, from) {
   const iv = intervals.filter(([, b]) => b > from).sort((p, q) => p[0] - q[0]);
@@ -540,12 +572,17 @@ async function mixedNest(parts, sheet, opts, preplaced = []) {
   // NFP(R_a X, R_b Y) = R_a · NFP(X, R_(b−a) Y): one NFP per part pair and
   // relative angle, turned to each placed copy's angle (and cached so).
   const relCache = new Map(), turnedCache = new Map();
-  const nfpFor = (placedO, o) => {
+  // The coarse shapes are a little bigger than the real ones, and in a snug
+  // gap (a plate inside a bracket's U) that can be the difference — a part
+  // that won't go with them is tried again with the fine shapes (on a sheet
+  // of up to OBSTACLES_MAX parts — past that it's too slow).
+  const nfpFor = (placedO, o, fine) => {
     const rel = (((o.angle - placedO.angle) % (2 * Math.PI)) + 2 * Math.PI) % (2 * Math.PI);
-    const key = `${placedO.part.index}|${o.part.index}@${rel.toFixed(6)}`;
+    const key = `${placedO.part.index}|${o.part.index}@${rel.toFixed(6)}${fine ? 'f' : ''}`;
     let base = relCache.get(key);
     if (!base) {
-      base = nfpPaths(orient(placedO.part, 0, cache).coarse, orient(o.part, rel, cache).coarse);
+      const which = fine ? 'shape' : 'coarse';
+      base = nfpPaths(orient(placedO.part, 0, cache)[which], orient(o.part, rel, cache)[which]);
       relCache.set(key, base);
     }
     if (!placedO.angle) return base;
@@ -565,27 +602,37 @@ async function mixedNest(parts, sheet, opts, preplaced = []) {
     const part = items[n];
     if (full.has(part.index)) { unplaced.push(part.index); continue; }
     let best = null;
-    for (const angle of mixedAngles(part, part.rotation || opts.rotation)) {
+    for (const fine of [false, true]) for (const angle of mixedAngles(part, part.rotation || opts.rotation)) {
+      if (fine && (best || !placed.length || placed.length > OBSTACLES_MAX)) break;
       const o = orient(part, angle, cache);
       const t = o.tight;
       const ifp = { minX: sheet.minX - t.minX, maxX: sheet.maxX - t.maxX, minY: sheet.minY - t.minY, maxY: sheet.maxY - t.maxY };
       if (ifp.minX > ifp.maxX + EPS || ifp.minY > ifp.maxY + EPS) continue;
-      const nfps = placed.map(pl => makeRings(translatePaths(nfpFor(pl.o, o), pl.x, pl.y)));
+      const nfps = placed.map(pl => makeRings(translatePaths(nfpFor(pl.o, o, fine), pl.x, pl.y)));
       const cands = [{ x: ifp.minX, y: ifp.minY }, { x: ifp.minX, y: ifp.maxY }, { x: ifp.maxX, y: ifp.minY }];
       for (const f of nfps) {
         for (const r of f.rings) for (let i = 0; i < r.n; i++) cands.push({ x: r.xs[i], y: r.ys[i] });
         for (const [a, b] of intervalsOnLine(f, 'x', ifp.minX)) cands.push({ x: ifp.minX, y: a }, { x: ifp.minX, y: b });
         for (const [a, b] of intervalsOnLine(f, 'y', ifp.minY)) cands.push({ x: a, y: ifp.minY }, { x: b, y: ifp.minY });
+        for (const [a, b] of intervalsOnLine(f, 'x', ifp.maxX)) cands.push({ x: ifp.maxX, y: a }, { x: ifp.maxX, y: b });
+        for (const [a, b] of intervalsOnLine(f, 'y', ifp.maxY)) cands.push({ x: a, y: ifp.maxY }, { x: b, y: ifp.maxY });
       }
       const key = c => Math.round(c.x / 0.5) * 1e6 + c.y;
-      cands.sort((p, q) => key(p) - key(q));
-      for (const c of cands) {
-        if (c.x < ifp.minX - EPS || c.x > ifp.maxX + EPS || c.y < ifp.minY - EPS || c.y > ifp.maxY + EPS) continue;
-        if (best && key(c) >= key(best)) break;
-        if (nfps.some(f => insideRings(f, c.x, c.y))) continue;
-        best = { o, x: c.x, y: c.y };
-        break;
-      }
+      const pick = list => {
+        list.sort((p, q) => key(p) - key(q));
+        for (const c of list) {
+          if (c.x < ifp.minX - EPS || c.x > ifp.maxX + EPS || c.y < ifp.minY - EPS || c.y > ifp.maxY + EPS) continue;
+          if (best && key(c) >= key(best)) break;
+          if (nfps.some(f => insideRings(f, c.x, c.y))) continue;
+          best = { o, x: c.x, y: c.y };
+          break;
+        }
+      };
+      pick(cands);
+      // Crossings cost the most (every edge against every edge), so only
+      // when nothing else has given the part a spot yet, on a sheet that
+      // isn't crowded.
+      if (!best && placed.length <= OBSTACLES_MAX) { const more = []; crossings(nfps, ifp, more); pick(more); }
     }
     if (best) placed.push(best);
     else { unplaced.push(part.index); full.add(part.index); }

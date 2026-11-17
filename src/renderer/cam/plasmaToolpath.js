@@ -298,6 +298,10 @@ export function generatePlasma(op, shapes) {
  * it (no leadAt yet): where it starts and the lead-in's path from the pierce,
  * arcs as points. For the nester, which keeps room for it. outline: closed
  * points, no closing point. params: { kerf, leadInStyle, leadInLength } (mm).
+ * The lead goes at the middle of the outside straight edge (one on the
+ * part's convex hull, not in a notch) where it adds least to the part's
+ * box — the end of a long plate rather than its side — so it costs the
+ * least room on the sheet (ties: the longest edge).
  * Returns { start, pierce, leadPts } or null if the kerf doesn't fit.
  */
 export function outsideLead(outline, params = {}) {
@@ -306,9 +310,41 @@ export function outsideLead(outline, params = {}) {
   if (isClockwise(loop)) loop = [...loop].reverse();
   const [path] = kerfPaths(loop, false, Math.max(0, params.kerf ?? 1.143));
   if (!path) return null;
-  const cut = startOnLongestSegment(path);
   const style = params.leadInStyle === 'line' ? 'line' : params.leadInStyle === 'none' ? 'none' : 'arc';
-  const lead = style === 'none' ? null : leadIn(cut, false, style, Math.max(0, params.leadInLength ?? 3.556));
+  const length = Math.max(0, params.leadInLength ?? 3.556);
+  if (style === 'none') return leadAlong(startOnLongestSegment(path), style, length);
+  const box = pts => {
+    let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+    for (const q of pts) { minX = Math.min(minX, q.x); maxX = Math.max(maxX, q.x); minY = Math.min(minY, q.y); maxY = Math.max(maxY, q.y); }
+    return (maxX - minX) * (maxY - minY);
+  };
+  const base = box(path);
+  const lens = path.map((q, i) => dist(q, path[(i + 1) % path.length]));
+  const longest = Math.max(...lens);
+  const full = style === 'line' ? length : length * Math.SQRT2; // pierce to start, unshrunk
+  let best = null;
+  for (let i = 0; i < path.length; i++) {
+    const isLongest = lens[i] >= longest - 1e-9;
+    if (!isLongest && lens[i] < 2 * length) continue; // too short for the lead, or an arc's chord
+    const a = path[i], b = path[(i + 1) % path.length];
+    // Outside edges only: a lead in a notch would fill room another part could use.
+    const tol = 1e-3 * lens[i];
+    const side = q => (b.x - a.x) * (q.y - a.y) - (b.y - a.y) * (q.x - a.x);
+    if (!isLongest && path.some(q => side(q) < -tol) && path.some(q => side(q) > tol)) continue;
+    const cut = [{ x: (a.x + b.x) / 2, y: (a.y + b.y) / 2 }, ...path.slice(i + 1), ...path.slice(0, i + 1)];
+    const res = leadAlong(cut, style, length);
+    const short = dist(res.pierce, res.start) < full * 0.99; // only a shortened lead fits here
+    if (short && !isLongest) continue;
+    // A full-length lead beats a shortened one, then the smaller box wins.
+    const cost = (short ? 1e12 : 0) + box([...path, ...res.leadPts]) - base;
+    if (!best || cost < best.cost - 1e-6 || (cost < best.cost + 1e-6 && lens[i] > best.len)) best = { res, cost, len: lens[i] };
+  }
+  return best.res;
+}
+
+/** outsideLead's lead for a cut starting at cut[0]. */
+function leadAlong(cut, style, length) {
+  const lead = style === 'none' ? null : leadIn(cut, false, style, length);
   const start = cut[0];
   if (!lead) return { start, pierce: start, leadPts: [start] };
   if (lead.move.type === 'feed') return { start, pierce: lead.pierce, leadPts: [lead.pierce, start] };
