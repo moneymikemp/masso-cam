@@ -20,7 +20,8 @@ import { getDefaultParams } from '../../store/AppContext';
 // takes (plasma/nesting.js nestSheets). Apply lays the sheets out side by
 // side in the drawing, with a calculated Plasma Cut per sheet, replacing
 // the drawing's own copies of parts taken from it; 💾 Plasma G-code then
-// writes a program per sheet.
+// writes a program per sheet. Two tabs: ① Parts (the list) and ② Nest (sheet
+// sizes, spacing and the result, which zooms and pans).
 
 const MM = 25.4;
 const PREFS_KEY = 'dmdcam.partlist';
@@ -31,11 +32,11 @@ const S = {
   box: { background:'#1a1a38', border:'1px solid #3a3a70', borderRadius:8, padding:'16px 20px', width:1180, maxWidth:'97vw', height:'90vh', display:'flex', flexDirection:'column', color:'#ccc', fontFamily:'system-ui,sans-serif' },
   title: { fontSize:15, fontWeight:700, color:'#ffbb66', marginBottom:10, display:'flex', alignItems:'center', gap:10 },
   bar: { display:'flex', gap:8, alignItems:'center', marginBottom:8 },
-  tableWrap: { flex:'1 1 45%', minHeight:120, overflowY:'auto', background:'#0d0d20', border:'1px solid #2a2a50', borderRadius:4 },
+  tableWrap: { flex:1, minHeight:120, overflowY:'auto', background:'#0d0d20', border:'1px solid #2a2a50', borderRadius:4 },
   th: { position:'sticky', top:0, background:'#14142c', fontSize:10, color:'#8888aa', textAlign:'left', padding:'5px 6px', fontWeight:600, borderBottom:'1px solid #2a2a50' },
   td: { padding:'3px 6px', fontSize:12, borderBottom:'1px solid #1c1c3a', verticalAlign:'middle' },
   input: { background:'#0d0d20', border:'1px solid #2a2a50', color:'#ccccee', borderRadius:3, padding:'3px 6px', fontSize:12, boxSizing:'border-box' },
-  lower: { flex:'1 1 55%', minHeight:0, display:'flex', gap:14, marginTop:10 },
+  lower: { flex:1, minHeight:0, display:'flex', gap:14 },
   side: { width:330, flexShrink:0, overflowY:'auto' },
   section: { fontSize:10, fontWeight:700, color:'#8888aa', textTransform:'uppercase', letterSpacing:0.5, margin:'8px 0 6px' },
   grid: { display:'grid', gridTemplateColumns:'130px 1fr', gap:'6px 10px', alignItems:'center' },
@@ -59,6 +60,12 @@ function savePrefs(p) {
 
 function fileBase(path) {
   return String(path).split(/[\\/]/).pop().replace(/\.(dxf|svg)$/i, '');
+}
+
+/** The quantity a file name asks for — "Cross Plate x 4", "Gusset X2", "Plate x4.dwg" — else 1. */
+function qtyFromName(name) {
+  const m = /(?:^|[\s_-])x\s*(\d{1,4})\s*(?:\.dwg)?$/i.exec(name.trim());
+  return m && +m[1] > 0 ? +m[1] : 1;
 }
 
 /** Parts found in entities: each outermost outline with everything inside it, moved so its corner is at 0,0 (mm). */
@@ -170,6 +177,7 @@ export default function PartListModal({ partList, entities, selectedEntityIds, a
   const [progress, setProgress] = useState(0);
   const [results, setResults] = useState(null); // [{ materialKey, materialName, thickness, cut, parts, res }]
   const [sheetIdx, setSheetIdx] = useState(0);
+  const [tab, setTab] = useState('parts'); // 'parts' | 'nest'
   const cancelled = useRef(false);
   const closed = useRef(false);
   useEffect(() => () => { cancelled.current = closed.current = true; }, []);
@@ -201,7 +209,8 @@ export default function PartListModal({ partList, entities, selectedEntityIds, a
       try {
         const r = partsFromFile(f.path, f.content, isInch);
         loose += r.loose;
-        for (const p of r.parts) added.push({ id: uuid(), qty: 1, materialKey: prefs.lastMaterial || '', priority: 5, rotation: 'any', ...p });
+        const qty = qtyFromName(fileBase(f.path));
+        for (const p of r.parts) added.push({ id: uuid(), qty, materialKey: prefs.lastMaterial || '', priority: 5, rotation: 'any', ...p });
         if (!r.parts.length) failed.push(fileBase(f.path));
       } catch (err) {
         failed.push(fileBase(f.path));
@@ -253,6 +262,7 @@ export default function PartListModal({ partList, entities, selectedEntityIds, a
   async function onDrop(e) {
     e.preventDefault();
     setDragging(false);
+    setTab('parts');
     const files = [];
     for (const f of e.dataTransfer.files) {
       if (!/\.(dxf|svg)$/i.test(f.name)) continue;
@@ -302,6 +312,7 @@ export default function PartListModal({ partList, entities, selectedEntityIds, a
     }
     if (!groups.size) { setMessage('Give the parts a quantity and a material first.'); return; }
     cancelled.current = false;
+    setTab('nest');
     setRunning(true);
     setProgress(0);
     setResults(null);
@@ -420,12 +431,61 @@ export default function PartListModal({ partList, entities, selectedEntityIds, a
     });
   }, [current]);
 
+  // Sheet view zoom and pan: a viewBox (mm, y down); null = the whole sheet.
+  const svgRef = useRef(null);
+  const [view, setView] = useState(null);
+  const [pan, setPan] = useState(null);
+  useEffect(() => setView(null), [sheetIdx, results]);
+  const fitBox = current ? { x: -current.sheet.w * 0.01, y: -current.sheet.l * 0.01, w: current.sheet.w * 1.02, h: current.sheet.l * 1.02 } : null;
+  const vb = view || fitBox;
+  const zoom = vb && fitBox ? fitBox.w / vb.w : 1;
+  const toSvg = (cx, cy) => {
+    const ctm = svgRef.current?.getScreenCTM();
+    if (!ctm) return null;
+    const p = new DOMPoint(cx, cy).matrixTransform(ctm.inverse());
+    return { x: p.x, y: p.y };
+  };
+  // A native listener: React's wheel handler is passive and can't stop the page scrolling.
+  useEffect(() => {
+    const el = svgRef.current;
+    if (!el || !fitBox) return undefined;
+    const onWheel = e => {
+      e.preventDefault();
+      const pt = toSvg(e.clientX, e.clientY);
+      if (!pt) return;
+      setView(v => {
+        const b = v || fitBox;
+        const f = Math.min(Math.max(e.deltaY > 0 ? 1.2 : 1 / 1.2, fitBox.w / 40 / b.w), (fitBox.w * 2) / b.w); // 2× out to 40× in
+        return { x: pt.x - (pt.x - b.x) * f, y: pt.y - (pt.y - b.y) * f, w: b.w * f, h: b.h * f };
+      });
+    };
+    el.addEventListener('wheel', onWheel, { passive: false });
+    return () => el.removeEventListener('wheel', onWheel);
+  });
+  function startPan(e) {
+    if (e.button !== 0 && e.button !== 1) return;
+    e.currentTarget.setPointerCapture(e.pointerId);
+    setPan({ cx: e.clientX, cy: e.clientY, b: vb, scale: svgRef.current.getScreenCTM().a });
+  }
+  function movePan(e) {
+    if (!pan) return;
+    const dx = (e.clientX - pan.cx) / pan.scale, dy = (e.clientY - pan.cy) / pan.scale;
+    setView({ ...pan.b, x: pan.b.x - dx, y: pan.b.y - dy });
+  }
+  const endPan = () => setPan(null);
+
   return (
     <div style={S.overlay}>
       <div style={{ ...S.box, ...(dragging ? S.drop : {}) }} onClick={e => e.stopPropagation()}
         onDragOver={e => { e.preventDefault(); setDragging(true); }} onDragLeave={() => setDragging(false)} onDrop={onDrop}>
-        <div style={S.title}>▦ Nest <span style={{ fontSize:11, fontWeight:400, color:'#666688' }}>— part list: add the drawing's parts, or drop DXF/SVG files here</span></div>
+        <div style={S.title}>
+          ▦ Nest
+          <span style={S.tab(tab === 'parts')} onClick={() => setTab('parts')}>① Parts ({partList.length})</span>
+          <span style={S.tab(tab === 'nest')} onClick={() => setTab('nest')}>② Nest{allSheets.length ? ` (${allSheets.length} sheet${allSheets.length === 1 ? '' : 's'})` : ''}</span>
+          <span style={{ flex:1, fontSize:11, fontWeight:400, color:'#8888aa', textAlign:'right' }}>{message}</span>
+        </div>
 
+        {tab === 'parts' && <>
         <div style={S.bar}>
           <button style={{ ...S.btn, ...S.secondary }} onClick={addFromDrawing}
             title="The parts in the drawing (the selected ones, if any) — Apply replaces them with the nest">+ From Drawing{selectedEntityIds?.length ? ' (selection)' : ''}</button>
@@ -436,7 +496,7 @@ export default function PartListModal({ partList, entities, selectedEntityIds, a
             <option value="">Set material for {ticked.length ? `${ticked.length} ticked` : 'all'}…</option>
             {lib.flatMap(m => m.thicknesses.map(t => <option key={`${m.id}|${t.id}`} value={`${m.id}|${t.id}`}>{m.name} {t.label}</option>))}
           </select>
-          <span style={{ flex:1, fontSize:11, color:'#8888aa' }}>{message}</span>
+          <span style={{ flex:1, fontSize:11, color:'#666688' }}>Drop DXF/SVG files on this window to add them.</span>
           <span style={{ fontSize:11, color:'#8888aa' }}>{partList.length} part{partList.length === 1 ? '' : 's'}, {partList.reduce((s, p) => s + (p.fill ? 0 : +p.qty || 0), 0)} total{partList.some(p => p.fill) ? ' + fill' : ''}</span>
         </div>
 
@@ -451,7 +511,7 @@ export default function PartListModal({ partList, entities, selectedEntityIds, a
                     onChange={e => setChecked(new Set(e.target.checked ? partList.map(p => p.id) : []))} />
                 </th>
                 <th style={S.th} />
-                <th style={S.th}>Name</th>
+                <th style={{ ...S.th, width:'34%' }}>Name</th>
                 <th style={S.th}>Size</th>
                 <th style={S.th}>Qty</th>
                 <th style={S.th}>Material</th>
@@ -469,7 +529,7 @@ export default function PartListModal({ partList, entities, selectedEntityIds, a
                   <tr key={p.id} style={checked.has(p.id) ? { background:'#2a2a48' } : undefined}>
                     <td style={S.td}><input type="checkbox" checked={checked.has(p.id)} onChange={() => toggle(p.id)} /></td>
                     <td style={S.td}><Thumb part={p} /></td>
-                    <td style={S.td}><input style={{ ...S.input, width:'100%' }} value={p.name} title={p.path || ''} onChange={e => update(p.id, { name: e.target.value })} /></td>
+                    <td style={S.td}><input style={{ ...S.input, width:'100%', minWidth:280 }} value={p.name} title={p.path ? `${p.name}\n${p.path}` : p.name} onChange={e => update(p.id, { name: e.target.value })} /></td>
                     <td style={{ ...S.td, color:'#8888aa', whiteSpace:'nowrap' }}>{sh ? `${fmt(sh.w)} × ${fmt(sh.h)}` : '⚠ no outline'}</td>
                     <td style={{ ...S.td, whiteSpace:'nowrap' }}>
                       {p.fill
@@ -503,8 +563,9 @@ export default function PartListModal({ partList, entities, selectedEntityIds, a
             </tbody>
           </table>
         </div>
+        </>}
 
-        <div style={S.lower}>
+        {tab === 'nest' && <div style={S.lower}>
           <div style={S.side}>
             <div style={S.section}>Sheets <span style={{ fontWeight:400, textTransform:'none', color:'#666688' }}>(used in order; count blank = as many as needed; long side along {longAxis === 'x' ? 'X' : 'Y'}, set in ⚙ Machine)</span></div>
             {sheets.map((s, i) => (
@@ -553,10 +614,11 @@ export default function PartListModal({ partList, entities, selectedEntityIds, a
             </div>
             <div style={{ flex:1, minHeight:0 }}>
               {current ? (
-                <svg viewBox={`${-current.sheet.w * 0.01} ${-current.sheet.l * 0.01} ${current.sheet.w * 1.02} ${current.sheet.l * 1.02}`} style={{ width:'100%', height:'100%', display:'block' }}>
-                  <rect x={0} y={0} width={current.sheet.w} height={current.sheet.l} fill="#1c1c30" stroke="#666699" strokeWidth={current.sheet.w / 500} />
-                  {previewPaths.map((p, i) => <path key={i} d={p.outline} fill="rgba(80,200,110,0.35)" stroke="#55dd77" strokeWidth={current.sheet.w / 900} />)}
-                  {previewPaths.map((p, i) => p.lead && <path key={`l${i}`} d={p.lead} fill="none" stroke="#ffaa44" strokeWidth={current.sheet.w / 700} />)}
+                <svg ref={svgRef} viewBox={`${vb.x} ${vb.y} ${vb.w} ${vb.h}`} style={{ width:'100%', height:'100%', display:'block', cursor: pan ? 'grabbing' : 'grab', touchAction:'none' }}
+                  onPointerDown={startPan} onPointerMove={movePan} onPointerUp={endPan} onPointerCancel={endPan} onDoubleClick={() => setView(null)}>
+                  <rect x={0} y={0} width={current.sheet.w} height={current.sheet.l} fill="#1c1c30" stroke="#666699" strokeWidth={1.5} vectorEffect="non-scaling-stroke" />
+                  {previewPaths.map((p, i) => <path key={i} d={p.outline} fill="rgba(80,200,110,0.35)" stroke="#55dd77" strokeWidth={1} vectorEffect="non-scaling-stroke" />)}
+                  {previewPaths.map((p, i) => p.lead && <path key={`l${i}`} d={p.lead} fill="none" stroke="#ffaa44" strokeWidth={1.5} vectorEffect="non-scaling-stroke" />)}
                 </svg>
               ) : (
                 <div style={{ fontSize:12, color:'#666688', padding:20 }}>{running ? `Nesting… ${Math.round(progress * 100)}%` : 'Set quantities and materials, then click Nest.'}</div>
@@ -566,10 +628,14 @@ export default function PartListModal({ partList, entities, selectedEntityIds, a
               <div style={{ fontSize:11, color:'#aaaacc', marginTop:6 }}>
                 Sheet {sheetIdx + 1} of {allSheets.length}: {fmt(current.sheet.w)} × {fmt(current.sheet.l)} · {current.sheet.placements.length} parts · {(current.sheet.utilization * 100).toFixed(1)}% used
                 {running && <> · Nesting… {Math.round(progress * 100)}%</>}
+                <span style={{ float:'right', color:'#666688' }}>
+                  wheel = zoom · drag = pan · {Math.round(zoom * 100)}%{' '}
+                  <button style={S.link} onClick={() => setView(null)} title="Whole sheet (or double-click)">Fit</button>
+                </span>
               </div>
             )}
           </div>
-        </div>
+        </div>}
 
         <div style={{ display:'flex', justifyContent:'flex-end', gap:8, marginTop:12 }}>
           <button style={{ ...S.btn, ...S.secondary }} onClick={() => { cancelled.current = closed.current = true; onClose(); }}>Close</button>
