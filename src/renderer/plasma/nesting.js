@@ -267,6 +267,9 @@ function prepareParts(parts, opts) {
       // the product of the two shapes' point counts.
       coarse: nestShape(pieces, 48),
       cutShape: nestShape(cut, 400), // for the sheet edge margin
+      // The true footprint at fine resolution, for checking hand-placed parts:
+      // shape and coarse are padded a little past it, each its own way.
+      exact: nestShape(pieces, 400),
       boxAngle: minBoxAngle(local),
       area: area(local),
     };
@@ -683,7 +686,10 @@ export async function nestParts(parts, sheet, opts = {}) {
  * as many as fit in the room left on each sheet).
  * sheetSizes: [{ w, l, count }] in mm, used in order; count 0/blank = as
  * many as needed. opts: as nestParts, plus margin (mm) and corner ('ll' |
- * 'lr' | 'ul' | 'ur': pack into that corner, the one the table is zeroed at).
+ * 'lr' | 'ul' | 'ur': pack into that corner, the one the table is zeroed at)
+ * and fixedSheets ([{ w, l, placements }] — sheets kept from an earlier nest
+ * with parts locked in place by hand; they come first, the rest nests around
+ * those parts, then on to new sheets).
  * Returns { sheets: [{ w, l, placements, utilization }], parts (prepared),
  * placed: count per part, unplaced: count per part }.
  */
@@ -699,10 +705,15 @@ export async function nestSheets(parts, sheetSizes, opts = {}) {
   const flip = q => ({ ...q, x: fx ? -q.x : q.x, y: fy ? -q.y : q.y });
   const loop = pts => (one ? pts.map(flip).reverse() : pts.map(flip));
   const flipLead = l => l && { ...l, start: l.start && flip(l.start), pierce: l.pierce && flip(l.pierce), leadPts: l.leadPts?.map(flip) };
-  const res = await nestFromLeft(parts.map(p => ({ ...p, outline: loop(p.outline), lead: flipLead(p.lead) })), sheetSizes, opts);
+  // Locked parts go into the mirror the same way they come back out of it.
+  const fixedSheets = (opts.fixedSheets || []).map(sh => ({
+    ...sh,
+    placements: sh.placements.map(pl => ({ ...pl, x: fx ? sh.w - pl.x : pl.x, y: fy ? sh.l - pl.y : pl.y, angle: one ? -pl.angle : pl.angle })),
+  }));
+  const res = await nestFromLeft(parts.map(p => ({ ...p, outline: loop(p.outline), lead: flipLead(p.lead) })), sheetSizes, { ...opts, fixedSheets });
   return {
     ...res,
-    parts: res.parts.map(p => ({ ...p, cx: fx ? -p.cx : p.cx, cy: fy ? -p.cy : p.cy, local: loop(p.local), shape: loop(p.shape), coarse: loop(p.coarse), cutShape: loop(p.cutShape) })),
+    parts: res.parts.map(p => ({ ...p, cx: fx ? -p.cx : p.cx, cy: fy ? -p.cy : p.cy, local: loop(p.local), shape: loop(p.shape), coarse: loop(p.coarse), cutShape: loop(p.cutShape), exact: loop(p.exact) })),
     sheets: res.sheets.map(sh => ({
       ...sh,
       placements: sh.placements.map(({ left, right, bottom, ...pl }) => ({
@@ -723,16 +734,13 @@ async function nestFromLeft(parts, sheetSizes, opts) {
   const remaining = prepared.map(p => (p.fill ? Infinity : Math.max(0, Math.round(p.qty || 0))));
   const placedCount = prepared.map(() => 0);
   const countedLeft = () => prepared.reduce((s, p) => s + (p.fill ? 0 : remaining[p.index]), 0);
-  const total = Math.max(1, countedLeft());
   const sheets = [];
   const margin = Math.max(0, opts.margin || 0);
   const cache = new Map();
 
-  for (const size of sheetSizes) {
-    const limit = size.count > 0 ? size.count : Infinity;
-    for (let used = 0; used < limit && sheets.length < 100; used++) {
-      if (opts.cancelled?.()) break;
-      if (!countedLeft() && (sheets.length || !prepared.some(p => p.fill))) break;
+  // One sheet: locked parts (kept from an earlier nest) stay put; returns
+  // the sheet's placements, or null when nothing new fits and none are locked.
+  const fillSheet = async (size, locked = []) => {
       const sheet = { minX: margin, minY: margin, maxX: size.w - margin, maxY: size.l - margin };
       const sheetArea = (sheet.maxX - sheet.minX) * (sheet.maxY - sheet.minY);
       const done = total - countedLeft();
@@ -740,33 +748,35 @@ async function nestFromLeft(parts, sheetSizes, opts) {
       // Counted parts first (by priority), fill parts last.
       const active = prepared.filter(p => remaining[p.index] > 0)
         .sort((a, b) => a.fill - b.fill || a.priority - b.priority || remaining[b.index] - remaining[a.index]);
+      const placedHere = () => placements.map(pl => ({ o: orient(prepared[pl.part], pl.angle, cache), x: pl.x, y: pl.y }));
 
       // Parts with many copies: an array block each, in strips left to right
       // (a strip starts one spacing — or pierce separation — past the last).
-      let placements = [];
-      let stripX = sheet.minX;
+      // With parts locked on the sheet, the array is fitted around them instead.
+      let placements = locked.map(pl => ({ ...pl, locked: true }));
       const gap = Math.max(opts.spacing || 0, opts.pierceSep || 0);
+      let stripX = locked.length ? Math.max(...placements.map(pl => pl.x + orient(prepared[pl.part], pl.angle, cache).tight.maxX)) + gap : sheet.minX;
       const strip = async p => {
-        if (stripX >= sheet.maxX) return;
-        const res = await arrayNest(p, { ...sheet, minX: stripX }, p.fill ? 0 : remaining[p.index], arrayOpts(sub, p.rotation || opts.rotation));
+        const qty = p.fill ? 0 : remaining[p.index];
+        const around = locked.length && placements.length <= OBSTACLES_MAX;
+        if (!around && stripX >= sheet.maxX) return;
+        const res = around
+          ? await arrayNest(p, sheet, qty, { ...arrayOpts(sub, p.rotation || opts.rotation), obstacles: placedHere() })
+          : await arrayNest(p, { ...sheet, minX: stripX }, qty, arrayOpts(sub, p.rotation || opts.rotation));
         if (!res.placements.length) return;
         placements = placements.concat(res.placements.map(({ part, angle, x, y }) => ({ part, angle, x, y })));
-        stripX = Math.max(...res.placements.map(pl => pl.right)) + gap;
+        stripX = Math.max(stripX, ...res.placements.map(pl => pl.right)) + gap;
       };
       // A few copies go in the mixed fill, packed into the corner.
       for (const p of active) if (!p.fill && remaining[p.index] >= 6) await strip(p);
-      const leftOf = p => remaining[p.index] - placements.filter(pl => pl.part === p.index).length;
+      const leftOf = p => remaining[p.index] - placements.filter(pl => pl.part === p.index && !pl.locked).length;
       const mixed = async rest => {
         if (!rest.length) return;
-        const pre = placements.map(pl => ({ o: orient(prepared[pl.part], pl.angle, cache), x: pl.x, y: pl.y }));
-        const res = await mixedNest(rest, sheet, sub, pre);
+        const res = await mixedNest(rest, sheet, sub, placedHere());
         placements = placements.concat(res.placements);
       };
       const counted = active.filter(p => !p.fill && leftOf(p) > 0);
       await mixed(counted.map(p => ({ ...p, qty: leftOf(p) })));
-      // Fill parts: an array strip to the right of everything placed, then
-      // single copies into the gaps that leaves (when other parts are on the
-      // sheet), until one won't fit — no sheet holds more than its area allows.
       // Fill parts: an array over the whole sheet with the copies that would
       // hit a placed part left out, then single copies into what gaps are
       // left (when other parts are on the sheet), until one won't fit — no
@@ -779,17 +789,38 @@ async function nestFromLeft(parts, sheetSizes, opts) {
           await strip(p);
           continue;
         }
-        const obstacles = placements.map(pl => ({ o: orient(prepared[pl.part], pl.angle, cache), x: pl.x, y: pl.y }));
-        const res = await arrayNest(p, sheet, 0, { ...arrayOpts(sub, p.rotation || opts.rotation), obstacles });
+        const res = await arrayNest(p, sheet, 0, { ...arrayOpts(sub, p.rotation || opts.rotation), obstacles: placedHere() });
         placements = placements.concat(res.placements.map(({ part, angle, x, y }) => ({ part, angle, x, y })));
       }
       const arrayed = new Set(placements.map(pl => pl.part));
       await mixed(fills.filter(p => shared || !arrayed.has(p.index)).map(p => ({ ...p, qty: Math.ceil(sheetArea / Math.max(p.area, 1)) + 1 })));
-      if (!placements.length) break; // nothing left fits this size — try the next
-      for (const pl of placements) { remaining[pl.part]--; placedCount[pl.part]++; }
+      if (!placements.length) return null; // nothing left fits this size — try the next
+      for (const pl of placements) if (!pl.locked) { remaining[pl.part]--; placedCount[pl.part]++; }
       const usedArea = placements.reduce((s, pl) => s + prepared[pl.part].area, 0);
-      sheets.push({ w: size.w, l: size.l, placements, utilization: usedArea / ((sheet.maxX - sheet.minX) * (sheet.maxY - sheet.minY)) });
+      sheets.push({ w: size.w, l: size.l, placements, utilization: usedArea / sheetArea });
       await new Promise(r => setTimeout(r, 0));
+      return placements;
+  };
+
+  // Sheets kept with locked parts: those parts count as placed already.
+  const fixed = (opts.fixedSheets || []).filter(sh => sh.placements?.length);
+  for (const sh of fixed) for (const pl of sh.placements) {
+    if (!prepared[pl.part]) continue;
+    if (!prepared[pl.part].fill) remaining[pl.part] = Math.max(0, remaining[pl.part] - 1);
+    placedCount[pl.part]++;
+  }
+  const total = Math.max(1, countedLeft());
+  for (const sh of fixed) {
+    if (opts.cancelled?.()) break;
+    await fillSheet(sh, sh.placements.filter(pl => prepared[pl.part]));
+  }
+
+  for (const size of sheetSizes) {
+    const limit = size.count > 0 ? size.count : Infinity;
+    for (let used = 0; used < limit && sheets.length < 100; used++) {
+      if (opts.cancelled?.()) break;
+      if (!countedLeft() && (sheets.length || !prepared.some(p => p.fill))) break;
+      if (!(await fillSheet(size))) break;
     }
   }
   opts.onProgress?.(1);
@@ -803,29 +834,32 @@ async function nestFromLeft(parts, sheetSizes, opts) {
 
 /**
  * Placements that break the nest's rules — for parts moved by hand. A part
- * is in conflict when its nesting shape (cut + half the spacing, lead-in
+ * is in conflict when its true footprint (cut + half the spacing, lead-in
  * and pierce clearance included) overlaps another's, or its cut comes
  * closer than `margin` to the sheet edge. parts: nestSheets' prepared parts;
- * sheet: { w, l }. opts: { only: check just that placement (a part being
- * dragged), skip: leave that one out }. Returns a Set of placement indexes.
+ * sheet: { w, l }. opts: { only: check just these placements (an index or
+ * a list — parts being dragged), skip: leave these out }. Returns a Set of
+ * placement indexes.
  */
 export function nestConflicts(parts, sheet, margin, placements, { only = null, skip = null } = {}) {
-  const use = i => i !== skip;
+  const asSet = v => (v == null ? null : new Set(typeof v === 'number' ? [v] : v));
+  const onlyS = asSet(only), skipS = asSet(skip);
+  const use = i => !skipS?.has(i);
   const items = placements.map(pl => {
     const p = parts[pl.part];
     const at = pts => rotatePts(pts, pl.angle).map(q => ({ x: q.x + pl.x, y: q.y + pl.y }));
-    const shape = at(p.shape);
+    const shape = at(p.exact);
     return { path: toInt(shape), box: bboxOf(shape), cut: bboxOf(at(p.cutShape)) };
   });
   const bad = new Set();
   const tol = 0.01;
   items.forEach((it, i) => {
-    if (!use(i) || (only != null && i !== only)) return;
+    if (!use(i) || (onlyS && !onlyS.has(i))) return;
     const c = it.cut;
     if (c.minX < margin - tol || c.minY < margin - tol || c.maxX > sheet.w - margin + tol || c.maxY > sheet.l - margin + tol) bad.add(i);
   });
   for (let i = 0; i < items.length; i++) for (let j = i + 1; j < items.length; j++) {
-    if (!use(i) || !use(j) || (only != null && i !== only && j !== only)) continue;
+    if (!use(i) || !use(j) || (onlyS && !onlyS.has(i) && !onlyS.has(j))) continue;
     const a = items[i].box, b = items[j].box;
     if (a.maxX <= b.minX || b.maxX <= a.minX || a.maxY <= b.minY || b.maxY <= a.minY) continue;
     const c = new ClipperLib.Clipper();
@@ -840,42 +874,64 @@ export function nestConflicts(parts, sheet, margin, placements, { only = null, s
 }
 
 /**
- * Slides placement i along (dx, dy) — a unit step on one axis — until it
- * touches another part or the edge margin (ProNest's "bump"). Returns the
- * moved placement, the same one if it's already touching that way, or null
- * when it starts out too close (nothing to slide from).
+ * How far the placements `ids` (one part or a group, moved together) can
+ * slide along (dx, dy) — a unit step on one axis — before one of them
+ * touches a part outside the group or the edge margin (ProNest's "bump").
+ * When they start out too close, it's how far to the first spot that way
+ * where they're clear instead. Returns { d (mm; 0 if already touching that
+ * way), cleared (true when it moved them clear) }, or null when no clear
+ * spot lies that way.
  */
-export function bumpPlacement(parts, sheet, margin, placements, i, dx, dy) {
-  const pl = placements[i];
-  const p = parts[pl.part];
-  const shape = rotatePts(p.shape, pl.angle);
-  const cut = bboxOf(rotatePts(p.cutShape, pl.angle));
+export function bumpDistance(parts, sheet, margin, placements, ids, dx, dy) {
+  const movers = new Set(typeof ids === 'number' ? [ids] : ids);
+  const world = (pts, pl) => rotatePts(pts, pl.angle).map(r => ({ x: r.x + pl.x, y: r.y + pl.y }));
+  const moving = [...movers].map(i => {
+    const pl = placements[i], part = parts[pl.part];
+    const shape = world(part.exact, pl);
+    return { shape, box: bboxOf(shape), cut: bboxOf(world(part.cutShape, pl)) };
+  });
   const others = placements.flatMap((q, j) => {
-    if (j === i) return [];
-    const pts = rotatePts(parts[q.part].shape, q.angle).map(r => ({ x: r.x + q.x, y: r.y + q.y }));
+    if (movers.has(j)) return [];
+    const pts = world(parts[q.part].exact, q);
     return [{ path: toInt(pts), box: bboxOf(pts) }];
   });
-  const box = bboxOf(shape);
   const hits = d => {
-    const x = pl.x + dx * d, y = pl.y + dy * d;
-    if (cut.minX + x < margin - 0.01 || cut.minY + y < margin - 0.01 || cut.maxX + x > sheet.w - margin + 0.01 || cut.maxY + y > sheet.l - margin + 0.01) return true;
-    let path = null;
-    for (const o of others) {
-      if (box.maxX + x <= o.box.minX || o.box.maxX <= box.minX + x || box.maxY + y <= o.box.minY || o.box.maxY <= box.minY + y) continue;
-      path = path || toInt(shape.map(q => ({ x: q.x + x, y: q.y + y })));
-      const c = new ClipperLib.Clipper();
-      c.AddPath(path, ClipperLib.PolyType.ptSubject, true);
-      c.AddPath(o.path, ClipperLib.PolyType.ptClip, true);
-      const out = new ClipperLib.Paths();
-      c.Execute(ClipperLib.ClipType.ctIntersection, out, ClipperLib.PolyFillType.pftNonZero, ClipperLib.PolyFillType.pftNonZero);
-      if (out.reduce((s, q) => s + Math.abs(ClipperLib.Clipper.Area(q)), 0) / (SCALE * SCALE) > 0.5) return true;
+    const x = dx * d, y = dy * d;
+    for (const m of moving) {
+      const { cut, box } = m;
+      if (cut.minX + x < margin - 0.01 || cut.minY + y < margin - 0.01 || cut.maxX + x > sheet.w - margin + 0.01 || cut.maxY + y > sheet.l - margin + 0.01) return true;
+      let path = null;
+      for (const o of others) {
+        if (box.maxX + x <= o.box.minX || o.box.maxX <= box.minX + x || box.maxY + y <= o.box.minY || o.box.maxY <= box.minY + y) continue;
+        path = path || toInt(m.shape.map(q => ({ x: q.x + x, y: q.y + y })));
+        const c = new ClipperLib.Clipper();
+        c.AddPath(path, ClipperLib.PolyType.ptSubject, true);
+        c.AddPath(o.path, ClipperLib.PolyType.ptClip, true);
+        const out = new ClipperLib.Paths();
+        c.Execute(ClipperLib.ClipType.ctIntersection, out, ClipperLib.PolyFillType.pftNonZero, ClipperLib.PolyFillType.pftNonZero);
+        if (out.reduce((t, q) => t + Math.abs(ClipperLib.Clipper.Area(q)), 0) / (SCALE * SCALE) > 0.5) return true;
+      }
     }
     return false;
   };
-  if (hits(0)) return null;
+  if (!moving.length) return null;
+  const room = Math.min(...moving.map(({ cut }) => (dx > 0 ? sheet.w - margin - cut.maxX : dx < 0 ? cut.minX - margin : dy > 0 ? sheet.l - margin - cut.maxY : cut.minY - margin)));
+  if (hits(0)) {
+    // Too close already: out to the first clear spot, in 1 mm steps, then
+    // halve the last step down to 0.01 mm.
+    let bad = 0, ok = null;
+    for (let d = 1; d < room + 1; d++) {
+      const t = Math.min(d, room);
+      if (!hits(t)) { ok = t; break; }
+      bad = t;
+      if (t >= room) break;
+    }
+    if (ok == null) return null;
+    while (ok - bad > 0.01) { const m = (ok + bad) / 2; if (hits(m)) bad = m; else ok = m; }
+    return { d: ok, cleared: true };
+  }
   // As far as the edge margin allows, in 2 mm steps (no shape is thinner
   // than that once grown), then halve the last step down to 0.01 mm.
-  const room = dx > 0 ? sheet.w - margin - (cut.maxX + pl.x) : dx < 0 ? cut.minX + pl.x - margin : dy > 0 ? sheet.l - margin - (cut.maxY + pl.y) : cut.minY + pl.y - margin;
   let ok = 0, bad = null;
   for (let d = Math.min(2, room); ok < room; d = Math.min(ok + 2, room)) {
     if (hits(d)) { bad = d; break; }
@@ -883,7 +939,7 @@ export function bumpPlacement(parts, sheet, margin, placements, i, dx, dy) {
     if (d >= room) break;
   }
   if (bad != null) while (bad - ok > 0.01) { const m = (ok + bad) / 2; if (hits(m)) bad = m; else ok = m; }
-  return { ...pl, x: pl.x + dx * ok, y: pl.y + dy * ok };
+  return { d: ok, cleared: false };
 }
 
 export const _test = { nfpPaths, makeRings, insideRings, intervalsOnLine, bestLattice, prepareParts, orient };

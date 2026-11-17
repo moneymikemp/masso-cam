@@ -5,7 +5,7 @@ import { parseSvg } from '../../svg/parser';
 import { translateEntity } from '../../cam/offsetEngine';
 import { nestPartsFromEntities, entityToProfile, generateToolpath } from '../../cam/toolpath';
 import { outsideLead } from '../../cam/plasmaToolpath';
-import { nestSheets, nestConflicts, bumpPlacement } from '../../plasma/nesting';
+import { nestSheets, nestConflicts, bumpDistance } from '../../plasma/nesting';
 import { placeEntity, placePoint } from '../../plasma/placement';
 import { loadPlasmaMaterials, findThickness, paramsFromThickness } from '../../plasma/plasmaMaterials';
 import { getDefaultParams } from '../../store/AppContext';
@@ -165,7 +165,7 @@ export default function PartListModal({ partList, entities, selectedEntityIds, a
   };
 
   // Sheets and spacing (mm), remembered between sessions.
-  const [sheets, setSheets] = useState(() => (prefs.sheets || [{ w: 96 * MM, l: 48 * MM, count: 0 }]).map(s => ({ w: toDisp(s.w), l: toDisp(s.l), count: s.count || '' })));
+  const [sheets, setSheets] = useState(() => (prefs.sheets || [{ w: 96 * MM, l: 48 * MM, count: 0 }]).map(s => ({ w: toDisp(s.w), l: toDisp(s.l), count: s.count || '', turn: !!s.turn })));
   const [margin, setMargin] = useState(toDisp(prefs.margin ?? 0.1 * MM));
   const [spacing, setSpacing] = useState(toDisp(prefs.spacing ?? 0.1 * MM));
   const [pierceSep, setPierceSep] = useState(toDisp(prefs.pierceSep ?? 0.1 * MM));
@@ -293,12 +293,16 @@ export default function PartListModal({ partList, entities, selectedEntityIds, a
     setMessage(`Refreshed ${changed} part${changed === 1 ? '' : 's'} from their files${missing ? ` — ${missing} not found` : ''}.`);
   }
 
-  async function nest() {
-    // Each sheet turned so its long side runs along the table's length (⚙ Machine).
+  // keepLocked: keep each sheet that has locked parts, those parts where they
+  // are, and nest the rest around them (then on to new sheets).
+  async function nest(keepLocked = false) {
+    // Each sheet turned so its long side runs along the table's length (⚙ Machine),
+    // or across it when its ↕/↔ toggle says so.
     const sizes = sheets.map(s => {
       const a = toMM(+s.w), b = toMM(+s.l);
-      const [w, l] = longAxis === 'x' ? [Math.max(a, b), Math.min(a, b)] : [Math.min(a, b), Math.max(a, b)];
-      return { w, l, count: Math.max(0, Math.round(+s.count || 0)) };
+      const alongX = (longAxis === 'x') !== !!s.turn;
+      const [w, l] = alongX ? [Math.max(a, b), Math.min(a, b)] : [Math.min(a, b), Math.max(a, b)];
+      return { w, l, count: Math.max(0, Math.round(+s.count || 0)), turn: !!s.turn };
     }).filter(s => s.w > 0 && s.l > 0);
     if (!sizes.length) { setMessage('Enter at least one sheet size.'); return; }
     const big = travelX > 0 && travelY > 0 && sizes.find(s => s.w > travelX + 0.5 || s.l > travelY + 0.5);
@@ -306,12 +310,21 @@ export default function PartListModal({ partList, entities, selectedEntityIds, a
     const mm = { margin: toMM(margin), spacing: toMM(spacing), pierceSep: toMM(pierceSep) };
     savePrefs({ ...prefs, sheets: sizes, ...mm, angleStep, pairs });
     const groups = new Map();
+    // Re-nesting keeps each material's parts in the same order (placements
+    // point at them by index), with the list's current quantities.
+    // A part since removed from the list, or moved to another material, keeps its
+    // place (and any locked copies) with a quantity of 0.
+    if (keepLocked) for (const gr of results || []) groups.set(gr.materialKey, gr.parts.map(p => {
+      const now = partList.find(x => x.id === p.id);
+      return now && now.materialKey === gr.materialKey ? now : { ...p, qty: 0, fill: false };
+    }));
     for (const p of partList) {
       if (!(p.fill || p.qty > 0) || !shapes.get(p.id) || !matName(p.materialKey)) continue;
       if (!groups.has(p.materialKey)) groups.set(p.materialKey, []);
-      groups.get(p.materialKey).push(p);
+      if (!groups.get(p.materialKey).some(x => x.id === p.id)) groups.get(p.materialKey).push(p);
     }
     if (!groups.size) { setMessage('Give the parts a quantity and a material first.'); return; }
+    const prev = keepLocked ? results || [] : [];
     cancelled.current = false;
     setTab('nest');
     setRunning(true);
@@ -325,11 +338,15 @@ export default function PartListModal({ partList, entities, selectedEntityIds, a
         const { material, thickness } = findThickness(lib, materialId, thicknessId);
         const cut = paramsFromThickness(thickness);
         const input = parts.map(p => {
-          const sh = shapes.get(p.id);
+          const sh = shapes.get(p.id) || partShape(p);
           return { outline: sh.outline, lead: outsideLead(sh.outline, cut), qty: p.fill ? 0 : Math.round(p.qty), fill: !!p.fill, priority: p.priority ?? 5, rotation: p.rotation || 'any' };
         });
         const gi = g;
+        const before = prev.find(gr => gr.materialKey === key);
+        const fixedSheets = (before?.res.sheets || []).filter(sh => sh.placements.some(pl => pl.locked))
+          .map(sh => ({ w: sh.w, l: sh.l, placements: sh.placements.filter(pl => pl.locked).map(({ part, angle, x, y }) => ({ part, angle, x, y })) }));
         const res = await nestSheets(input, sizes, {
+          fixedSheets,
           ...mm,
           kerf: cut.kerf,
           rotation: 'any',
@@ -431,20 +448,23 @@ export default function PartListModal({ partList, entities, selectedEntityIds, a
   }
 
   const current = allSheets[sheetIdx];
-  // Moving a part by hand: drag = { mode: 'move' | 'rotate', i, cx, cy, scale,
-  // orig, pl (live), base (the other parts' conflicts) } — committed to the
-  // results on release. Rotate also has a0, the pointer's start angle.
+  // Hand editing. sel: the selected placements (indexes on this sheet).
+  // drag = { mode: 'move' | 'rotate' | 'box', ids, orig: Map i → placement,
+  // live: Map i → placement (while moving), base: the other parts' conflicts,
+  // cx, cy, scale (move), pivot, a0 (rotate), p0, p1 (box, view coords) } —
+  // committed to the results on release.
   const [drag, setDrag] = useState(null);
-  const [sel, setSel] = useState(null);
-  useEffect(() => { setSel(null); setDrag(null); }, [sheetIdx, results?.length]);
+  const [sel, setSel] = useState([]);
+  const selSet = useMemo(() => new Set(sel), [sel]);
+  useEffect(() => { setSel([]); setDrag(null); }, [sheetIdx, results?.length]);
   const placements = useMemo(() => {
     if (!current) return [];
-    return drag ? current.sheet.placements.map((p, i) => (i === drag.i ? drag.pl : p)) : current.sheet.placements;
+    return drag?.live ? current.sheet.placements.map((p, i) => drag.live.get(i) || p) : current.sheet.placements;
   }, [current, drag]);
   const sheetConflicts = useMemo(() => (current ? nestConflicts(current.group.res.parts, current.sheet, current.group.margin, current.sheet.placements) : new Set()), [current]);
   const conflicts = useMemo(() => {
-    if (!drag || !current) return sheetConflicts;
-    const live = nestConflicts(current.group.res.parts, current.sheet, current.group.margin, placements, { only: drag.i });
+    if (!drag?.live || !current) return sheetConflicts;
+    const live = nestConflicts(current.group.res.parts, current.sheet, current.group.margin, placements, { only: drag.ids });
     return new Set([...drag.base, ...live]);
   }, [drag, current, placements, sheetConflicts]);
   const previewPaths = useMemo(() => {
@@ -460,31 +480,49 @@ export default function PartListModal({ partList, entities, selectedEntityIds, a
   }, [current, placements]);
 
   // Hand edits to the current sheet's group: its placements and its tray.
-  const BUMP_NOTE = 'That part is already too close to something (red) — move it clear first, then bump.';
+  const BUMP_NOTE = 'No clear spot that way before the sheet edge — try another direction, or drag it.';
+  const LOCK_NOTE = 'Locked parts stay put — press L (or 🔓 Unlock) to free them.';
+  const anyLocked = (results || []).some(gr => gr.res.sheets.some(sh => sh.placements.some(pl => pl.locked)));
   function editCurrent(fn) {
     const { gi, k } = current;
-    setMessage(m => (m === BUMP_NOTE ? '' : m)); // a stale bump warning goes once something moves
+    setMessage(m => (m === BUMP_NOTE || m === LOCK_NOTE ? '' : m)); // a stale warning goes once something moves
     setResults(rs => rs.map((gr, g) => {
       if (g !== gi) return gr;
       const { placements: next, tray } = fn(gr.res.sheets[k].placements, gr.tray || []);
       return { ...gr, tray, res: { ...gr.res, sheets: gr.res.sheets.map((sh, j) => (j !== k ? sh : { ...sh, placements: next })) } };
     }));
   }
-  const setPlacement = (i, pl) => editCurrent((ps, tray) => ({ placements: ps.map((p, n) => (n === i ? pl : p)), tray }));
-  function takeOff(i) {
-    editCurrent((ps, tray) => ({ placements: ps.filter((_, n) => n !== i), tray: [...tray, { part: ps[i].part, angle: ps[i].angle }] }));
-    setSel(null);
+  /** changed: Map index → new placement. */
+  const setPlacements = changed => editCurrent((ps, tray) => ({ placements: ps.map((p, n) => changed.get(n) || p), tray }));
+  // Locked parts don't move: the tools work on the rest of the selection.
+  const free = ids => {
+    const f = ids.filter(i => !current.sheet.placements[i]?.locked);
+    if (!f.length && ids.length) setMessage(LOCK_NOTE);
+    return f;
+  };
+  function toggleLock(ids) {
+    const ps = current.sheet.placements;
+    const lock = !ids.every(i => ps[i]?.locked);
+    setPlacements(new Map(ids.map(i => [i, { ...ps[i], locked: lock }])));
+  }
+  function takeOff(all) {
+    const ids = free(all);
+    if (!ids.length) return;
+    const out = new Set(ids);
+    editCurrent((ps, tray) => ({ placements: ps.filter((_, n) => !out.has(n)), tray: [...tray, ...ps.filter((_, n) => out.has(n)).map(p => ({ part: p.part, angle: p.angle }))] }));
+    setSel([]);
   }
   function placeFromTray(part, angle, x, y) {
     const n = current.sheet.placements.length;
     editCurrent((ps, tray) => {
       const t = [...tray];
-      t.splice(t.findIndex(e => e.part === part), 1);
+      const w = t.findIndex(e => e.part === part);
+      if (w >= 0) t.splice(w, 1); // none waiting: an extra copy
       return { placements: [...ps, { part, angle, x, y }], tray: t };
     });
-    setSel(n);
+    setSel([n]);
   }
-  // A part's box on the sheet (sheet coordinates, y up).
+  // A part's box on the sheet (sheet coordinates, y up), and a group's.
   const partBox = pl => {
     const local = current.group.res.parts[pl.part].local;
     const c = Math.cos(pl.angle), sn = Math.sin(pl.angle);
@@ -495,61 +533,88 @@ export default function PartListModal({ partList, entities, selectedEntityIds, a
     }
     return { minX, minY, maxX, maxY };
   };
+  const groupBox = (ids, pls) => ids.map(i => partBox(pls[i])).reduce((a, b) => ({
+    minX: Math.min(a.minX, b.minX), minY: Math.min(a.minY, b.minY), maxX: Math.max(a.maxX, b.maxX), maxY: Math.max(a.maxY, b.maxY),
+  }));
+
+  const TAU = 2 * Math.PI;
+  const norm = a => ((a % TAU) + TAU) % TAU;
+  // A placement turned by da about a point (the part turns with it).
+  const turnAbout = (pl, pv, da) => {
+    const c = Math.cos(da), sn = Math.sin(da), x = pl.x - pv.x, y = pl.y - pv.y;
+    return { ...pl, x: pv.x + x * c - y * sn, y: pv.y + x * sn + y * c, angle: norm(pl.angle + da) };
+  };
+  const pivotOf = ids => { const b = groupBox(ids, current.sheet.placements); return { x: (b.minX + b.maxX) / 2, y: (b.minY + b.maxY) / 2 }; };
+  const startState = ids => ({
+    ids,
+    orig: new Map(ids.map(i => [i, current.sheet.placements[i]])),
+    base: nestConflicts(current.group.res.parts, current.sheet, current.group.margin, current.sheet.placements, { skip: ids }),
+  });
+
+  // Click a part: select it (Shift/Ctrl+click adds or drops it); drag moves the selection.
   function startDrag(e, i) {
     if (e.button !== 0) return;
     e.stopPropagation();
+    if (e.shiftKey || e.ctrlKey) { setSel(s => (s.includes(i) ? s.filter(n => n !== i) : [...s, i])); return; }
+    const picked = selSet.has(i) ? sel : [i];
+    setSel(picked);
+    const ids = free(picked);
+    if (!ids.length) return;
     svgRef.current.setPointerCapture(e.pointerId);
-    setSel(i);
-    const orig = current.sheet.placements[i];
-    const base = nestConflicts(current.group.res.parts, current.sheet, current.group.margin, current.sheet.placements, { skip: i });
-    setDrag({ mode: 'move', i, cx: e.clientX, cy: e.clientY, scale: svgRef.current.getScreenCTM().a, orig, pl: orig, base });
+    setDrag({ mode: 'move', ...startState(ids), cx: e.clientX, cy: e.clientY, scale: svgRef.current.getScreenCTM().a });
   }
-
-  // The selected part's tools: 90° turns, free rotate, bump, nudge.
-  const TAU = 2 * Math.PI;
-  const norm = a => ((a % TAU) + TAU) % TAU;
-  const selName = sel != null && placements[sel] ? current.group.parts[placements[sel].part].name : '';
-  function turn(i, dir) {
-    const pl = current.sheet.placements[i];
-    setPlacement(i, { ...pl, angle: norm(pl.angle + (dir * Math.PI) / 2) });
+  function turn(all, dir) {
+    const ids = free(all);
+    if (!ids.length) return;
+    const pv = pivotOf(ids);
+    setPlacements(new Map(ids.map(i => [i, turnAbout(current.sheet.placements[i], pv, (dir * Math.PI) / 2)])));
   }
-  function nudge(i, dx, dy, step) {
-    const pl = current.sheet.placements[i];
-    setPlacement(i, { ...pl, x: pl.x + dx * step, y: pl.y + dy * step });
+  function nudge(all, dx, dy, step) {
+    const ids = free(all);
+    if (!ids.length) return;
+    setPlacements(new Map(ids.map(i => { const pl = current.sheet.placements[i]; return [i, { ...pl, x: pl.x + dx * step, y: pl.y + dy * step }]; })));
   }
-  function bump(i, dx, dy) {
+  function bump(all, dx, dy) {
+    const ids = free(all);
+    if (!ids.length) return;
     const { group, sheet } = current;
-    const next = bumpPlacement(group.res.parts, sheet, group.margin, sheet.placements, i, dx, dy);
-    if (!next) { setMessage(BUMP_NOTE); return; }
-    setPlacement(i, next);
+    // Red: out to the first clear spot that way; clear: on until it touches.
+    const r = bumpDistance(group.res.parts, sheet, group.margin, sheet.placements, ids, dx, dy);
+    if (!r) { setMessage(BUMP_NOTE); return; }
+    nudge(ids, dx, dy, r.d);
   }
-  // Pointer angle about the part's centre, in sheet terms (y up).
-  const pointerAngle = (e, pl) => {
+  // Pointer angle about a point, in sheet terms (y up).
+  const pointerAngle = (e, pv) => {
     const pt = toSvg(e.clientX, e.clientY);
-    return pt ? Math.atan2(current.sheet.l - pt.y - pl.y, pt.x - pl.x) : 0;
+    return pt ? Math.atan2(current.sheet.l - pt.y - pv.y, pt.x - pv.x) : 0;
   };
-  function startRotate(e, i) {
+  function startRotate(e, all) {
     if (e.button !== 0) return;
     e.stopPropagation();
+    const ids = free(all);
+    if (!ids.length) return;
     svgRef.current.setPointerCapture(e.pointerId);
-    const orig = current.sheet.placements[i];
-    const base = nestConflicts(current.group.res.parts, current.sheet, current.group.margin, current.sheet.placements, { skip: i });
-    setDrag({ mode: 'rotate', i, orig, pl: orig, base, a0: pointerAngle(e, orig) });
+    const pivot = pivotOf(ids);
+    setDrag({ mode: 'rotate', ...startState(ids), pivot, a0: pointerAngle(e, pivot) });
   }
-  // Keys for the selected part: R / Shift+R turn, arrows nudge (Shift ×10), Ctrl+arrow bumps, Esc lets go.
+  // Keys for the selection: R / Shift+R turn, arrows nudge (Shift ×10), Ctrl+arrow bumps,
+  // L locks / unlocks, Delete takes off the sheet, Ctrl+A selects all, Esc lets go.
   useEffect(() => {
-    if (tab !== 'nest' || sel == null || !current) return undefined;
+    if (tab !== 'nest' || !current) return undefined;
     const onKey = e => {
       if (/^(INPUT|SELECT|TEXTAREA)$/.test(e.target.tagName)) return;
+      if (e.ctrlKey && (e.key === 'a' || e.key === 'A')) { e.preventDefault(); setSel(current.sheet.placements.map((_, i) => i)); return; }
+      if (!sel.length) return;
       const dirs = { ArrowLeft: [-1, 0], ArrowRight: [1, 0], ArrowUp: [0, 1], ArrowDown: [0, -1] };
       if (e.key === 'r' || e.key === 'R') { e.preventDefault(); turn(sel, e.shiftKey ? -1 : 1); }
+      else if (e.key === 'l' || e.key === 'L') { e.preventDefault(); toggleLock(sel); }
       else if (dirs[e.key]) {
         e.preventDefault();
         const [dx, dy] = dirs[e.key];
         if (e.ctrlKey) bump(sel, dx, dy);
         else nudge(sel, dx, dy, (isInch ? 0.01 * MM : 0.25) * (e.shiftKey ? 10 : 1));
       } else if (e.key === 'Delete' || e.key === 'Backspace') { e.preventDefault(); takeOff(sel); }
-      else if (e.key === 'Escape') { e.preventDefault(); e.stopPropagation(); setSel(null); }
+      else if (e.key === 'Escape') { e.preventDefault(); e.stopPropagation(); setSel([]); }
     };
     window.addEventListener('keydown', onKey);
     return () => window.removeEventListener('keydown', onKey);
@@ -582,8 +647,8 @@ export default function PartListModal({ partList, entities, selectedEntityIds, a
   function showRed() {
     const list = [...conflicts].sort((a, b) => a - b);
     if (!list.length) return;
-    const next = list.find(i => sel == null || i > sel) ?? list[0];
-    setSel(next);
+    const next = list.find(i => !sel.length || i > sel[0]) ?? list[0];
+    setSel([next]);
     const b = partBox(current.sheet.placements[next]);
     setView(v => {
       const box = v || fitBox;
@@ -639,23 +704,38 @@ export default function PartListModal({ partList, entities, selectedEntityIds, a
     return () => el.removeEventListener('wheel', onWheel);
   });
   function startPan(e) {
-    if (e.button !== 0 && e.button !== 1) return;
-    if (e.button === 0) setSel(null);
+    if (e.button === 0) {
+      // Empty sheet: a selection box (Shift keeps what's already selected).
+      const pt = toSvg(e.clientX, e.clientY);
+      if (!pt) return;
+      e.currentTarget.setPointerCapture(e.pointerId);
+      setDrag({ mode: 'box', p0: pt, p1: pt, keep: e.shiftKey ? sel : [] });
+      return;
+    }
+    if (e.button !== 1 && e.button !== 2) return;
+    e.preventDefault();
     e.currentTarget.setPointerCapture(e.pointerId);
     setPan({ cx: e.clientX, cy: e.clientY, b: vb, scale: svgRef.current.getScreenCTM().a });
   }
   function movePan(e) {
-    if (drag?.mode === 'rotate') {
-      // 1° steps, 15° with Shift.
-      const step = ((e.shiftKey ? 15 : 1) * Math.PI) / 180;
-      const a = norm(Math.round((drag.orig.angle + pointerAngle(e, drag.orig) - drag.a0) / step) * step);
-      setDrag(d => ({ ...d, pl: { ...d.orig, angle: a } }));
+    if (drag?.mode === 'box') {
+      const pt = toSvg(e.clientX, e.clientY);
+      if (pt) setDrag(d => ({ ...d, p1: pt }));
       return;
     }
-    if (drag) {
+    if (drag?.mode === 'rotate') {
+      // One part: its angle in 1° steps (15° with Shift); a group: the turn in those steps.
+      const step = ((e.shiftKey ? 15 : 1) * Math.PI) / 180;
+      const raw = pointerAngle(e, drag.pivot) - drag.a0;
+      const one = drag.ids.length === 1 ? drag.orig.get(drag.ids[0]) : null;
+      const da = one ? Math.round((one.angle + raw) / step) * step - one.angle : Math.round(raw / step) * step;
+      setDrag(d => ({ ...d, da, live: new Map(d.ids.map(i => [i, turnAbout(d.orig.get(i), d.pivot, da)])) }));
+      return;
+    }
+    if (drag?.mode === 'move') {
       // Screen y runs down, the sheet's y up.
       const dx = (e.clientX - drag.cx) / drag.scale, dy = (e.clientY - drag.cy) / drag.scale;
-      setDrag(d => ({ ...d, pl: { ...d.orig, x: d.orig.x + dx, y: d.orig.y - dy } }));
+      setDrag(d => ({ ...d, live: new Map(d.ids.map(i => { const o = d.orig.get(i); return [i, { ...o, x: o.x + dx, y: o.y - dy }]; })) }));
       return;
     }
     if (!pan) return;
@@ -663,8 +743,22 @@ export default function PartListModal({ partList, entities, selectedEntityIds, a
     setView({ ...pan.b, x: pan.b.x - dx, y: pan.b.y - dy });
   }
   const endPan = () => {
-    if (drag) {
-      if (drag.pl.x !== drag.orig.x || drag.pl.y !== drag.orig.y || drag.pl.angle !== drag.orig.angle) setPlacement(drag.i, drag.pl);
+    if (drag?.mode === 'box') {
+      const { p0, p1 } = drag;
+      const x0 = Math.min(p0.x, p1.x), x1 = Math.max(p0.x, p1.x), t = Math.min(p0.y, p1.y), b = Math.max(p0.y, p1.y);
+      const L = current.sheet.l;
+      // Left to right: parts wholly inside; right to left: any part it touches.
+      const crossing = p1.x < p0.x;
+      const picked = (x1 - x0) * (b - t) > 0 ? current.sheet.placements.flatMap((pl, i) => {
+        const q = partBox(pl);
+        const top = L - q.maxY, bot = L - q.minY;
+        const hit = crossing ? q.maxX >= x0 && q.minX <= x1 && bot >= t && top <= b : q.minX >= x0 && q.maxX <= x1 && top >= t && bot <= b;
+        return hit ? [i] : [];
+      }) : [];
+      setSel([...new Set([...drag.keep, ...picked])]);
+      setDrag(null);
+    } else if (drag) {
+      if (drag.live) setPlacements(drag.live);
       setDrag(null);
     }
     setPan(null);
@@ -750,7 +844,7 @@ export default function PartListModal({ partList, entities, selectedEntityIds, a
                         <option value="none">None</option>
                       </select>
                     </td>
-                    <td style={{ ...S.td, color: placed == null ? '#555577' : !p.fill && placed < p.qty ? '#cc8866' : '#55dd77' }}>{placed == null ? '–' : `${placed}`}</td>
+                    <td style={{ ...S.td, color: placed == null ? '#555577' : !p.fill && placed < p.qty ? '#cc8866' : '#55dd77' }}>{placed == null ? '–' : p.fill ? `${placed} (fill)` : `${placed} of ${p.qty}`}</td>
                     <td style={S.td}><button style={{ ...S.link, color:'#cc6666' }} onClick={() => setList(partList.filter(x => x.id !== p.id))} title="Remove part">✕</button></td>
                   </tr>
                 );
@@ -763,7 +857,7 @@ export default function PartListModal({ partList, entities, selectedEntityIds, a
 
         {tab === 'nest' && <div style={S.lower}>
           <div style={S.side}>
-            <div style={S.section}>Sheets <span style={{ fontWeight:400, textTransform:'none', color:'#666688' }}>(used in order; count blank = as many as needed; long side along {longAxis === 'x' ? 'X' : 'Y'}, set in ⚙ Machine)</span></div>
+            <div style={S.section}>Sheets <span style={{ fontWeight:400, textTransform:'none', color:'#666688' }}>(used in order; count blank = as many as needed; long side along {longAxis === 'x' ? 'X' : 'Y'} as ⚙ Machine — ↕/↔ turns a sheet)</span></div>
             {sheets.map((s, i) => (
               <div key={i} style={{ display:'flex', gap:6, alignItems:'center', marginBottom:4 }}>
                 <input style={{ ...S.input, width:70 }} type="number" min={0} value={s.w} onChange={e => setSheets(ss => ss.map((x, j) => (j === i ? { ...x, w: e.target.value } : x)))} title={`Width X (${unit})`} />
@@ -771,6 +865,14 @@ export default function PartListModal({ partList, entities, selectedEntityIds, a
                 <input style={{ ...S.input, width:70 }} type="number" min={0} value={s.l} onChange={e => setSheets(ss => ss.map((x, j) => (j === i ? { ...x, l: e.target.value } : x)))} title={`Length Y (${unit})`} />
                 <span style={{ fontSize:11, color:'#8888aa' }}>{unit}</span>
                 <input style={{ ...S.input, width:56 }} type="number" min={0} placeholder="∞" value={s.count} onChange={e => setSheets(ss => ss.map((x, j) => (j === i ? { ...x, count: e.target.value } : x)))} title="How many of this size (blank = as many as needed)" />
+                {(() => {
+                  const alongX = (longAxis === 'x') !== !!s.turn;
+                  return (
+                    <button style={{ ...S.btn, ...S.secondary, padding:'2px 8px', fontSize:13, ...(s.turn ? { color:'#ffbb66', borderColor:'#aa6a2a' } : {}) }}
+                      onClick={() => setSheets(ss => ss.map((x, j) => (j === i ? { ...x, turn: !x.turn } : x)))}
+                      title={`Long side along ${alongX ? 'X' : 'Y'}${s.turn ? ' (turned from ⚙ Machine)' : ' (as ⚙ Machine)'} — click to turn this sheet 90°`}>{alongX ? '↔' : '↕'}</button>
+                  );
+                })()}
                 {sheets.length > 1 && <button style={{ ...S.link, color:'#cc6666' }} onClick={() => setSheets(ss => ss.filter((x, j) => j !== i))}>✕</button>}
               </div>
             ))}
@@ -799,20 +901,29 @@ export default function PartListModal({ partList, entities, selectedEntityIds, a
             </div>
             {current && (() => {
               const tray = current.group.tray || [];
-              const rows = [...tray.reduce((m, t) => m.set(t.part, (m.get(t.part) || 0) + 1), new Map())];
+              const waiting = tray.reduce((m, t) => m.set(t.part, (m.get(t.part) || 0) + 1), new Map());
               const elsewhere = unplacedTotal - tray.length;
               return <>
-                <div style={S.section}>Not on a sheet ({tray.length}) <span style={{ fontWeight:400, textTransform:'none', color:'#666688' }}>— drag onto the sheet</span></div>
-                {rows.map(([part, n]) => (
-                  <div key={part} style={S.trayRow} title="Drag onto the sheet"
-                    onPointerDown={e => { if (e.button !== 0) return; e.preventDefault(); setSel(null); setTrayDrag({ part, angle: 0, pt: null }); }}>
-                    <Thumb part={current.group.parts[part]} />
-                    <span style={{ flex:1, fontSize:12, overflow:'hidden', textOverflow:'ellipsis', whiteSpace:'nowrap' }}>{current.group.parts[part].name}</span>
-                    <span style={{ fontSize:12, color:'#ffbb66' }}>×{n}</span>
-                  </div>
-                ))}
-                {!tray.length && <div style={{ fontSize:11, color:'#666688' }}>Everything is on a sheet. A part taken off one (✕ or Delete) waits here — drag it onto any {current.group.materialName} sheet.</div>}
-                {elsewhere > 0 && <div style={{ ...S.warn, marginTop:6 }}>⚠ {elsewhere} more in other materials — open one of their sheets.</div>}
+                <div style={S.section}>Parts — {current.group.materialName} <span style={{ fontWeight:400, textTransform:'none', color:'#666688' }}>· drag onto the sheet</span></div>
+                {current.group.parts.map((p, part) => {
+                  const placed = placedById.get(p.id) || 0;
+                  const wait = waiting.get(part) || 0;
+                  const done = p.fill || placed >= p.qty;
+                  return (
+                    <div key={part} style={{ ...S.trayRow, borderColor: wait ? '#aa6a2a' : '#2a2a50' }}
+                      title={wait ? `${wait} not on a sheet — drag onto the sheet` : 'All on sheets — drag to place an extra copy'}
+                      onPointerDown={e => { if (e.button !== 0) return; e.preventDefault(); setSel([]); setTrayDrag({ part, angle: 0, pt: null }); }}>
+                      <Thumb part={p} />
+                      <div style={{ flex:1, minWidth:0 }}>
+                        <div style={{ fontSize:12, overflow:'hidden', textOverflow:'ellipsis', whiteSpace:'nowrap' }}>{p.name}</div>
+                        <div style={{ fontSize:11, color: done && !wait ? '#55dd77' : '#ffbb66' }}>
+                          {p.fill ? `${placed} nested (fill)` : `${placed} of ${p.qty} nested`}{wait ? ` · ${wait} not on a sheet` : ''}
+                        </div>
+                      </div>
+                    </div>
+                  );
+                })}
+                {elsewhere > 0 && <div style={{ ...S.warn, marginTop:6 }}>⚠ {elsewhere} part{elsewhere === 1 ? '' : 's'} of another material not on a sheet — open one of its sheets.</div>}
               </>;
             })()}
           </div>
@@ -827,15 +938,22 @@ export default function PartListModal({ partList, entities, selectedEntityIds, a
             </div>
             <div style={{ flex:1, minHeight:0 }}>
               {current ? (
-                <svg ref={svgRef} viewBox={`${vb.x} ${vb.y} ${vb.w} ${vb.h}`} style={{ width:'100%', height:'100%', display:'block', cursor: pan ? 'grabbing' : 'grab', touchAction:'none' }}
-                  onPointerDown={startPan} onPointerMove={movePan} onPointerUp={endPan} onPointerCancel={endPan} onDoubleClick={e => { if (e.target.tagName !== 'path') setView(null); }}>
+                <svg ref={svgRef} viewBox={`${vb.x} ${vb.y} ${vb.w} ${vb.h}`} style={{ width:'100%', height:'100%', display:'block', cursor: pan ? 'grabbing' : 'crosshair', touchAction:'none' }}
+                  onPointerDown={startPan} onPointerMove={movePan} onPointerUp={endPan} onPointerCancel={endPan} onContextMenu={e => e.preventDefault()} onDoubleClick={e => { if (e.target.tagName !== 'path') setView(null); }}>
                   <rect x={0} y={0} width={current.sheet.w} height={current.sheet.l} fill="#1c1c30" stroke="#666699" strokeWidth={1.5} vectorEffect="non-scaling-stroke" />
                   {previewPaths.map((p, i) => {
-                    const bad = conflicts.has(i);
-                    return <path key={i} d={p.outline} fill={bad ? 'rgba(230,70,70,0.45)' : 'rgba(80,200,110,0.35)'} stroke={i === sel ? '#ffffff' : bad ? '#ff6666' : '#55dd77'}
-                      strokeWidth={i === sel ? 2 : 1} vectorEffect="non-scaling-stroke" style={{ cursor: drag?.i === i ? 'grabbing' : 'move' }} onPointerDown={e => startDrag(e, i)} />;
+                    const bad = conflicts.has(i), locked = placements[i]?.locked;
+                    return <path key={i} d={p.outline} fill={bad ? 'rgba(230,70,70,0.45)' : locked ? 'rgba(90,140,230,0.35)' : 'rgba(80,200,110,0.35)'} stroke={selSet.has(i) ? '#ffffff' : bad ? '#ff6666' : locked ? '#88aaff' : '#55dd77'}
+                      strokeWidth={selSet.has(i) ? 2 : 1} vectorEffect="non-scaling-stroke" style={{ cursor: drag?.mode === 'move' && selSet.has(i) ? 'grabbing' : 'move' }} onPointerDown={e => startDrag(e, i)} />;
                   })}
                   {previewPaths.map((p, i) => p.lead && <path key={`l${i}`} d={p.lead} fill="none" stroke="#ffaa44" strokeWidth={1.5} vectorEffect="non-scaling-stroke" pointerEvents="none" />)}
+                  {placements.map((pl, i) => {
+                    if (!pl.locked) return null;
+                    const b = partBox(pl);
+                    const el = svgRef.current;
+                    const upp = el?.clientWidth ? 1 / Math.min(el.clientWidth / vb.w, el.clientHeight / vb.h) : vb.w / 800;
+                    return <text key={`k${i}`} x={(b.minX + b.maxX) / 2} y={current.sheet.l - (b.minY + b.maxY) / 2} textAnchor="middle" dominantBaseline="central" fontSize={14 * upp} pointerEvents="none">🔒</text>;
+                  })}
                   {trayDrag?.pt && (() => {
                     const ghost = { part: trayDrag.part, angle: trayDrag.angle, x: trayDrag.pt.x, y: trayDrag.pt.y };
                     const frame = current.group.res.parts[ghost.part];
@@ -845,13 +963,10 @@ export default function PartListModal({ partList, entities, selectedEntityIds, a
                     const d = frame.local.map((q, i) => `${i ? 'L' : 'M'}${(q.x * c - q.y * sn + ghost.x).toFixed(2)},${(current.sheet.l - (q.x * sn + q.y * c + ghost.y)).toFixed(2)}`).join('') + 'Z';
                     return <path d={d} fill={bad ? 'rgba(230,70,70,0.45)' : 'rgba(80,200,110,0.5)'} stroke="#ffffff" strokeDasharray="4 3" strokeWidth={1} vectorEffect="non-scaling-stroke" pointerEvents="none" />;
                   })()}
-                  {sel != null && placements[sel] && (() => {
-                    const pl = placements[sel];
-                    const frame = current.group.res.parts[pl.part];
-                    const c = Math.cos(pl.angle), sn = Math.sin(pl.angle);
-                    const xs = frame.local.map(q => q.x * c - q.y * sn + pl.x), ys = frame.local.map(q => q.x * sn + q.y * c + pl.y);
+                  {sel.length > 0 && sel.every(i => placements[i]) && (() => {
+                    const g = groupBox(sel, placements);
                     const L = current.sheet.l;
-                    const x0 = Math.min(...xs), x1 = Math.max(...xs), top = L - Math.max(...ys), bot = L - Math.min(...ys);
+                    const x0 = g.minX, x1 = g.maxX, top = L - g.maxY, bot = L - g.minY;
                     const el = svgRef.current;
                     const upp = el?.clientWidth ? 1 / Math.min(el.clientWidth / vb.w, el.clientHeight / vb.h) : vb.w / 800; // mm per screen pixel
                     const off = 14 * upp, r = 9 * upp, mx = (x0 + x1) / 2, my = (top + bot) / 2;
@@ -863,24 +978,32 @@ export default function PartListModal({ partList, entities, selectedEntityIds, a
                       </g>
                     );
                     const click = fn => e => { if (e.button !== 0) return; e.stopPropagation(); fn(); };
+                    const it = sel.length === 1 ? 'it' : 'them';
                     return (
                       <g>
                         <rect x={x0} y={top} width={x1 - x0} height={bot - top} fill="none" stroke="#ffffff" strokeDasharray="4 3" strokeWidth={1} vectorEffect="non-scaling-stroke" pointerEvents="none" />
                         {handle('tl', x0 - off, top - off, '⟲', 'Turn 90° left (R)', click(() => turn(sel, 1)))}
                         {handle('tr', x1 + off, top - off, '⟳', 'Turn 90° right (Shift+R)', click(() => turn(sel, -1)))}
                         {handle('bl', x0 - off, bot + off, '↻', 'Hold and drag to rotate (1° steps, Shift = 15°)', e => startRotate(e, sel))}
-                        {handle('u', mx, top - off, '▲', 'Bump up until it touches (Ctrl+↑)', click(() => bump(sel, 0, 1)))}
-                        {handle('d', mx, bot + off, '▼', 'Bump down until it touches (Ctrl+↓)', click(() => bump(sel, 0, -1)))}
-                        {handle('l', x0 - off, my, '◀', 'Bump left until it touches (Ctrl+←)', click(() => bump(sel, -1, 0)))}
-                        {handle('r', x1 + off, my, '▶', 'Bump right until it touches (Ctrl+→)', click(() => bump(sel, 1, 0)))}
-                        {handle('x', x1 + off, bot + off, '✕', 'Take it off the sheet (Delete) — it waits in Not on a sheet', click(() => takeOff(sel)))}
+                        {handle('u', mx, top - off, '▲', `Bump up until ${it} touch${sel.length === 1 ? 'es' : ''} — if red, up until clear (Ctrl+↑)`, click(() => bump(sel, 0, 1)))}
+                        {handle('d', mx, bot + off, '▼', 'Bump down (Ctrl+↓)', click(() => bump(sel, 0, -1)))}
+                        {handle('l', x0 - off, my, '◀', 'Bump left (Ctrl+←)', click(() => bump(sel, -1, 0)))}
+                        {handle('r', x1 + off, my, '▶', 'Bump right (Ctrl+→)', click(() => bump(sel, 1, 0)))}
+                        {handle('x', x1 + off, bot + off, '✕', `Take ${it} off the sheet (Delete) — wait${sel.length === 1 ? 's' : ''} in Not on a sheet`, click(() => takeOff(sel)))}
                         {drag?.mode === 'rotate' && (
                           <text x={mx} y={my} textAnchor="middle" dominantBaseline="central" fontSize={16 * upp} fill="#ffffff" stroke="#000000" strokeWidth={3 * upp} paintOrder="stroke" pointerEvents="none">
-                            {((pl.angle * 180) / Math.PI).toFixed(0)}°
+                            {sel.length === 1 ? `${((placements[sel[0]].angle * 180) / Math.PI).toFixed(0)}°` : `${(((drag.da || 0) * 180) / Math.PI).toFixed(0)}° turn`}
                           </text>
                         )}
                       </g>
                     );
+                  })()}
+                  {drag?.mode === 'box' && (() => {
+                    const { p0, p1 } = drag;
+                    const crossing = p1.x < p0.x;
+                    return <rect x={Math.min(p0.x, p1.x)} y={Math.min(p0.y, p1.y)} width={Math.abs(p1.x - p0.x)} height={Math.abs(p1.y - p0.y)}
+                      fill={crossing ? 'rgba(120,200,120,0.12)' : 'rgba(120,160,255,0.12)'} stroke={crossing ? '#88dd88' : '#88aaff'} strokeDasharray={crossing ? '4 3' : undefined}
+                      strokeWidth={1} vectorEffect="non-scaling-stroke" pointerEvents="none" />;
                   })()}
                 </svg>
               ) : (
@@ -891,10 +1014,16 @@ export default function PartListModal({ partList, entities, selectedEntityIds, a
               <div style={{ fontSize:11, color:'#aaaacc', marginTop:6 }}>
                 Sheet {sheetIdx + 1} of {allSheets.length}: {fmt(current.sheet.w)} × {fmt(current.sheet.l)} · {placements.length} parts · {(usedPct * 100).toFixed(1)}% used
                 {conflicts.size > 0 && <span style={{ color:'#ff7777', cursor:'pointer', textDecoration:'underline' }} onClick={showRed} title="Show the next red part"> · ⚠ {conflicts.size} too close (red){extent?.off ? `, ${extent.off} off the sheet` : ''}</span>}
-                {selName && <span style={{ color:'#ffffff' }}> · {selName} at {((placements[sel].angle * 180) / Math.PI).toFixed(1)}° — R turns, arrows nudge, Ctrl+arrow bumps</span>}
+                {sel.length === 1 && placements[sel[0]] && <span style={{ color:'#ffffff' }}> · {current.group.parts[placements[sel[0]].part].name} at {((placements[sel[0]].angle * 180) / Math.PI).toFixed(1)}° — R turns, arrows nudge, Ctrl+arrow bumps</span>}
+                {sel.length > 1 && <span style={{ color:'#ffffff' }}> · {sel.length} parts selected — they move, turn and bump together</span>}
+                {sel.length > 0 && (
+                  <> · <button style={{ ...S.link, color:'#aaccff' }} onClick={() => toggleLock(sel)} title="Locked parts stay put, and Re-nest Unlocked nests around them (L)">
+                    {sel.every(i => placements[i]?.locked) ? '🔓 Unlock' : '🔒 Lock'}</button></>
+                )}
+                {placements.some(pl => pl.locked) && <span style={{ color:'#aaccff' }}> · 🔒 {placements.filter(pl => pl.locked).length} locked</span>}
                 {running && <> · Nesting… {Math.round(progress * 100)}%</>}
                 <span style={{ float:'right', color:'#666688' }}>
-                  click a part to select it, drag to move · wheel = zoom · drag the sheet = pan · {Math.round(zoom * 100)}%{' '}
+                  click a part (Shift+click adds), drag to move, L locks · drag on the sheet = select box · right-drag = pan · wheel = zoom · {Math.round(zoom * 100)}%{' '}
                   <button style={S.link} onClick={() => setView(null)} title="Whole sheet (or double-click)">Fit</button>
                 </span>
               </div>
@@ -904,7 +1033,12 @@ export default function PartListModal({ partList, entities, selectedEntityIds, a
 
         <div style={{ display:'flex', justifyContent:'flex-end', gap:8, marginTop:12 }}>
           <button style={{ ...S.btn, ...S.secondary }} onClick={() => { cancelled.current = closed.current = true; onClose(); }}>Close</button>
-          <button style={{ ...S.btn, ...S.secondary }} onClick={running ? () => { cancelled.current = true; } : nest} disabled={!partList.length}>{running ? 'Stop' : results ? 'Nest Again' : 'Nest'}</button>
+          <button style={{ ...S.btn, ...S.secondary }} onClick={running ? () => { cancelled.current = true; } : () => nest()} disabled={!partList.length}
+            title={anyLocked ? 'Start over: a fresh nest, locks and hand moves dropped' : undefined}>{running ? 'Stop' : results ? 'Nest Again' : 'Nest'}</button>
+          {anyLocked && !running && (
+            <button style={{ ...S.btn, ...S.secondary, color:'#aaccff', borderColor:'#5577aa' }} onClick={() => nest(true)}
+              title="Keep the locked parts where they are and nest everything else around them">🔒 Re-nest Unlocked</button>
+          )}
           <button style={{ ...S.btn, ...S.primary, opacity: allSheets.length && !running ? 1 : 0.5 }} onClick={apply} disabled={!allSheets.length || running}
             title="Lay the sheets out in the drawing with a Plasma Cut each (replaces the previous nest, and the drawing's copies of parts taken from it)">Apply</button>
         </div>
