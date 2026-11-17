@@ -702,7 +702,7 @@ export async function nestSheets(parts, sheetSizes, opts = {}) {
   const res = await nestFromLeft(parts.map(p => ({ ...p, outline: loop(p.outline), lead: flipLead(p.lead) })), sheetSizes, opts);
   return {
     ...res,
-    parts: res.parts.map(p => ({ ...p, cx: fx ? -p.cx : p.cx, cy: fy ? -p.cy : p.cy, local: loop(p.local) })),
+    parts: res.parts.map(p => ({ ...p, cx: fx ? -p.cx : p.cx, cy: fy ? -p.cy : p.cy, local: loop(p.local), shape: loop(p.shape), coarse: loop(p.coarse), cutShape: loop(p.cutShape) })),
     sheets: res.sheets.map(sh => ({
       ...sh,
       placements: sh.placements.map(({ left, right, bottom, ...pl }) => ({
@@ -799,6 +799,44 @@ async function nestFromLeft(parts, sheetSizes, opts) {
     placed: placedCount,
     unplaced: prepared.map(p => (p.fill ? 0 : remaining[p.index])),
   };
+}
+
+/**
+ * Placements that break the nest's rules — for parts moved by hand. A part
+ * is in conflict when its nesting shape (cut + half the spacing, lead-in
+ * and pierce clearance included) overlaps another's, or its cut comes
+ * closer than `margin` to the sheet edge. parts: nestSheets' prepared parts;
+ * sheet: { w, l }. opts: { only: check just that placement (a part being
+ * dragged), skip: leave that one out }. Returns a Set of placement indexes.
+ */
+export function nestConflicts(parts, sheet, margin, placements, { only = null, skip = null } = {}) {
+  const use = i => i !== skip;
+  const items = placements.map(pl => {
+    const p = parts[pl.part];
+    const at = pts => rotatePts(pts, pl.angle).map(q => ({ x: q.x + pl.x, y: q.y + pl.y }));
+    const shape = at(p.shape);
+    return { path: toInt(shape), box: bboxOf(shape), cut: bboxOf(at(p.cutShape)) };
+  });
+  const bad = new Set();
+  const tol = 0.01;
+  items.forEach((it, i) => {
+    if (!use(i) || (only != null && i !== only)) return;
+    const c = it.cut;
+    if (c.minX < margin - tol || c.minY < margin - tol || c.maxX > sheet.w - margin + tol || c.maxY > sheet.l - margin + tol) bad.add(i);
+  });
+  for (let i = 0; i < items.length; i++) for (let j = i + 1; j < items.length; j++) {
+    if (!use(i) || !use(j) || (only != null && i !== only && j !== only)) continue;
+    const a = items[i].box, b = items[j].box;
+    if (a.maxX <= b.minX || b.maxX <= a.minX || a.maxY <= b.minY || b.maxY <= a.minY) continue;
+    const c = new ClipperLib.Clipper();
+    c.AddPath(items[i].path, ClipperLib.PolyType.ptSubject, true);
+    c.AddPath(items[j].path, ClipperLib.PolyType.ptClip, true);
+    const out = new ClipperLib.Paths();
+    c.Execute(ClipperLib.ClipType.ctIntersection, out, ClipperLib.PolyFillType.pftNonZero, ClipperLib.PolyFillType.pftNonZero);
+    // Touching is fine (the nester packs parts edge to edge); more than a sliver isn't.
+    if (out.reduce((s, p) => s + Math.abs(ClipperLib.Clipper.Area(p)), 0) / (SCALE * SCALE) > 0.5) { bad.add(i); bad.add(j); }
+  }
+  return bad;
 }
 
 export const _test = { nfpPaths, makeRings, insideRings, intervalsOnLine, bestLattice, prepareParts, orient };

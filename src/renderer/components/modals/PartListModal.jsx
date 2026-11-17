@@ -5,7 +5,7 @@ import { parseSvg } from '../../svg/parser';
 import { translateEntity } from '../../cam/offsetEngine';
 import { nestPartsFromEntities, entityToProfile, generateToolpath } from '../../cam/toolpath';
 import { outsideLead } from '../../cam/plasmaToolpath';
-import { nestSheets } from '../../plasma/nesting';
+import { nestSheets, nestConflicts } from '../../plasma/nesting';
 import { placeEntity, placePoint } from '../../plasma/placement';
 import { loadPlasmaMaterials, findThickness, paramsFromThickness } from '../../plasma/plasmaMaterials';
 import { getDefaultParams } from '../../store/AppContext';
@@ -338,7 +338,7 @@ export default function PartListModal({ partList, entities, selectedEntityIds, a
           onProgress: f => setProgress((gi + f) / groups.size),
           cancelled: () => cancelled.current,
         });
-        out.push({ materialKey: key, materialId, thicknessId, materialName: `${material.name} ${thickness.label}`, thickness, cut, parts, leads: input.map(i => i.lead), res });
+        out.push({ materialKey: key, materialId, thicknessId, materialName: `${material.name} ${thickness.label}`, thickness, cut, parts, leads: input.map(i => i.lead), margin: mm.margin, res });
         g++;
         if (cancelled.current) break;
       }
@@ -347,13 +347,14 @@ export default function PartListModal({ partList, entities, selectedEntityIds, a
         setRunning(false);
         setResults(out);
         setSheetIdx(0);
+        setView(null);
         if (tableNote) setMessage(tableNote);
       }
     }
   }
 
   // Flattened sheet list across materials, for the tabs and Apply.
-  const allSheets = useMemo(() => (results || []).flatMap(gr => gr.res.sheets.map((sh, k) => ({ group: gr, sheet: sh, k }))), [results]);
+  const allSheets = useMemo(() => (results || []).flatMap((gr, gi) => gr.res.sheets.map((sh, k) => ({ group: gr, gi, sheet: sh, k }))), [results]);
   const placedById = useMemo(() => {
     const m = new Map();
     for (const gr of results || []) gr.parts.forEach((p, i) => m.set(p.id, gr.res.placed[i]));
@@ -363,6 +364,8 @@ export default function PartListModal({ partList, entities, selectedEntityIds, a
 
   function apply() {
     if (!allSheets.length) return;
+    const red = allSheets.reduce((n, { group, sheet }) => n + nestConflicts(group.res.parts, sheet, group.margin, sheet.placements).size, 0);
+    if (red && !window.confirm(`${red} part${red === 1 ? ' is' : 's are'} too close to another part or the sheet edge (red). Apply anyway?`)) return;
     const add = [], ops = [], sheetRects = [];
     // Parts taken from the drawing: the nest replaces the drawing's copies.
     const nested = new Set(allSheets.flatMap(({ group, sheet }) => sheet.placements.map(pl => group.parts[pl.part].id)));
@@ -419,23 +422,55 @@ export default function PartListModal({ partList, entities, selectedEntityIds, a
   }
 
   const current = allSheets[sheetIdx];
+  // Moving a part by hand: drag = { i, cx, cy, scale, orig, pl (live), base (the
+  // other parts' conflicts) } — committed to the results on release.
+  const [drag, setDrag] = useState(null);
+  const [sel, setSel] = useState(null);
+  useEffect(() => { setSel(null); setDrag(null); }, [sheetIdx, results?.length]);
+  const placements = useMemo(() => {
+    if (!current) return [];
+    return drag ? current.sheet.placements.map((p, i) => (i === drag.i ? drag.pl : p)) : current.sheet.placements;
+  }, [current, drag]);
+  const sheetConflicts = useMemo(() => (current ? nestConflicts(current.group.res.parts, current.sheet, current.group.margin, current.sheet.placements) : new Set()), [current]);
+  const conflicts = useMemo(() => {
+    if (!drag || !current) return sheetConflicts;
+    const live = nestConflicts(current.group.res.parts, current.sheet, current.group.margin, placements, { only: drag.i });
+    return new Set([...drag.base, ...live]);
+  }, [drag, current, placements, sheetConflicts]);
   const previewPaths = useMemo(() => {
     if (!current) return [];
     const { group, sheet } = current;
-    return sheet.placements.map(pl => {
+    return placements.map(pl => {
       const frame = group.res.parts[pl.part];
       const c = Math.cos(pl.angle), s = Math.sin(pl.angle);
       const d = pts => pts.map((q, i) => `${i ? 'L' : 'M'}${(q.x * c - q.y * s + pl.x).toFixed(2)},${(sheet.l - (q.x * s + q.y * c + pl.y)).toFixed(2)}`).join('');
       const lead = group.leads[pl.part];
       return { outline: d(frame.local) + 'Z', lead: lead ? d(lead.leadPts.map(q => ({ x: q.x - frame.cx, y: q.y - frame.cy }))) : null };
     });
-  }, [current]);
+  }, [current, placements]);
+
+  function setPlacement(i, pl) {
+    const { gi, k } = current;
+    setResults(rs => rs.map((gr, g) => (g !== gi ? gr : {
+      ...gr,
+      res: { ...gr.res, sheets: gr.res.sheets.map((sh, j) => (j !== k ? sh : { ...sh, placements: sh.placements.map((p, n) => (n === i ? pl : p)) })) },
+    })));
+  }
+  function startDrag(e, i) {
+    if (e.button !== 0) return;
+    e.stopPropagation();
+    svgRef.current.setPointerCapture(e.pointerId);
+    setSel(i);
+    const orig = current.sheet.placements[i];
+    const base = nestConflicts(current.group.res.parts, current.sheet, current.group.margin, current.sheet.placements, { skip: i });
+    setDrag({ i, cx: e.clientX, cy: e.clientY, scale: svgRef.current.getScreenCTM().a, orig, pl: orig, base });
+  }
 
   // Sheet view zoom and pan: a viewBox (mm, y down); null = the whole sheet.
   const svgRef = useRef(null);
   const [view, setView] = useState(null);
   const [pan, setPan] = useState(null);
-  useEffect(() => setView(null), [sheetIdx, results]);
+  useEffect(() => setView(null), [sheetIdx]);
   const fitBox = current ? { x: -current.sheet.w * 0.01, y: -current.sheet.l * 0.01, w: current.sheet.w * 1.02, h: current.sheet.l * 1.02 } : null;
   const vb = view || fitBox;
   const zoom = vb && fitBox ? fitBox.w / vb.w : 1;
@@ -464,15 +499,28 @@ export default function PartListModal({ partList, entities, selectedEntityIds, a
   });
   function startPan(e) {
     if (e.button !== 0 && e.button !== 1) return;
+    if (e.button === 0) setSel(null);
     e.currentTarget.setPointerCapture(e.pointerId);
     setPan({ cx: e.clientX, cy: e.clientY, b: vb, scale: svgRef.current.getScreenCTM().a });
   }
   function movePan(e) {
+    if (drag) {
+      // Screen y runs down, the sheet's y up.
+      const dx = (e.clientX - drag.cx) / drag.scale, dy = (e.clientY - drag.cy) / drag.scale;
+      setDrag(d => ({ ...d, pl: { ...d.orig, x: d.orig.x + dx, y: d.orig.y - dy } }));
+      return;
+    }
     if (!pan) return;
     const dx = (e.clientX - pan.cx) / pan.scale, dy = (e.clientY - pan.cy) / pan.scale;
     setView({ ...pan.b, x: pan.b.x - dx, y: pan.b.y - dy });
   }
-  const endPan = () => setPan(null);
+  const endPan = () => {
+    if (drag) {
+      if (drag.pl.x !== drag.orig.x || drag.pl.y !== drag.orig.y) setPlacement(drag.i, drag.pl);
+      setDrag(null);
+    }
+    setPan(null);
+  };
 
   return (
     <div style={S.overlay}>
@@ -615,10 +663,14 @@ export default function PartListModal({ partList, entities, selectedEntityIds, a
             <div style={{ flex:1, minHeight:0 }}>
               {current ? (
                 <svg ref={svgRef} viewBox={`${vb.x} ${vb.y} ${vb.w} ${vb.h}`} style={{ width:'100%', height:'100%', display:'block', cursor: pan ? 'grabbing' : 'grab', touchAction:'none' }}
-                  onPointerDown={startPan} onPointerMove={movePan} onPointerUp={endPan} onPointerCancel={endPan} onDoubleClick={() => setView(null)}>
+                  onPointerDown={startPan} onPointerMove={movePan} onPointerUp={endPan} onPointerCancel={endPan} onDoubleClick={e => { if (e.target.tagName !== 'path') setView(null); }}>
                   <rect x={0} y={0} width={current.sheet.w} height={current.sheet.l} fill="#1c1c30" stroke="#666699" strokeWidth={1.5} vectorEffect="non-scaling-stroke" />
-                  {previewPaths.map((p, i) => <path key={i} d={p.outline} fill="rgba(80,200,110,0.35)" stroke="#55dd77" strokeWidth={1} vectorEffect="non-scaling-stroke" />)}
-                  {previewPaths.map((p, i) => p.lead && <path key={`l${i}`} d={p.lead} fill="none" stroke="#ffaa44" strokeWidth={1.5} vectorEffect="non-scaling-stroke" />)}
+                  {previewPaths.map((p, i) => {
+                    const bad = conflicts.has(i);
+                    return <path key={i} d={p.outline} fill={bad ? 'rgba(230,70,70,0.45)' : 'rgba(80,200,110,0.35)'} stroke={i === sel ? '#ffffff' : bad ? '#ff6666' : '#55dd77'}
+                      strokeWidth={i === sel ? 2 : 1} vectorEffect="non-scaling-stroke" style={{ cursor: drag?.i === i ? 'grabbing' : 'move' }} onPointerDown={e => startDrag(e, i)} />;
+                  })}
+                  {previewPaths.map((p, i) => p.lead && <path key={`l${i}`} d={p.lead} fill="none" stroke="#ffaa44" strokeWidth={1.5} vectorEffect="non-scaling-stroke" pointerEvents="none" />)}
                 </svg>
               ) : (
                 <div style={{ fontSize:12, color:'#666688', padding:20 }}>{running ? `Nesting… ${Math.round(progress * 100)}%` : 'Set quantities and materials, then click Nest.'}</div>
@@ -627,9 +679,10 @@ export default function PartListModal({ partList, entities, selectedEntityIds, a
             {current && (
               <div style={{ fontSize:11, color:'#aaaacc', marginTop:6 }}>
                 Sheet {sheetIdx + 1} of {allSheets.length}: {fmt(current.sheet.w)} × {fmt(current.sheet.l)} · {current.sheet.placements.length} parts · {(current.sheet.utilization * 100).toFixed(1)}% used
+                {conflicts.size > 0 && <span style={{ color:'#ff7777' }}> · ⚠ {conflicts.size} too close (red)</span>}
                 {running && <> · Nesting… {Math.round(progress * 100)}%</>}
                 <span style={{ float:'right', color:'#666688' }}>
-                  wheel = zoom · drag = pan · {Math.round(zoom * 100)}%{' '}
+                  drag a part to move it · wheel = zoom · drag the sheet = pan · {Math.round(zoom * 100)}%{' '}
                   <button style={S.link} onClick={() => setView(null)} title="Whole sheet (or double-click)">Fit</button>
                 </span>
               </div>
